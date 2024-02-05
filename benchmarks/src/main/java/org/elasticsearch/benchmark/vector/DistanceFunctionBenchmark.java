@@ -50,16 +50,16 @@ import java.util.function.Consumer;
 @State(Scope.Benchmark)
 public class DistanceFunctionBenchmark {
 
-    @Param({ "float", "byte" })
+    @Param({ "float" })
     private String element;
 
-    @Param({ "96" })
+    @Param({ "96" , "300", "768", "1024", "2048"})
     private int dims;
 
-    @Param({ "dot", "cosine", "l1", "l2" })
+    @Param({ "dot" })
     private String function;
 
-    @Param({ "knn", "binary" })
+    @Param({ "knn", "binary", "a-knn" })
     private String type;
 
     private abstract static class BenchmarkFunction {
@@ -219,6 +219,21 @@ public class DistanceFunctionBenchmark {
         @Override
         public void execute(Consumer<Object> consumer) {
             new KnnDenseVector(docVector).dotProduct(queryVector);
+        }
+    }
+
+    private static class ApproximateDotKnnFloatBenchmarkFunction extends KnnFloatBenchmarkFunction {
+
+        private final LuceneVectorUtilSupport.FloatApproximateDotProductFunction approximateFunction;
+
+        private ApproximateDotKnnFloatBenchmarkFunction(int dims) {
+            super(dims, false);
+            this.approximateFunction = new LuceneVectorUtilSupport.RandomProjectionsApproximateDotProductFunction();
+        }
+
+        @Override
+        public void execute(Consumer<Object> consumer) {
+            this.approximateFunction.approximateDotProduct(queryVector, docVector);
         }
     }
 
@@ -411,6 +426,7 @@ public class DistanceFunctionBenchmark {
                 switch (function) {
                     case "dot" -> benchmarkFunction = switch (type) {
                         case "knn" -> new DotKnnFloatBenchmarkFunction(dims);
+                        case "a-knn" -> new ApproximateDotKnnFloatBenchmarkFunction(dims);
                         case "binary" -> new DotBinaryFloatBenchmarkFunction(dims);
                         default -> throw new UnsupportedOperationException("unexpected type [" + type + "]");
                     };
