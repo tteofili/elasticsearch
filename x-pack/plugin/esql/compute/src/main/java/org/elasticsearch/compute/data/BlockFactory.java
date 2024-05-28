@@ -386,4 +386,8 @@ public class BlockFactory {
     public long maxPrimitiveArrayBytes() {
         return maxPrimitiveArrayBytes;
     }
+
+    public Block.Builder newDenseVectorBuilder(int positions) {
+        return null;
+    }
 }

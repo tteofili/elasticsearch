@@ -29,6 +29,8 @@ public enum ElementType {
      */
     DOC(DocBlock::newBlockBuilder),
 
+    DENSE_VECTOR(BlockFactory::newDoubleBlockBuilder),
+
     /**
      * Intermediate blocks which don't support retrieving elements.
      */

@@ -244,6 +244,12 @@ public interface EsqlBaseParserVisitor<T> extends ParseTreeVisitor<T> {
    */
   T visitRetrieveWhere(EsqlBaseParser.RetrieveWhereContext ctx);
   /**
+   * Visit a parse tree produced by {@link EsqlBaseParser#retrieveKnn}.
+   * @param ctx the parse tree
+   * @return the visitor result
+   */
+  T visitRetrieveKnn(EsqlBaseParser.RetrieveKnnContext ctx);
+  /**
    * Visit a parse tree produced by {@link EsqlBaseParser#retrieveOptions}.
    * @param ctx the parse tree
    * @return the visitor result

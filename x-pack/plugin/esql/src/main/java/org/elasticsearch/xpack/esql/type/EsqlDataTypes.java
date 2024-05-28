@@ -22,6 +22,7 @@ import static java.util.stream.Collectors.toUnmodifiableMap;
 import static org.elasticsearch.xpack.ql.type.DataTypes.BOOLEAN;
 import static org.elasticsearch.xpack.ql.type.DataTypes.BYTE;
 import static org.elasticsearch.xpack.ql.type.DataTypes.DATETIME;
+import static org.elasticsearch.xpack.ql.type.DataTypes.DENSE_VECTOR;
 import static org.elasticsearch.xpack.ql.type.DataTypes.DOUBLE;
 import static org.elasticsearch.xpack.ql.type.DataTypes.FLOAT;
 import static org.elasticsearch.xpack.ql.type.DataTypes.HALF_FLOAT;
@@ -76,7 +77,8 @@ public final class EsqlDataTypes {
         GEO_POINT,
         CARTESIAN_POINT,
         CARTESIAN_SHAPE,
-        GEO_SHAPE
+        GEO_SHAPE,
+        DENSE_VECTOR
     ).sorted(Comparator.comparing(DataType::typeName)).toList();
 
     private static final Map<String, DataType> NAME_TO_TYPE = TYPES.stream().collect(toUnmodifiableMap(DataType::typeName, t -> t));

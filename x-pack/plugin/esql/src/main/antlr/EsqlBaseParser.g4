@@ -131,7 +131,7 @@ metadata
     ;
 
 retrieveCommand
-    : RETRIEVE retrieveIdentifier (COMMA retrieveIdentifier)* retrieveWhere? retrieveMetadata? retrieveOptions?
+    : RETRIEVE retrieveIdentifier (COMMA retrieveIdentifier)* retrieveWhere? retrieveKnn? retrieveMetadata? retrieveOptions?
     ;
 
 retrieveIdentifier
@@ -141,6 +141,10 @@ retrieveIdentifier
 
 retrieveWhere
     : RETRIEVE_WHERE MATCH retrieveIdentifier COMMA string
+    ;
+
+retrieveKnn
+    : KNN retrieveIdentifier COMMA string
     ;
 
 retrieveOptions

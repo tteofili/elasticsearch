@@ -19,7 +19,7 @@ import java.util.List;
 
 public interface EstimatesRowSize {
     static PhysicalPlan estimateRowSize(int extraRowSize, PhysicalPlan plan) {
-        EstimatesRowSize.State state = new EstimatesRowSize.State();
+        State state = new State();
         state.maxEstimatedRowSize = state.estimatedRowSize = extraRowSize;
         return plan.transformDown(exec -> {
             if (exec instanceof EstimatesRowSize r) {
@@ -117,6 +117,7 @@ public interface EstimatesRowSize {
             case INT -> Integer.BYTES;
             case LONG -> Long.BYTES;
             case NULL -> 0;
+            case DENSE_VECTOR -> 1024;
             case UNKNOWN -> throw new EsqlIllegalArgumentException("[unknown] can't be the result of field extraction");
         };
     }

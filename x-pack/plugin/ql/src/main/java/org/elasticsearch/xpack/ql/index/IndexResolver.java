@@ -28,6 +28,7 @@ import org.elasticsearch.xpack.ql.QlIllegalArgumentException;
 import org.elasticsearch.xpack.ql.type.DataType;
 import org.elasticsearch.xpack.ql.type.DataTypeRegistry;
 import org.elasticsearch.xpack.ql.type.DateEsField;
+import org.elasticsearch.xpack.ql.type.DenseVectorEsField;
 import org.elasticsearch.xpack.ql.type.EsField;
 import org.elasticsearch.xpack.ql.type.InvalidMappedField;
 import org.elasticsearch.xpack.ql.type.KeywordEsField;
@@ -66,6 +67,7 @@ import static org.elasticsearch.common.Strings.hasText;
 import static org.elasticsearch.common.regex.Regex.simpleMatch;
 import static org.elasticsearch.transport.RemoteClusterAware.buildRemoteIndexName;
 import static org.elasticsearch.xpack.ql.type.DataTypes.DATETIME;
+import static org.elasticsearch.xpack.ql.type.DataTypes.DENSE_VECTOR;
 import static org.elasticsearch.xpack.ql.type.DataTypes.KEYWORD;
 import static org.elasticsearch.xpack.ql.type.DataTypes.OBJECT;
 import static org.elasticsearch.xpack.ql.type.DataTypes.TEXT;
@@ -634,6 +636,9 @@ public class IndexResolver {
         }
         if (esType == DATETIME) {
             return DateEsField.dateEsField(fieldName, props, isAggregateable);
+        }
+        if (esType == DENSE_VECTOR) {
+            return new DenseVectorEsField(fieldName, props, isAggregateable);
         }
         if (esType == UNSUPPORTED) {
             String originalType = metricType == TimeSeriesParams.MetricType.COUNTER ? "counter" : typeName;

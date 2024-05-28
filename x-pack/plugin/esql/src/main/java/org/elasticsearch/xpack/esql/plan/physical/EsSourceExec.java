@@ -8,13 +8,13 @@
 package org.elasticsearch.xpack.esql.plan.physical;
 
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.search.vectors.KnnVectorQueryBuilder;
 import org.elasticsearch.xpack.esql.plan.logical.EsRelationWithFilter;
 import org.elasticsearch.xpack.ql.expression.Attribute;
 import org.elasticsearch.xpack.ql.expression.FieldAttribute;
 import org.elasticsearch.xpack.ql.expression.predicate.fulltext.MatchQueryPredicate;
 import org.elasticsearch.xpack.ql.index.EsIndex;
 import org.elasticsearch.xpack.ql.plan.logical.EsRelation;
-import org.elasticsearch.xpack.ql.planner.TranslatorHandler;
 import org.elasticsearch.xpack.ql.tree.NodeInfo;
 import org.elasticsearch.xpack.ql.tree.NodeUtils;
 import org.elasticsearch.xpack.ql.tree.Source;
@@ -42,14 +42,38 @@ public class EsSourceExec extends LeafExec {
         if (relation instanceof EsRelationWithFilter) {
             String fieldName = ((EsRelationWithFilter) relation).getFieldName();
             String queryString = ((EsRelationWithFilter) relation).getQueryString();
-
             if (fieldName != null && queryString != null) {
-                FieldAttribute fa = new FieldAttribute(EMPTY, fieldName, new EsField(fieldName, TEXT, emptyMap(), true));
-                MatchQueryPredicate mmqp = new MatchQueryPredicate(relation.source(), fa, queryString, "");
-                this.query = TRANSLATOR_HANDLER.asQuery(mmqp).asBuilder();
-                this.withScores = true;
+                float[] queryVector;
+                if ((queryVector = asVector(queryString)) != null) {
+                    Integer numCands = 10;
+                    Float similarity = 0.9f;
+                    this.query = new KnnVectorQueryBuilder(fieldName, queryVector, numCands, similarity);
+                    this.withScores = true;
+                } else {
+                    FieldAttribute fa = new FieldAttribute(EMPTY, fieldName, new EsField(fieldName, TEXT, emptyMap(), true));
+                    MatchQueryPredicate mmqp = new MatchQueryPredicate(relation.source(), fa, queryString, "");
+                    this.query = TRANSLATOR_HANDLER.asQuery(mmqp).asBuilder();
+                    this.withScores = true;
+                }
             }
         }
+    }
+
+    private float[] asVector(String queryString) {
+        float[] vector = null;
+        try {
+            String[] valuesArray = queryString
+                .replaceFirst("\\[", "")
+                .replaceFirst("]", "")
+                .split("\\s*,\\s*");
+            vector = new float[valuesArray.length];
+            for (int i = 0; i < valuesArray.length; i++) {
+                vector[i] = Float.parseFloat(valuesArray[i]);
+            }
+        } catch (Throwable t) {
+            // ignore
+        }
+        return vector;
     }
 
     public EsSourceExec(Source source, EsIndex index, List<Attribute> attributes, QueryBuilder query) {

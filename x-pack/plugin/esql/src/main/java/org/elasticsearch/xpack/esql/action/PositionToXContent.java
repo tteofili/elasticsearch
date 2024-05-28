@@ -133,6 +133,12 @@ abstract class PositionToXContent {
                     return builder.value(((BooleanBlock) block).getBoolean(valueIndex));
                 }
             };
+            case "dense_vector" -> new PositionToXContent(block) {
+                @Override
+                protected XContentBuilder valueToXContent(XContentBuilder builder, ToXContent.Params params, int valueIndex) throws IOException {
+                    return null;
+                }
+            };
             case "version" -> new PositionToXContent(block) {
                 @Override
                 protected XContentBuilder valueToXContent(XContentBuilder builder, ToXContent.Params params, int valueIndex)

@@ -53,6 +53,7 @@ public final class DataTypes {
     // complex types
     public static final DataType OBJECT           = new DataType("object",            0,                 false, false, false);
     public static final DataType NESTED           = new DataType("nested",            0,                 false, false, false);
+    public static final DataType DENSE_VECTOR     = new DataType("dense_vector",      Integer.MAX_VALUE,      false, false, false);
     //end::noformat
     public static final DataType SOURCE = new DataType(
         SourceFieldMapper.NAME,

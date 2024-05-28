@@ -234,6 +234,7 @@ RETRIEVE_OPTIONS : 'options';
 RETRIEVE_METADATA : 'metadata';
 RETRIEVE_WHERE: 'where';
 MATCH: 'match';
+KNN: 'knn';
 
 fragment RETRIEVE_UNQUOTED_IDENTIFIER_PART
     : ~[=`|,[\]/ \t\r\n]

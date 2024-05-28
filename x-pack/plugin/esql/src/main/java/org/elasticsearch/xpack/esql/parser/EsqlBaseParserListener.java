@@ -402,6 +402,16 @@ public interface EsqlBaseParserListener extends ParseTreeListener {
    */
   void exitRetrieveWhere(EsqlBaseParser.RetrieveWhereContext ctx);
   /**
+   * Enter a parse tree produced by {@link EsqlBaseParser#retrieveKnn}.
+   * @param ctx the parse tree
+   */
+  void enterRetrieveKnn(EsqlBaseParser.RetrieveKnnContext ctx);
+  /**
+   * Exit a parse tree produced by {@link EsqlBaseParser#retrieveKnn}.
+   * @param ctx the parse tree
+   */
+  void exitRetrieveKnn(EsqlBaseParser.RetrieveKnnContext ctx);
+  /**
    * Enter a parse tree produced by {@link EsqlBaseParser#retrieveOptions}.
    * @param ctx the parse tree
    */
