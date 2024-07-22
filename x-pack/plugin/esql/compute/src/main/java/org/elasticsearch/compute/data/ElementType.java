@@ -31,6 +31,11 @@ public enum ElementType {
     DOC(DocBlock::newBlockBuilder),
 
     /**
+     * Dense vector type.
+     */
+    DENSE_VECTOR(BlockFactory::newDoubleVectorVectorBlockBuilder),
+
+    /**
      * Composite blocks which contain array of sub-blocks.
      */
     COMPOSITE((blockFactory, estimatedSize) -> { throw new UnsupportedOperationException("can't build composite blocks"); }),
