@@ -81,7 +81,8 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
                     query,
                     queryExec.limit(),
                     queryExec.sorts(),
-                    queryExec.estimatedRowSize()
+                    queryExec.estimatedRowSize(),
+                    queryExec.rescorers()
                 );
                 if (nonPushable.size() > 0) { // update filter with remaining non-pushable conditions
                     plan = new FilterExec(filterExec.source(), queryExec, Predicates.combineAnd(nonPushable));

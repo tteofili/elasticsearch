@@ -60,6 +60,24 @@ public class MatchOperatorIT extends AbstractEsqlIntegTestCase {
         }
     }
 
+    public void testWhereMatchWithScoring() {
+        var query = """
+            FROM test
+            METADATA _score
+            | WHERE qstr("content: fox")
+            | KEEP id, _score
+            """;
+
+        try (var resp = run(query)) {
+            assertThat(resp.columns().stream().map(ColumnInfoImpl::name).toList(), equalTo(List.of("id", "_score")));
+            assertThat(resp.columns().stream().map(ColumnInfoImpl::type).map(DataType::toString).toList(), equalTo(List.of("INTEGER",
+                "DOUBLE")));
+            // values
+            List<List<Object>> values = getValuesList(resp);
+            assertMap(values, matchesList().item(List.of(1)).item(List.of(6)));
+        }
+    }
+
     public void testCombinedWhereMatch() {
         var query = """
             FROM test

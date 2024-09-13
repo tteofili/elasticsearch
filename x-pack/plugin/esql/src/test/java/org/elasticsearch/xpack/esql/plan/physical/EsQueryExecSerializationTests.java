@@ -37,7 +37,7 @@ public class EsQueryExecSerializationTests extends AbstractPhysicalPlanSerializa
         Expression limit = new Literal(randomSource(), between(0, Integer.MAX_VALUE), DataType.INTEGER);
         List<EsQueryExec.FieldSort> sorts = randomFieldSorts();
         Integer estimatedRowSize = randomEstimatedRowSize();
-        return new EsQueryExec(source, index, indexMode, attrs, query, limit, sorts, estimatedRowSize);
+        return new EsQueryExec(source, index, indexMode, attrs, query, limit, sorts, estimatedRowSize, null);
     }
 
     public static QueryBuilder randomQuery() {
@@ -84,7 +84,7 @@ public class EsQueryExecSerializationTests extends AbstractPhysicalPlanSerializa
                 AbstractPhysicalPlanSerializationTests::randomEstimatedRowSize
             );
         }
-        return new EsQueryExec(instance.source(), index, indexMode, attrs, query, limit, sorts, estimatedRowSize);
+        return new EsQueryExec(instance.source(), index, indexMode, attrs, query, limit, sorts, estimatedRowSize, null);
     }
 
     @Override

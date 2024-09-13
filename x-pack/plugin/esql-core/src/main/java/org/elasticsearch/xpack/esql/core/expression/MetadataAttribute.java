@@ -49,7 +49,9 @@ public class MetadataAttribute extends TypedAttribute {
         SourceFieldMapper.NAME,
         tuple(DataType.SOURCE, false),
         IndexModeFieldMapper.NAME,
-        tuple(DataType.KEYWORD, true)
+        tuple(DataType.KEYWORD, true),
+        "_score",
+        tuple(DataType.FLOAT, false)
     );
 
     private final boolean searchable;
