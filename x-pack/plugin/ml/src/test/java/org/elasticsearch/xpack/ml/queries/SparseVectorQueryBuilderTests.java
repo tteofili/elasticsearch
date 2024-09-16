@@ -31,6 +31,7 @@ import org.elasticsearch.index.IndexVersions;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.extras.MapperExtrasPlugin;
 import org.elasticsearch.index.query.QueryBuilder;
+import org.elasticsearch.index.query.QueryShardException;
 import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.test.AbstractQueryTestCase;
@@ -52,6 +53,7 @@ import java.util.List;
 
 import static org.elasticsearch.xpack.ml.queries.SparseVectorQueryBuilder.QUERY_VECTOR_FIELD;
 import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.either;
 import static org.hamcrest.Matchers.hasSize;
 
@@ -330,5 +332,23 @@ public class SparseVectorQueryBuilderTests extends AbstractQueryTestCase<SparseV
         assertTrue(rewrittenQueryBuilder instanceof SparseVectorQueryBuilder);
         assertEquals(queryBuilder.shouldPruneTokens(), ((SparseVectorQueryBuilder) rewrittenQueryBuilder).shouldPruneTokens());
         assertNotNull(((SparseVectorQueryBuilder) rewrittenQueryBuilder).getQueryVectors());
+    }
+
+
+    public void testNonexistentField() {
+        SearchExecutionContext context = createSearchExecutionContext();
+        TokenPruningConfig TokenPruningConfig = randomBoolean() ? new TokenPruningConfig(2, 0.3f, false) : null;
+        SparseVectorQueryBuilder query = createTestQueryBuilder(TokenPruningConfig);
+        context.setAllowUnmappedFields(false);
+        QueryShardException qse = expectThrows(QueryShardException.class, () -> query.doToQuery(context));
+        assertThat(qse.getMessage(), containsString("No field mapping can be found for the field with name [nonexistent]"));
+    }
+
+    public void testNonexistentFieldReturnEmpty() throws IOException {
+        SearchExecutionContext context = createSearchExecutionContext();
+        TokenPruningConfig TokenPruningConfig = randomBoolean() ? new TokenPruningConfig(2, 0.3f, false) : null;
+        SparseVectorQueryBuilder query = createTestQueryBuilder(TokenPruningConfig);
+        Query queryNone = query.doToQuery(context);
+        assertThat(queryNone, instanceOf(MatchNoDocsQuery.class));
     }
 }
