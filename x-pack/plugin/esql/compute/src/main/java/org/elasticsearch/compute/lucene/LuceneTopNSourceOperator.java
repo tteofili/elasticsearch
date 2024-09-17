@@ -21,6 +21,7 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.compute.data.DocBlock;
 import org.elasticsearch.compute.data.DocVector;
+import org.elasticsearch.compute.data.DoubleVector;
 import org.elasticsearch.compute.data.IntBlock;
 import org.elasticsearch.compute.data.IntVector;
 import org.elasticsearch.compute.data.Page;

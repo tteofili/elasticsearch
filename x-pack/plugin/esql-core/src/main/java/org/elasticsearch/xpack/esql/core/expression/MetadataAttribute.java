@@ -30,6 +30,7 @@ import static org.elasticsearch.core.Tuple.tuple;
 public class MetadataAttribute extends TypedAttribute {
     public static final String TIMESTAMP_FIELD = "@timestamp";
     public static final String TSID_FIELD = "_tsid";
+    public static final String SCORE = "_score";
 
     static final NamedWriteableRegistry.Entry ENTRY = new NamedWriteableRegistry.Entry(
         Attribute.class,
@@ -50,7 +51,7 @@ public class MetadataAttribute extends TypedAttribute {
         tuple(DataType.SOURCE, false),
         IndexModeFieldMapper.NAME,
         tuple(DataType.KEYWORD, true),
-        "_score",
+        SCORE,
         tuple(DataType.FLOAT, false)
     );
 

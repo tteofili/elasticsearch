@@ -71,10 +71,10 @@ public class MatchOperatorIT extends AbstractEsqlIntegTestCase {
         try (var resp = run(query)) {
             assertThat(resp.columns().stream().map(ColumnInfoImpl::name).toList(), equalTo(List.of("id", "_score")));
             assertThat(resp.columns().stream().map(ColumnInfoImpl::type).map(DataType::toString).toList(), equalTo(List.of("INTEGER",
-                "DOUBLE")));
+                "FLOAT")));
             // values
             List<List<Object>> values = getValuesList(resp);
-            assertMap(values, matchesList().item(List.of(1)).item(List.of(6)));
+            assertMap(values, matchesList().item(List.of(1, 1.1565589F)).item(List.of(6, 0.9114002F)));
         }
     }
 
