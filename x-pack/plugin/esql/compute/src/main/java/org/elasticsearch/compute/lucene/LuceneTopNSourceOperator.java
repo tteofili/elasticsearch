@@ -21,7 +21,6 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.compute.data.DocBlock;
 import org.elasticsearch.compute.data.DocVector;
-import org.elasticsearch.compute.data.DoubleVector;
 import org.elasticsearch.compute.data.IntBlock;
 import org.elasticsearch.compute.data.IntVector;
 import org.elasticsearch.compute.data.Page;
@@ -174,7 +173,7 @@ public class LuceneTopNSourceOperator extends LuceneOperator {
             assert isEmitting() == false : "offset=" + offset + " score_docs=" + Arrays.toString(scoreDocs);
             offset = 0;
             if (perShardCollector != null) {
-                scoreDocs = maybeRescoreDocuments(perShardCollector.shardContext, perShardCollector.topFieldCollector.topDocs());
+                scoreDocs = perShardCollector.topFieldCollector.topDocs().scoreDocs;
             } else {
                 scoreDocs = new ScoreDoc[0];
             }
@@ -216,10 +215,6 @@ public class LuceneTopNSourceOperator extends LuceneOperator {
         }
         pagesEmitted++;
         return page;
-    }
-
-    protected ScoreDoc[] maybeRescoreDocuments(ShardContext shardContext, TopDocs topDocs) {
-        return topDocs.scoreDocs;
     }
 
     protected IntVector.Builder scoreVectorOrNull(int size) {

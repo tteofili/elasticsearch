@@ -9,13 +9,10 @@ package org.elasticsearch.compute.lucene;
 
 import org.apache.lucene.search.FieldDoc;
 import org.apache.lucene.search.Query;
-import org.apache.lucene.search.QueryRescorer;
-import org.apache.lucene.search.Rescorer;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
-import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.Weight;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.compute.data.Block;
@@ -43,8 +40,6 @@ public final class ScoringLuceneTopNSourceOperator extends LuceneTopNSourceOpera
 
     public static class Factory extends LuceneTopNSourceOperator.Factory {
 
-        private final List<Function<ShardContext, Query>> rescoreQuerySuppliers;
-
         public Factory(
             List<? extends ShardContext> contexts,
             Function<ShardContext, Query> queryFunction,
@@ -56,7 +51,6 @@ public final class ScoringLuceneTopNSourceOperator extends LuceneTopNSourceOpera
             List<Function<ShardContext, Query>> rescoreQuerySuppliers
         ) {
             super(contexts, queryFunction, dataPartitioning, taskConcurrency, maxPageSize, limit, sorts, ScoreMode.TOP_DOCS_WITH_SCORES);
-            this.rescoreQuerySuppliers = rescoreQuerySuppliers;
         }
 
         @Override
@@ -66,8 +60,7 @@ public final class ScoringLuceneTopNSourceOperator extends LuceneTopNSourceOpera
                 maxPageSize,
                 sorts,
                 limit,
-                sliceQueue,
-                rescoreQuerySuppliers
+                sliceQueue
             );
         }
 
@@ -100,18 +93,14 @@ public final class ScoringLuceneTopNSourceOperator extends LuceneTopNSourceOpera
         }
     }
 
-    private final List<Function<ShardContext, Query>> rescoreQuerySuppliers;
-
     public ScoringLuceneTopNSourceOperator(
         BlockFactory blockFactory,
         int maxPageSize,
         List<SortBuilder<?>> sorts,
         int limit,
-        LuceneSliceQueue sliceQueue,
-        List<Function<ShardContext, Query>> rescorers
+        LuceneSliceQueue sliceQueue
     ) {
         super(blockFactory, maxPageSize, sorts, limit, sliceQueue);
-        this.rescoreQuerySuppliers = rescorers;
     }
 
     @Override
@@ -129,35 +118,6 @@ public final class ScoringLuceneTopNSourceOperator extends LuceneTopNSourceOpera
 
     protected Page maybeAppendScore(Page page, IntVector.Builder currentScoresBuilder) {
         return page.appendBlocks(new Block[] { currentScoresBuilder.build().asBlock() });
-    }
-
-    protected ScoreDoc[] maybeRescoreDocuments(ShardContext shardContext, TopDocs topDocs) {
-        if (rescoreQuerySuppliers == null || rescoreQuerySuppliers.isEmpty()) {
-            return topDocs.scoreDocs;
-        }
-
-        TopDocs rescoredTopDocs = topDocs;
-        for (var rescoreQuerySupplier : rescoreQuerySuppliers) {
-            var query = rescoreQuerySupplier.apply(shardContext);
-
-            Rescorer rescorer = new QueryRescorer(query) {
-                @Override
-                protected float combine(float firstPassScore, boolean secondPassMatches, float secondPassScore) {
-                    if (firstPassScore == 0.0F) {
-                        return 0.0F;
-                    }
-                    return secondPassScore;
-                }
-            };
-
-            try {
-                rescoredTopDocs = rescorer.rescore(shardContext.searcher(), rescoredTopDocs, limit);
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-        }
-
-        return Arrays.stream(rescoredTopDocs.scoreDocs).filter(scoreDoc -> scoreDoc.score > 0.0F).toArray(ScoreDoc[]::new);
     }
 
     float getScore(ScoreDoc scoreDoc) {
