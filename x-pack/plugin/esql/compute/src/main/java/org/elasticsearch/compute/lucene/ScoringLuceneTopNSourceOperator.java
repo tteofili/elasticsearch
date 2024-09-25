@@ -127,6 +127,7 @@ public final class ScoringLuceneTopNSourceOperator extends LuceneTopNSourceOpera
     static class ScoringPerShardCollector extends PerShardCollector {
         ScoringPerShardCollector(ShardContext shardContext, Sort sort, int limit) {
             this.shardContext = shardContext;
+            // TODO: numHits should be configurable
             this.topFieldCollector = new TopFieldCollectorManager(sort, 100, limit).newCollector();
         }
     }
