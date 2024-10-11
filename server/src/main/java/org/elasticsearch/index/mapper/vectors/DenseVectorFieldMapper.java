@@ -1581,7 +1581,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
             super(VectorIndexType.INT8_HNSW);
             this.m = m;
             this.efConstruction = efConstruction;
-            this.confidenceInterval = confidenceInterval;
+            this.confidenceInterval = 0f;
         }
 
         @Override
