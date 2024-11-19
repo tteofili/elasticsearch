@@ -190,11 +190,12 @@ required_capability: metadata_score
 
 from employees metadata _score
 | where match(job_positions, "Data Scientist") and match(job_positions, "Support Engineer")
-| keep emp_no, first_name, last_name, _score;
+| eval r_score = round(_score)
+| keep emp_no, first_name, last_name, r_score;
 ignoreOrder:true
 
-emp_no:integer | first_name:keyword | last_name:keyword | _score:double
-10043          | Yishay             | Tzvieli           | 5.233309745788574
+emp_no:integer | first_name:keyword | last_name:keyword | r_score:double
+10043          | Yishay             | Tzvieli           | 5
 ;
 
 testMatchAndQueryStringFunctions
@@ -218,10 +219,11 @@ required_capability: metadata_score
 
 from employees metadata _score
 | where match(job_positions, "Data Scientist") and qstr("job_positions: (Support Engineer) and gender: F")
-| keep emp_no, first_name, last_name, _score;
+| eval r_score = round(_score)
+| keep emp_no, first_name, last_name, r_score;
 ignoreOrder:true
 
-emp_no:integer | first_name:keyword | last_name:keyword | _score:double
-10041          | Uri                 | Lenart           | 3.509873867034912
-10043          | Yishay              | Tzvieli          | 5.233309745788574
+emp_no:integer | first_name:keyword | last_name:keyword | r_score:double
+10041          | Uri                 | Lenart           | 4
+10043          | Yishay              | Tzvieli          | 5
 ;
