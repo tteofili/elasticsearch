@@ -324,8 +324,8 @@ public final class LuceneTopNSourceOperator extends LuceneOperator {
     static final class ScoringPerShardCollector extends PerShardCollector {
 
         // TODO : make this configurable / inferrable?
-        private static final int MAX_HITS = 1_000;
-        private static final int TOTAL_HITS_THRESHOLD = 10_000;
+        private static final int MAX_HITS = 1_000_000;
+        private static final int TOTAL_HITS_THRESHOLD = 100_000;
 
         ScoringPerShardCollector(ShardContext shardContext, Sort sort, int limit) {
             super(shardContext, new TopScoreDocCollectorManager(Math.min(limit, MAX_HITS), TOTAL_HITS_THRESHOLD).newCollector());
