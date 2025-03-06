@@ -1395,20 +1395,23 @@ public class TransportSearchAction extends HandledTransportAction<SearchRequest,
         int numShards,
         int defaultPreFilterShardSize
     ) {
-        if (searchRequest.searchType() != QUERY_THEN_FETCH) {
+        if (searchRequest.searchType() == QUERY_THEN_FETCH ||
+            (searchRequest.searchType() == DFS_QUERY_THEN_FETCH && searchRequest.hasKnnSearch())) {
+            SearchSourceBuilder source = searchRequest.source();
+            Integer preFilterShardSize = searchRequest.getPreFilterShardSize();
+            if (preFilterShardSize == null) {
+                if (hasReadOnlyIndices(indices, projectState) || hasPrimaryFieldSort(source)) {
+                    preFilterShardSize = 1;
+                } else {
+                    preFilterShardSize = defaultPreFilterShardSize;
+                }
+            }
+            return preFilterShardSize < numShards && (SearchService.canRewriteToMatchNone(source) || hasPrimaryFieldSort(source)
+                || source.knnSearch().isEmpty() == false);
+        } else {
             // we can't do this for DFS it needs to fan out to all shards all the time
             return false;
         }
-        SearchSourceBuilder source = searchRequest.source();
-        Integer preFilterShardSize = searchRequest.getPreFilterShardSize();
-        if (preFilterShardSize == null) {
-            if (hasReadOnlyIndices(indices, projectState) || hasPrimaryFieldSort(source)) {
-                preFilterShardSize = 1;
-            } else {
-                preFilterShardSize = defaultPreFilterShardSize;
-            }
-        }
-        return preFilterShardSize < numShards && (SearchService.canRewriteToMatchNone(source) || hasPrimaryFieldSort(source));
     }
 
     private static boolean hasReadOnlyIndices(String[] indices, ProjectState projectState) {

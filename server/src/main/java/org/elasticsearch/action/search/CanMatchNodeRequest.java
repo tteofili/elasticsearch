@@ -19,6 +19,7 @@ import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.TimeValue;
+import org.elasticsearch.index.query.ExistsQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.search.aggregations.AggregationBuilder;
@@ -27,6 +28,7 @@ import org.elasticsearch.search.builder.SubSearchSourceBuilder;
 import org.elasticsearch.search.internal.AliasFilter;
 import org.elasticsearch.search.internal.ShardSearchContextId;
 import org.elasticsearch.search.internal.ShardSearchRequest;
+import org.elasticsearch.search.vectors.KnnSearchBuilder;
 import org.elasticsearch.tasks.Task;
 import org.elasticsearch.tasks.TaskId;
 import org.elasticsearch.transport.TransportRequest;
@@ -162,22 +164,34 @@ public class CanMatchNodeRequest extends TransportRequest implements IndicesRequ
     }
 
     private SearchSourceBuilder getCanMatchSource(SearchRequest searchRequest) {
-        // Aggregations may use a different query than the top-level search query. An example is
-        // the significant terms aggregation, which also collects data over a background that
-        // typically much larger than the search query. To accommodate for this, we take the union
-        // of all queries to determine whether a request can match.
-        List<QueryBuilder> aggregationQueries = new ArrayList<>();
-        if (searchRequest.source() != null && searchRequest.source().aggregations() != null) {
-            collectAggregationQueries(searchRequest.source().aggregations().getAggregatorFactories(), aggregationQueries);
-        }
-        if (aggregationQueries.isEmpty()) {
-            return searchRequest.source();
-        } else {
-            List<SubSearchSourceBuilder> subSearches = new ArrayList<>(searchRequest.source().subSearches());
-            for (QueryBuilder aggregationQuery : aggregationQueries) {
-                subSearches.add(new SubSearchSourceBuilder(aggregationQuery));
+        if (searchRequest.source().knnSearch().isEmpty() == false) {
+            //
+            if (searchRequest.source().query() != null) {
+                SearchSourceBuilder.searchSource().query(searchRequest.source().query());
+            }
+            List<SubSearchSourceBuilder> subSearches = new ArrayList<>(searchRequest.source().knnSearch().size());
+            for (KnnSearchBuilder knnSearchBuilder : searchRequest.source().knnSearch()) {
+
             }
             return searchRequest.source().shallowCopy().subSearches(subSearches);
+        } else {
+            // Aggregations may use a different query than the top-level search query. An example is
+            // the significant terms aggregation, which also collects data over a background that
+            // typically much larger than the search query. To accommodate for this, we take the union
+            // of all queries to determine whether a request can match.
+            List<QueryBuilder> aggregationQueries = new ArrayList<>();
+            if (searchRequest.source() != null && searchRequest.source().aggregations() != null) {
+                collectAggregationQueries(searchRequest.source().aggregations().getAggregatorFactories(), aggregationQueries);
+            }
+            if (aggregationQueries.isEmpty()) {
+                return searchRequest.source();
+            } else {
+                List<SubSearchSourceBuilder> subSearches = new ArrayList<>(searchRequest.source().subSearches());
+                for (QueryBuilder aggregationQuery : aggregationQueries) {
+                    subSearches.add(new SubSearchSourceBuilder(aggregationQuery));
+                }
+                return searchRequest.source().shallowCopy().subSearches(subSearches);
+            }
         }
     }
 
