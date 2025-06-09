@@ -20,7 +20,8 @@ import org.junit.ClassRule;
 public class IcuClientYamlTestSuiteIT extends ESClientYamlSuiteTestCase {
 
     @ClassRule
-    public static ElasticsearchCluster cluster = ElasticsearchCluster.local().plugin("analysis-icu").build();
+    public static ElasticsearchCluster cluster = ElasticsearchCluster.local()
+        .module("analysis-common").plugin("analysis-icu").build();
 
     public IcuClientYamlTestSuiteIT(@Name("yaml") ClientYamlTestCandidate testCandidate) {
         super(testCandidate);

@@ -103,3 +103,32 @@
     - match:  { tokens.1.token: foo }
     - match:  { tokens.2.token: bâr }
     - match:  { tokens.3.token: russ }
+---
+"Normalization charfilter korean with keyword tokenizer":
+  - do:
+      indices.analyze:
+        body:
+          tokenizer: keyword
+          text: 대 한 민 국
+          char_filter:
+            type: icu_normalizer
+            name: nfc
+            mode: decompose
+  - length: { tokens: 1 }
+  - match:  { tokens.0.token: "대 한 민 국"}
+---
+"Normalization charfilter korean with standard tokenizer":
+  - do:
+      indices.analyze:
+        body:
+          tokenizer: standard
+          text: 대 한 민 국
+          char_filter:
+            type: icu_normalizer
+            name: nfc
+            mode: decompose
+  - length: { tokens: 4 }
+  - match:  { tokens.0.token: "대"}
+  - match:  { tokens.1.token: "한"}
+  - match:  { tokens.2.token: "민"}
+  - match:  { tokens.3.token: "국"}
