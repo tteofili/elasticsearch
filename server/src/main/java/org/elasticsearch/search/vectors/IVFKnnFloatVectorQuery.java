@@ -94,6 +94,7 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
         }
         strategy.setCollector(knnCollector);
         reader.searchNearestVectors(field, query, knnCollector, acceptDocs);
+        knnCollectorManager.setMinCompetitiveScore(knnCollector.getMinCompetitiveDocScore());
         TopDocs results = knnCollector.topDocs();
         return results != null ? results : NO_RESULTS;
     }

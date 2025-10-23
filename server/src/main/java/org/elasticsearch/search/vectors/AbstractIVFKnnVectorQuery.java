@@ -218,6 +218,7 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
     static class IVFCollectorManager implements KnnCollectorManager {
         private final int k;
         final LongAccumulator longAccumulator;
+        private volatile long minCompetitiveScore = Long.MIN_VALUE;
 
         IVFCollectorManager(int k, IndexSearcher searcher) {
             this.k = k;
@@ -227,7 +228,17 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
         @Override
         public AbstractMaxScoreKnnCollector newCollector(int visitedLimit, KnnSearchStrategy searchStrategy, LeafReaderContext context)
             throws IOException {
-            return new MaxScoreTopKnnCollector(k, visitedLimit, searchStrategy);
+            MaxScoreTopKnnCollector maxScoreTopKnnCollector = new MaxScoreTopKnnCollector(k, visitedLimit, searchStrategy);
+            if (minCompetitiveScore > Long.MIN_VALUE) {
+                maxScoreTopKnnCollector.updateMinCompetitiveDocScore(minCompetitiveScore);
+            }
+            return maxScoreTopKnnCollector;
+        }
+
+        public void setMinCompetitiveScore(long score) {
+            if (score > this.minCompetitiveScore) {
+                this.minCompetitiveScore = score;
+            }
         }
     }
 }
