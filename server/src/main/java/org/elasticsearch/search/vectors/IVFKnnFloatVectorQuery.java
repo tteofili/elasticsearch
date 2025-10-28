@@ -71,6 +71,11 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
     }
 
     @Override
+    float[] getQueryVector() throws IOException {
+        return query;
+    }
+
+    @Override
     protected TopDocs approximateSearch(
         LeafReaderContext context,
         AcceptDocs acceptDocs,

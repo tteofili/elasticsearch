@@ -88,7 +88,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
         IndexInput centroids,
         float[] targetQuery,
         IndexInput postingListSlice,
-        float visitRatio
+        float visitRatio,
+        float globalThreshold
     ) throws IOException {
         final FieldEntry fieldEntry = fields.get(fieldInfo.number);
         final float globalCentroidDp = fieldEntry.globalCentroidDp();
@@ -122,7 +123,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
                 quantized,
                 queryParams,
                 globalCentroidDp,
-                visitRatio * centroidOversampling
+                visitRatio * centroidOversampling,
+                globalThreshold
             );
         } else {
             centroidIterator = getCentroidIteratorNoParent(
@@ -132,7 +134,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
                 scorer,
                 quantized,
                 queryParams,
-                globalCentroidDp
+                globalCentroidDp,
+                globalThreshold
             );
         }
         return getPostingListPrefetchIterator(centroidIterator, postingListSlice);
@@ -176,7 +179,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
         ES92Int7VectorsScorer scorer,
         byte[] quantizeQuery,
         OptimizedScalarQuantizer.QuantizationResult queryParams,
-        float globalCentroidDp
+        float globalCentroidDp,
+        float globalThreshold
     ) throws IOException {
         final NeighborQueue neighborQueue = new NeighborQueue(numCentroids, true);
         score(
@@ -188,7 +192,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
             queryParams,
             globalCentroidDp,
             fieldInfo.getVectorSimilarityFunction(),
-            new float[ES92Int7VectorsScorer.BULK_SIZE]
+            new float[ES92Int7VectorsScorer.BULK_SIZE],
+            globalThreshold
         );
         long offset = centroids.getFilePointer();
         return new CentroidIterator() {
@@ -217,7 +222,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
         byte[] quantizeQuery,
         OptimizedScalarQuantizer.QuantizationResult queryParams,
         float globalCentroidDp,
-        float centroidRatio
+        float centroidRatio,
+        float globalThreshold
     ) throws IOException {
         // build the three queues we are going to use
         final NeighborQueue parentsQueue = new NeighborQueue(numParents, true);
@@ -236,7 +242,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
             queryParams,
             globalCentroidDp,
             fieldInfo.getVectorSimilarityFunction(),
-            scores
+            scores,
+            globalThreshold
         );
         final long centroidQuantizeSize = fieldInfo.getVectorDimension() + 3 * Float.BYTES + Integer.BYTES;
         final long offset = centroids.getFilePointer();
@@ -255,7 +262,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
                 quantizeQuery,
                 queryParams,
                 globalCentroidDp,
-                scores
+                scores,
+                globalThreshold
             );
             while (currentParentQueue.size() > 0 && neighborQueue.size() < bufferSize) {
                 final float score = currentParentQueue.topScore();
@@ -297,7 +305,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
                         quantizeQuery,
                         queryParams,
                         globalCentroidDp,
-                        scores
+                        scores,
+                        globalThreshold
                     );
                     return nextCentroid();
                 } else {
@@ -318,7 +327,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
         byte[] quantizeQuery,
         OptimizedScalarQuantizer.QuantizationResult queryParams,
         float globalCentroidDp,
-        float[] scores
+        float[] scores,
+        float globalThreshold
     ) throws IOException {
         centroids.seek(parentOffset);
         int childrenOrdinal = centroids.readInt();
@@ -333,7 +343,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
             queryParams,
             globalCentroidDp,
             fieldInfo.getVectorSimilarityFunction(),
-            scores
+            scores,
+            globalThreshold
         );
     }
 
@@ -346,7 +357,8 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
         OptimizedScalarQuantizer.QuantizationResult queryCorrections,
         float centroidDp,
         VectorSimilarityFunction similarityFunction,
-        float[] scores
+        float[] scores,
+        float globalThreshold
     ) throws IOException {
         int limit = size - ES92Int7VectorsScorer.BULK_SIZE + 1;
         int i = 0;
@@ -362,7 +374,9 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
                 scores
             );
             for (int j = 0; j < ES92Int7VectorsScorer.BULK_SIZE; j++) {
-                neighborQueue.add(scoresOffset + i + j, scores[j]);
+                if (scores[j] >= globalThreshold) {
+                    neighborQueue.add(scoresOffset + i + j, scores[j]);
+                }
             }
         }
 
@@ -376,7 +390,9 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
                 similarityFunction,
                 centroidDp
             );
-            neighborQueue.add(scoresOffset + i, score);
+            if (score > globalThreshold) {
+                neighborQueue.add(scoresOffset + i, score);
+            }
         }
     }
 

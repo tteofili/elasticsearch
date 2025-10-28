@@ -22,10 +22,14 @@ class MaxScoreTopKnnCollector extends AbstractMaxScoreKnnCollector {
     protected final NeighborQueue queue;
 
     MaxScoreTopKnnCollector(int k, long visitLimit, KnnSearchStrategy searchStrategy) {
+        this(k, visitLimit, searchStrategy, Float.NEGATIVE_INFINITY);
+    }
+
+    MaxScoreTopKnnCollector(int k, long visitLimit, KnnSearchStrategy searchStrategy, float minCompetitiveSimilarity) {
         super(k, visitLimit, searchStrategy);
-        this.minCompetitiveDocScore = LEAST_COMPETITIVE;
-        this.minCompetitiveSimilarity = Float.NEGATIVE_INFINITY;
+        this.minCompetitiveSimilarity = minCompetitiveSimilarity;
         this.queue = new NeighborQueue(k, false);
+        this.minCompetitiveDocScore = NeighborQueue.encodeRaw(Integer.MAX_VALUE, minCompetitiveSimilarity);
     }
 
     @Override

@@ -87,7 +87,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader {
         IndexInput centroids,
         float[] targetQuery,
         IndexInput postingListSlice,
-        float visitRatio
+        float visitRatio,
+        float globalThreshold
     ) throws IOException {
         final FieldEntry fieldEntry = fields.get(fieldInfo.number);
         final float globalCentroidDp = fieldEntry.globalCentroidDp();

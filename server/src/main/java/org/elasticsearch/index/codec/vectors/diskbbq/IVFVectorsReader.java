@@ -114,7 +114,8 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
         IndexInput centroids,
         float[] target,
         IndexInput postingListSlice,
-        float visitRatio
+        float visitRatio,
+        float globalThreshold
     ) throws IOException;
 
     private static IndexInput openDataInput(
@@ -311,7 +312,8 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
             entry.centroidSlice(ivfCentroids),
             target,
             postListSlice,
-            visitRatio
+            visitRatio,
+            knnCollector.minCompetitiveSimilarity()
         );
         Bits acceptDocsBits = acceptDocs.bits();
         PostingVisitor scorer = getPostingVisitor(fieldInfo, postListSlice, target, acceptDocsBits);
@@ -475,5 +477,13 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
 
         /** returns the number of scored documents */
         int visit(KnnCollector collector) throws IOException;
+    }
+
+    public IndexInput getIvfCentroids(FieldInfo fieldInfo) throws IOException {
+        return fields.get(fieldInfo.number).centroidSlice(ivfCentroids);
+    }
+
+    public float[] getGlobalCentroid(FieldInfo fieldInfo) {
+        return fields.get(fieldInfo.number).globalCentroid;
     }
 }
