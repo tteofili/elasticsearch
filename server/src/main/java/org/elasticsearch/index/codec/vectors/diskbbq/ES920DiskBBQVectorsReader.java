@@ -180,6 +180,11 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
                 long postingListLength = centroids.readLong();
                 return new PostingMetadata(postingListOffset, postingListLength, centroidOrdinal, score);
             }
+
+            @Override
+            public float peekNextScore() {
+                return neighborQueue.size() > 0 ? neighborQueue.topScore() : Float.NEGATIVE_INFINITY;
+            }
         };
     }
 
@@ -254,6 +259,11 @@ public class ES920DiskBBQVectorsReader extends IVFVectorsReader {
                 long postingListOffset = centroids.readLong();
                 long postingListLength = centroids.readLong();
                 return new PostingMetadata(postingListOffset, postingListLength, centroidOrdinal, score);
+            }
+
+            @Override
+            public float peekNextScore() {
+                return neighborQueue.size() > 0 ? neighborQueue.topScore() : Float.NEGATIVE_INFINITY;
             }
 
             private long nextCentroid() throws IOException {

@@ -322,6 +322,14 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
         // filtering? E.g. keep exploring until we hit an expected number of parent documents vs. child vectors?
         while (centroidPrefetchingIterator.hasNext()
             && (maxVectorVisited > expectedDocs || knnCollector.minCompetitiveSimilarity() == Float.NEGATIVE_INFINITY)) {
+            // skip centroids whose score is below the current min competitive similarity
+            float nextCentroidScore = centroidPrefetchingIterator.peekNextScore();
+            if (nextCentroidScore != Float.NEGATIVE_INFINITY && nextCentroidScore < knnCollector.minCompetitiveSimilarity()) {
+                // skip this centroid and potentially others with lower scores
+                centroidPrefetchingIterator.nextPosting(); // consume but don't process ?
+                continue;
+            }
+
             PostingMetadata postingMetadata = centroidPrefetchingIterator.nextPosting();
             // todo do we need direct access to the raw centroid???, this is used for quantizing, maybe hydrating and quantizing
             // is enough?
@@ -337,6 +345,14 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
             int filteredVectors = (int) Math.ceil(numVectors * percentFiltered);
             float expectedScored = Math.min(2 * filteredVectors * unfilteredRatioVisited, expectedDocs / 2f);
             while (centroidPrefetchingIterator.hasNext() && (actualDocs < expectedScored || actualDocs < knnCollector.k())) {
+                // Early filtering: skip centroids whose score is below the current min competitive similarity
+                float nextCentroidScore = centroidPrefetchingIterator.peekNextScore();
+                if (nextCentroidScore != Float.NEGATIVE_INFINITY && nextCentroidScore < knnCollector.minCompetitiveSimilarity()) {
+                    // Skip this centroid and potentially others with lower scores
+                    centroidPrefetchingIterator.nextPosting(); // consume but don't process
+                    continue;
+                }
+
                 PostingMetadata postingMetadata = centroidPrefetchingIterator.nextPosting();
                 scorer.resetPostingsScorer(postingMetadata);
                 actualDocs += scorer.visit(knnCollector);

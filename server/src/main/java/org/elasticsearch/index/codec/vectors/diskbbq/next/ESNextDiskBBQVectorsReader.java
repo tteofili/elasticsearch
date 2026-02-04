@@ -328,6 +328,11 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
                 long postingListLength = centroids.readLong();
                 return new PostingMetadata(postingListOffset, postingListLength, centroidOrd, score);
             }
+
+            @Override
+            public float peekNextScore() {
+                return neighborQueue.size() > 0 ? neighborQueue.topScore() : Float.NEGATIVE_INFINITY;
+            }
         };
     }
 
