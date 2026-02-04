@@ -440,6 +440,11 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
                 return new PostingMetadata(postingListOffset, postingListLength, centroidOrdinal, score);
             }
 
+            @Override
+            public float peekNextScore() {
+                return neighborQueue.size() > 0 ? neighborQueue.topScore() : Float.NEGATIVE_INFINITY;
+            }
+
             private long nextCentroid() throws IOException {
                 if (currentParentQueue.size() > 0) {
                     // return next centroid and maybe add a children from the current parent queue

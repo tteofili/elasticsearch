@@ -18,4 +18,14 @@ public interface CentroidIterator {
     boolean hasNext();
 
     PostingMetadata nextPosting() throws IOException;
+
+    /**
+     * Returns the score of the next centroid without advancing the iterator.
+     * This can be used for early filtering based on minimum competitive similarity.
+     * @return the score of the next centroid, or Float.NEGATIVE_INFINITY if no next centroid
+     * @throws IOException if an I/O error occurs
+     */
+    default float peekNextScore() throws IOException {
+        return Float.NEGATIVE_INFINITY;
+    }
 }

@@ -238,16 +238,32 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
     static class IVFCollectorManager implements KnnCollectorManager {
         private final int k;
         final LongAccumulator longAccumulator;
+        volatile Float sharedMinCompetitiveSimilarity;
 
         IVFCollectorManager(int k, IndexSearcher searcher) {
             this.k = k;
             longAccumulator = searcher.getIndexReader().leaves().size() > 1 ? new LongAccumulator(Long::max, LEAST_COMPETITIVE) : null;
+            sharedMinCompetitiveSimilarity = Float.NEGATIVE_INFINITY;
         }
 
         @Override
         public AbstractMaxScoreKnnCollector newCollector(int visitedLimit, KnnSearchStrategy searchStrategy, LeafReaderContext context)
             throws IOException {
-            return new MaxScoreTopKnnCollector(k, visitedLimit, searchStrategy);
+            return new MaxScoreTopKnnCollector(k, visitedLimit, searchStrategy, this);
+        }
+
+        /**
+         * update the shared minimum competitive similarity across all segments.
+         * for now this is called after the first posting list (closest centroid) is visited.
+         */
+        void updateSharedMinCompetitiveSimilarity(float similarity) {
+            if (similarity > sharedMinCompetitiveSimilarity) {
+                sharedMinCompetitiveSimilarity = similarity;
+            }
+        }
+
+        float getSharedMinCompetitiveSimilarity() {
+            return sharedMinCompetitiveSimilarity;
         }
     }
 }

@@ -20,12 +20,28 @@ class MaxScoreTopKnnCollector extends AbstractMaxScoreKnnCollector {
     private long minCompetitiveDocScore;
     private float minCompetitiveSimilarity;
     protected final NeighborQueue queue;
+    private final AbstractIVFKnnVectorQuery.IVFCollectorManager collectorManager;
+    private boolean firstCentroidProcessed = false;
 
     MaxScoreTopKnnCollector(int k, long visitLimit, KnnSearchStrategy searchStrategy) {
         super(k, visitLimit, searchStrategy);
         this.minCompetitiveDocScore = LEAST_COMPETITIVE;
         this.minCompetitiveSimilarity = Float.NEGATIVE_INFINITY;
         this.queue = new NeighborQueue(k, false);
+        this.collectorManager = null;
+    }
+
+    MaxScoreTopKnnCollector(
+        int k,
+        long visitLimit,
+        KnnSearchStrategy searchStrategy,
+        AbstractIVFKnnVectorQuery.IVFCollectorManager collectorManager
+    ) {
+        super(k, visitLimit, searchStrategy);
+        this.minCompetitiveDocScore = LEAST_COMPETITIVE;
+        this.minCompetitiveSimilarity = Float.NEGATIVE_INFINITY;
+        this.queue = new NeighborQueue(k, false);
+        this.collectorManager = collectorManager;
     }
 
     @Override
@@ -42,7 +58,16 @@ class MaxScoreTopKnnCollector extends AbstractMaxScoreKnnCollector {
 
     @Override
     public boolean collect(int docId, float similarity) {
-        return queue.insertWithOverflow(docId, similarity);
+        boolean collected = queue.insertWithOverflow(docId, similarity);
+        // update shared min competitive similarity once as soon as we have meaningful results
+        if (collectorManager != null && firstCentroidProcessed == false && collected) {
+            float currentMinCompetitiveSimilarity = minCompetitiveSimilarity();
+            if (currentMinCompetitiveSimilarity > Float.NEGATIVE_INFINITY) {
+                collectorManager.updateSharedMinCompetitiveSimilarity(currentMinCompetitiveSimilarity);
+                firstCentroidProcessed = true;
+            }
+        }
+        return collected;
     }
 
     @Override
@@ -52,7 +77,9 @@ class MaxScoreTopKnnCollector extends AbstractMaxScoreKnnCollector {
 
     @Override
     public float minCompetitiveSimilarity() {
-        return queue.size() < k() ? Float.NEGATIVE_INFINITY : Math.max(minCompetitiveSimilarity, queue.topScore());
+        float localMin = queue.size() < k() ? Float.NEGATIVE_INFINITY : Math.max(minCompetitiveSimilarity, queue.topScore());
+        float sharedMin = collectorManager != null ? collectorManager.getSharedMinCompetitiveSimilarity() : Float.NEGATIVE_INFINITY;
+        return Math.max(localMin, sharedMin);
     }
 
     @Override

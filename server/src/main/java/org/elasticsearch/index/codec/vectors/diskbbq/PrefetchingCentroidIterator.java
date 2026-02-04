@@ -108,4 +108,9 @@ public final class PrefetchingCentroidIterator implements CentroidIterator {
 
         return result;
     }
+
+    @Override
+    public float peekNextScore() throws IOException {
+        return delegate.peekNextScore();
+    }
 }
