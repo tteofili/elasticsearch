@@ -39,7 +39,19 @@ public interface VectorSimilarityFunctions {
         /**
          * 4-byte float. Single vector score returns results as a float.
          */
-        FLOAT32(Float.BYTES);
+        FLOAT32(Float.BYTES),
+        /**
+         * 1-bit data, 4-bit queries. Single vector score returns results as a long.
+         * <p>
+         * Checks are special-cased, so {@link #bytes()} is not called
+         */
+        I1I4(Byte.BYTES),
+        /**
+         * 2-bit data, 4-bit queries. Single vector score returns results as a long.
+         * <p>
+         * Checks are special-cased, so {@link #bytes()} is not called
+         */
+        I2I4(Byte.BYTES);
 
         private final int bytes;
 
@@ -49,34 +61,6 @@ public interface VectorSimilarityFunctions {
 
         public int bytes() {
             return bytes;
-        }
-    }
-
-    /**
-     * The various flavors of BBQ indices. Single vector score returns results as a long.
-     */
-    enum BBQType {
-        /**
-         * 1-bit data, 4-bit queries
-         */
-        I1I4((byte) 1),
-        /**
-         * 2-bit data, 4-bit queries
-         */
-        I2I4((byte) 2);
-
-        private final byte dataBits;
-
-        BBQType(byte dataBits) {
-            this.dataBits = dataBits;
-        }
-
-        public byte dataBits() {
-            return dataBits;
-        }
-
-        public byte queryBits() {
-            return 4;
         }
     }
 
@@ -124,6 +108,4 @@ public interface VectorSimilarityFunctions {
     }
 
     MethodHandle getHandle(Function function, DataType dataType, Operation operation);
-
-    MethodHandle getHandle(Function function, BBQType bbqType, Operation operation);
 }
