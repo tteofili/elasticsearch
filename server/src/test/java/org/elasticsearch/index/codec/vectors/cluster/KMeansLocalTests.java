@@ -249,4 +249,75 @@ public class KMeansLocalTests extends ESTestCase {
             }
         }
     }
+
+    public void testComputeNeighboursGuardsLargeDistances() throws IOException {
+        int dims = 2;
+        float[][] vectors = new float[8][dims];
+        for (int i = 0; i < vectors.length; i++) {
+            float base = 1.0e20f * (i + 1);
+            vectors[i][0] = base;
+            vectors[i][1] = -base;
+        }
+        int clustersPerNeighbour = 2;
+        NeighborHood[] neighborHoodsGraph = NeighborHood.computeNeighborhoodsGraph(vectors, clustersPerNeighbour);
+        for (NeighborHood neighborHood : neighborHoodsGraph) {
+            assertNotNull(neighborHood);
+            assertTrue(Float.isFinite(neighborHood.maxIntraDistance()));
+        }
+    }
+
+    public void testComputeNeighboursCapsWorkers() throws IOException {
+        int dims = 4;
+        float[][] vectors = new float[5][dims];
+        for (int i = 0; i < vectors.length; i++) {
+            for (int j = 0; j < dims; j++) {
+                vectors[i][j] = randomFloat();
+            }
+        }
+        int clustersPerNeighbour = 2;
+        int numThreads = 20;
+        try (ExecutorService executorService = Executors.newFixedThreadPool(numThreads)) {
+            TaskExecutor taskExecutor = new TaskExecutor(executorService);
+            NeighborHood[] neighborHoodsGraphConcurrent = NeighborHood.computeNeighborhoodsGraph(
+                taskExecutor,
+                numThreads,
+                vectors,
+                clustersPerNeighbour
+            );
+            assertEquals(vectors.length, neighborHoodsGraphConcurrent.length);
+            for (NeighborHood neighborHood : neighborHoodsGraphConcurrent) {
+                assertNotNull(neighborHood);
+            }
+        }
+    }
+
+    public void testComputeNeighboursInputValidation() {
+        float[][] vectors = new float[2][2];
+        IllegalArgumentException empty = expectThrows(
+            IllegalArgumentException.class,
+            () -> NeighborHood.computeNeighborhoodsGraph(new float[0][], 1)
+        );
+        assertThat(empty.getMessage(), containsString("centers must be non-empty"));
+
+        IllegalArgumentException invalidK = expectThrows(
+            IllegalArgumentException.class,
+            () -> NeighborHood.computeNeighborhoodsGraph(vectors, 0)
+        );
+        assertThat(invalidK.getMessage(), containsString("clustersPerNeighborhood must be >= 1"));
+
+        IllegalArgumentException tooLarge = expectThrows(
+            IllegalArgumentException.class,
+            () -> NeighborHood.computeNeighborhoodsGraph(vectors, vectors.length)
+        );
+        assertThat(tooLarge.getMessage(), containsString("clustersPerNeighborhood must be less than centers length"));
+
+        try (ExecutorService executorService = Executors.newFixedThreadPool(1)) {
+            TaskExecutor taskExecutor = new TaskExecutor(executorService);
+            IllegalArgumentException invalidWorkers = expectThrows(
+                IllegalArgumentException.class,
+                () -> NeighborHood.computeNeighborhoodsGraph(taskExecutor, 0, vectors, 1)
+            );
+            assertThat(invalidWorkers.getMessage(), containsString("numWorkers must be >= 1"));
+        }
+    }
 }

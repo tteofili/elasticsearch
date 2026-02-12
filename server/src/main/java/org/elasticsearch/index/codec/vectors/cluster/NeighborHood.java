@@ -33,17 +33,18 @@ public record NeighborHood(int[] neighbors, float maxIntraDistance) {
 
     private static final int M = 8;
     private static final int EF_CONSTRUCTION = 150;
+    private static final float MIN_DISTANCE_SCORE_EPSILON = 1.0e-6f;
 
     static final NeighborHood EMPTY = new NeighborHood(new int[0], Float.POSITIVE_INFINITY);
 
     public static NeighborHood[] computeNeighborhoods(float[][] centers, int clustersPerNeighborhood) throws IOException {
-        assert centers.length > clustersPerNeighborhood;
+        validateInputs(centers, clustersPerNeighborhood);
         return computeNeighborhoods(null, 1, centers, clustersPerNeighborhood);
     }
 
     public static NeighborHood[] computeNeighborhoods(TaskExecutor executor, int numWorkers, float[][] centers, int clustersPerNeighborhood)
         throws IOException {
-        assert centers.length > clustersPerNeighborhood;
+        validateInputs(centers, clustersPerNeighborhood);
         // experiments shows that below 10k, we better use brute force, otherwise hnsw gives us a nice speed up
         if (centers.length < 10_000) {
             return computeNeighborhoodsBruteForce(centers, clustersPerNeighborhood);
@@ -55,6 +56,7 @@ public record NeighborHood(int[] neighbors, float maxIntraDistance) {
     }
 
     public static NeighborHood[] computeNeighborhoodsBruteForce(float[][] centers, int clustersPerNeighborhood) {
+        validateInputs(centers, clustersPerNeighborhood);
         int k = centers.length;
         NeighborQueue[] neighborQueues = new NeighborQueue[k];
         for (int i = 0; i < k; i++) {
@@ -100,6 +102,7 @@ public record NeighborHood(int[] neighbors, float maxIntraDistance) {
     }
 
     public static NeighborHood[] computeNeighborhoodsGraph(float[][] centers, int clustersPerNeighborhood) throws IOException {
+        validateInputs(centers, clustersPerNeighborhood);
         final RandomVectorScorerSupplier supplier = new CentersScorerSupplier(centers);
         final OnHeapHnswGraph graph = HnswGraphBuilder.create(supplier, M, EF_CONSTRUCTION, 42L, centers.length).build(centers.length);
         final NeighborHood[] neighborhoods = new NeighborHood[centers.length];
@@ -113,17 +116,22 @@ public record NeighborHood(int[] neighbors, float maxIntraDistance) {
         float[][] centers,
         int clustersPerNeighborhood
     ) throws IOException {
+        validateInputs(centers, clustersPerNeighborhood);
+        if (numWorkers < 1) {
+            throw new IllegalArgumentException("numWorkers must be >= 1");
+        }
+        final int workers = Math.min(numWorkers, centers.length);
         final RandomVectorScorerSupplier supplier = new CentersScorerSupplier(centers);
         // what we want here is really is call "new OnHeapHnswGraph(M, ceneters.length)" but the constructor is package private
         final OnHeapHnswGraph initGraph = HnswGraphBuilder.create(supplier, M, EF_CONSTRUCTION, 42L, centers.length).build(0);
-        final OnHeapHnswGraph graph = new HnswConcurrentMergeBuilder(executor, numWorkers, supplier, M, EF_CONSTRUCTION, initGraph, null)
+        final OnHeapHnswGraph graph = new HnswConcurrentMergeBuilder(executor, workers, supplier, M, EF_CONSTRUCTION, initGraph, null)
             .build(centers.length);
         final NeighborHood[] neighborhoods = new NeighborHood[centers.length];
-        final int len = centers.length / numWorkers;
-        final List<Callable<Void>> runners = new ArrayList<>(numWorkers);
-        for (int i = 0; i < numWorkers; i++) {
+        final int len = centers.length / workers;
+        final List<Callable<Void>> runners = new ArrayList<>(workers);
+        for (int i = 0; i < workers; i++) {
             final int start = i * len;
-            final int end = i == numWorkers - 1 ? centers.length : (i + 1) * len;
+            final int end = i == workers - 1 ? centers.length : (i + 1) * len;
             runners.add(() -> {
                 populateNeighboursFromGraph(graph, clustersPerNeighborhood, neighborhoods, supplier.copy(), start, end);
                 return null;
@@ -160,12 +168,31 @@ public record NeighborHood(int[] neighbors, float maxIntraDistance) {
                 neighborhoods[i] = NeighborHood.EMPTY;
                 continue;
             }
-            final float minScore = scoreDocs[len - 1].score;
+            float minScore = scoreDocs[len - 1].score;
+            if (Float.isInfinite(minScore) || Float.isNaN(minScore) || minScore <= 0f) {
+                minScore = MIN_DISTANCE_SCORE_EPSILON;
+            } else if (minScore < MIN_DISTANCE_SCORE_EPSILON) {
+                minScore = MIN_DISTANCE_SCORE_EPSILON;
+            }
             final int[] neighbors = new int[len];
             for (int j = 0; j < len; j++) {
                 neighbors[j] = scoreDocs[j].doc;
             }
             neighborhoods[i] = new NeighborHood(neighbors, (1f / minScore) - 1);
+        }
+    }
+
+    private static void validateInputs(float[][] centers, int clustersPerNeighborhood) {
+        if (centers == null || centers.length == 0) {
+            throw new IllegalArgumentException("centers must be non-empty");
+        }
+        if (clustersPerNeighborhood < 1) {
+            throw new IllegalArgumentException("clustersPerNeighborhood must be >= 1");
+        }
+        if (clustersPerNeighborhood >= centers.length) {
+            throw new IllegalArgumentException(
+                "clustersPerNeighborhood must be less than centers length (got " + clustersPerNeighborhood + " and " + centers.length + ")"
+            );
         }
     }
 
