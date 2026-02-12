@@ -24,6 +24,7 @@ import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.internal.hppc.IntObjectHashMap;
 import org.apache.lucene.search.AcceptDocs;
 import org.apache.lucene.search.KnnCollector;
+import org.apache.lucene.search.knn.KnnSearchStrategy;
 import org.apache.lucene.store.ChecksumIndexInput;
 import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.IOContext;
@@ -316,6 +317,11 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
         PostingVisitor scorer = getPostingVisitor(fieldInfo, postListSlice, target, acceptDocsBits, entry.centroidSlice(ivfCentroids));
         long expectedDocs = 0;
         long actualDocs = 0;
+        int clustersVisited = 0;
+        KnnSearchStrategy searchStrategy = knnCollector.getSearchStrategy();
+        if (searchStrategy instanceof IVFKnnSearchStrategy ivfSearchStrategy) {
+            ivfSearchStrategy.recordSegmentStart(numVectors, entry.numCentroids());
+        }
         // initially we visit only the "centroids to search"
         // Note, numCollected is doing the bare minimum here.
         // TODO do we need to handle nested doc counts similarly to how we handle
@@ -323,10 +329,15 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
         while (centroidPrefetchingIterator.hasNext()
             && (maxVectorVisited > expectedDocs || knnCollector.minCompetitiveSimilarity() == Float.NEGATIVE_INFINITY)) {
             PostingMetadata postingMetadata = centroidPrefetchingIterator.nextPosting();
-            expectedDocs += scorer.resetPostingsScorer(postingMetadata);
+            int postingListSize = scorer.resetPostingsScorer(postingMetadata);
+            expectedDocs += postingListSize;
+            if (searchStrategy instanceof IVFKnnSearchStrategy ivfSearchStrategy) {
+                ivfSearchStrategy.recordCluster(postingMetadata.documentCentroidScore(), postingListSize);
+            }
+            clustersVisited++;
             actualDocs += scorer.visit(knnCollector);
-            if (knnCollector.getSearchStrategy() != null) {
-                knnCollector.getSearchStrategy().nextVectorsBlock();
+            if (searchStrategy != null) {
+                searchStrategy.nextVectorsBlock();
             }
         }
         if (acceptDocsBits != null) {
@@ -336,12 +347,19 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
             float expectedScored = Math.min(2 * filteredVectors * unfilteredRatioVisited, expectedDocs / 2f);
             while (centroidPrefetchingIterator.hasNext() && (actualDocs < expectedScored || actualDocs < knnCollector.k())) {
                 PostingMetadata postingMetadata = centroidPrefetchingIterator.nextPosting();
-                scorer.resetPostingsScorer(postingMetadata);
+                int postingListSize = scorer.resetPostingsScorer(postingMetadata);
+                if (searchStrategy instanceof IVFKnnSearchStrategy ivfSearchStrategy) {
+                    ivfSearchStrategy.recordCluster(postingMetadata.documentCentroidScore(), postingListSize);
+                }
+                clustersVisited++;
                 actualDocs += scorer.visit(knnCollector);
-                if (knnCollector.getSearchStrategy() != null) {
-                    knnCollector.getSearchStrategy().nextVectorsBlock();
+                if (searchStrategy != null) {
+                    searchStrategy.nextVectorsBlock();
                 }
             }
+        }
+        if (searchStrategy instanceof IVFKnnSearchStrategy ivfSearchStrategy) {
+            ivfSearchStrategy.recordSegmentEnd(clustersVisited, (int) actualDocs);
         }
     }
 

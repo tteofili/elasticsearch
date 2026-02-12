@@ -13,6 +13,8 @@ import org.elasticsearch.common.io.stream.Writeable.Reader;
 import org.elasticsearch.search.SearchResponseUtils;
 import org.elasticsearch.search.profile.ProfileResult;
 import org.elasticsearch.search.profile.ProfileResultTests;
+import org.elasticsearch.search.vectors.IVFProfile;
+import org.elasticsearch.search.vectors.IVFSegmentProfile;
 import org.elasticsearch.test.AbstractXContentSerializingTestCase;
 import org.elasticsearch.xcontent.XContentParser;
 
@@ -22,6 +24,7 @@ import java.util.List;
 import java.util.function.Predicate;
 
 import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpectedToken;
+import static org.hamcrest.Matchers.hasKey;
 
 public class QueryProfileShardResultTests extends AbstractXContentSerializingTestCase<QueryProfileShardResult> {
     public static QueryProfileShardResult createTestItem() {
@@ -38,6 +41,55 @@ public class QueryProfileShardResultTests extends AbstractXContentSerializingTes
 
         Long vectorOperationsCount = randomBoolean() ? null : randomNonNegativeLong();
         return new QueryProfileShardResult(queryProfileResults, rewriteTime, profileCollector, vectorOperationsCount);
+    }
+
+    private static IVFProfile createRandomIvfProfile() {
+        IVFSegmentProfile seg = new IVFSegmentProfile(
+            100,
+            16,
+            3,
+            50,
+            0.5f,
+            0.9f,
+            2.0,
+            3L,
+            1.5,
+            10,
+            20,
+            50L,
+            3L,
+            900L
+        );
+        return new IVFProfile(
+            50L,
+            3L,
+            List.of(seg),
+            0.5f,
+            0.9f,
+            0.7f,
+            0.2f,
+            10,
+            20,
+            16.6f,
+            5f
+        );
+    }
+
+    public void testIvfProfileIncludedInXContentWhenPresent() throws IOException {
+        QueryProfileShardResult result = new QueryProfileShardResult(
+            List.of(),
+            0L,
+            CollectorResultTests.createTestItem(1),
+            null,
+            createRandomIvfProfile()
+        );
+        assertNotNull(result.getIvfProfile());
+        String json = org.elasticsearch.common.Strings.toString(result);
+        assertThat(org.elasticsearch.common.xcontent.XContentHelper.convertToMap(
+            org.elasticsearch.xcontent.json.JsonXContent.jsonXContent,
+            json,
+            false
+        ), hasKey(QueryProfileShardResult.IVF));
     }
 
     @Override

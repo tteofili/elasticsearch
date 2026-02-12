@@ -12,6 +12,7 @@ package org.elasticsearch.search.profile.query;
 import org.apache.lucene.search.Query;
 import org.elasticsearch.search.profile.AbstractProfiler;
 import org.elasticsearch.search.profile.Timer;
+import org.elasticsearch.search.vectors.IVFProfile;
 
 import static java.util.Objects.requireNonNull;
 
@@ -35,6 +36,8 @@ public final class QueryProfiler extends AbstractProfiler<QueryProfileBreakdown,
 
     private long vectorOpsCount;
 
+    private IVFProfile ivfProfile;
+
     public QueryProfiler() {
         super(new InternalQueryProfileTree());
     }
@@ -53,6 +56,20 @@ public final class QueryProfiler extends AbstractProfiler<QueryProfileBreakdown,
      */
     public long getVectorOpsCount() {
         return this.vectorOpsCount;
+    }
+
+    /**
+     * Set the IVF profile for this query (when profiling IVF KNN search).
+     */
+    public void setIvfProfile(IVFProfile ivfProfile) {
+        this.ivfProfile = ivfProfile;
+    }
+
+    /**
+     * Get the IVF profile, or null if not set.
+     */
+    public IVFProfile getIvfProfile() {
+        return ivfProfile;
     }
 
     /** Set the collector result that is associated with this profiler. */

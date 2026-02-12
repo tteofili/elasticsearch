@@ -56,6 +56,7 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
     protected final Query filter;
     protected int vectorOpsCount;
     protected boolean doPrecondition;
+    private IVFProfileAccumulator ivfProfileAccumulator;
 
     protected AbstractIVFKnnVectorQuery(String field, float visitRatio, int k, int numCands, Query filter, boolean doPrecondition) {
         if (k < 1) {
@@ -101,6 +102,7 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
     @Override
     public Query rewrite(IndexSearcher indexSearcher) throws IOException {
         vectorOpsCount = 0;
+        ivfProfileAccumulator = new IVFProfileAccumulator();
         IndexReader reader = indexSearcher.getIndexReader();
 
         final Weight filterWeight;
@@ -121,7 +123,7 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
         // we need to ensure we are getting at least 2*k results to ensure we cover overspill duplicates
         // TODO move the logic for automatically adjusting percentages to the query, so we can only pass
         // 2k to the collector.
-        IVFCollectorManager knnCollectorManager = getKnnCollectorManager(Math.round(2f * k), indexSearcher);
+        IVFCollectorManager knnCollectorManager = getKnnCollectorManager(Math.round(2f * k), indexSearcher, ivfProfileAccumulator);
         TaskExecutor taskExecutor = indexSearcher.getTaskExecutor();
         List<LeafReaderContext> leafReaderContexts = reader.leaves();
 
@@ -226,22 +228,40 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
         float visitRatio
     ) throws IOException;
 
-    protected IVFCollectorManager getKnnCollectorManager(int k, IndexSearcher searcher) {
-        return new IVFCollectorManager(k, searcher);
-    }
-
     @Override
     public final void profile(QueryProfiler queryProfiler) {
         queryProfiler.addVectorOpsCount(vectorOpsCount);
+        if (ivfProfileAccumulator != null) {
+            IVFProfile ivfProfile = ivfProfileAccumulator.buildProfile();
+            if (ivfProfile != null) {
+                queryProfiler.setIvfProfile(ivfProfile);
+            }
+        }
+    }
+
+    protected IVFCollectorManager getKnnCollectorManager(int k, IndexSearcher searcher, IVFProfileAccumulator profileAccumulator) {
+        return new IVFCollectorManager(k, searcher, profileAccumulator);
     }
 
     static class IVFCollectorManager implements KnnCollectorManager {
         private final int k;
         final LongAccumulator longAccumulator;
+        private final IVFProfileAccumulator profileAccumulator;
 
         IVFCollectorManager(int k, IndexSearcher searcher) {
+            this(k, searcher, null);
+        }
+
+        IVFCollectorManager(int k, IndexSearcher searcher, IVFProfileAccumulator profileAccumulator) {
             this.k = k;
-            longAccumulator = searcher.getIndexReader().leaves().size() > 1 ? new LongAccumulator(Long::max, LEAST_COMPETITIVE) : null;
+            this.longAccumulator = searcher.getIndexReader().leaves().size() > 1
+                ? new LongAccumulator(Long::max, LEAST_COMPETITIVE)
+                : null;
+            this.profileAccumulator = profileAccumulator;
+        }
+
+        IVFProfileAccumulator getProfileAccumulator() {
+            return profileAccumulator;
         }
 
         @Override

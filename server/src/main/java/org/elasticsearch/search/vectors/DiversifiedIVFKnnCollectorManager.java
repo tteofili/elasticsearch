@@ -22,7 +22,16 @@ public class DiversifiedIVFKnnCollectorManager extends AbstractIVFKnnVectorQuery
     private final BitSetProducer parentsFilter;
 
     DiversifiedIVFKnnCollectorManager(int k, IndexSearcher searcher, BitSetProducer parentsFilter) {
-        super(k, searcher);
+        this(k, searcher, parentsFilter, null);
+    }
+
+    DiversifiedIVFKnnCollectorManager(
+        int k,
+        IndexSearcher searcher,
+        BitSetProducer parentsFilter,
+        IVFProfileAccumulator profileAccumulator
+    ) {
+        super(k, searcher, profileAccumulator);
         this.k = k;
         this.parentsFilter = parentsFilter;
     }

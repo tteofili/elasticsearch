@@ -56,8 +56,10 @@ record TestConfiguration(
     int numMergeWorkers,
     boolean doPrecondition,
     int preconditioningBlockDims,
-    int secondaryClusterSize
+    int secondaryClusterSize,
+    boolean profile
 ) {
+
 
     static final ParseField DOC_VECTORS_FIELD = new ParseField("doc_vectors");
     static final ParseField QUERY_VECTORS_FIELD = new ParseField("query_vectors");
@@ -94,6 +96,7 @@ record TestConfiguration(
     static final ParseField PRECONDITIONING_BLOCK_DIMS = new ParseField("preconditioning_block_dims");
     static final ParseField FILTER_CACHED = new ParseField("filter_cache");
     static final ParseField SEARCH_PARAMS = new ParseField("search_params");
+    static final ParseField PROFILE_FIELD = new ParseField("profile");
 
     /** By default, in ES the default writer buffer size is 10% of the heap space
      * (see {@code IndexingMemoryController.INDEX_BUFFER_SIZE_SETTING}).
@@ -148,6 +151,7 @@ record TestConfiguration(
         PARSER.declareInt(Builder::setPreconditioningBlockDims, PRECONDITIONING_BLOCK_DIMS);
         PARSER.declareFieldArray(Builder::setFilterCached, (p, c) -> p.booleanValue(), FILTER_CACHED, ObjectParser.ValueType.VALUE_ARRAY);
         PARSER.declareObjectArray(Builder::setSearchParams, (p, c) -> SearchParameters.fromXContent(p), SEARCH_PARAMS);
+        PARSER.declareBoolean(Builder::setProfile, PROFILE_FIELD);
         PARSER.declareInt(Builder::setMergeWorkers, MERGE_WORKERS_FIELD);
         PARSER.declareInt(Builder::setSecondaryClusterSize, SECONDARY_CLUSTER_SIZE);
     }
@@ -206,6 +210,11 @@ record TestConfiguration(
                 "search_params",
                 "array[object]",
                 "Explicit per-search settings; each object may include search fields like num_candidates, k, and visit_percentage."
+            ),
+            new ParameterHelp(
+                "profile",
+                "boolean",
+                "When true and index_type is ivf, collect and print IVF profile (query-centroid and cluster stats) from the last query."
             )
         );
 
@@ -276,6 +285,7 @@ record TestConfiguration(
         private List<SearchParameters.Builder> searchParams = null;
         private int numMergeWorkers = 1;
         private int secondaryClusterSize = -1;
+        private boolean profile = false;
 
         /**
          * Elasticsearch does not set this explicitly, and in Lucene this setting is
@@ -462,6 +472,11 @@ record TestConfiguration(
             return this;
         }
 
+        public Builder setProfile(boolean profile) {
+            this.profile = profile;
+            return this;
+        }
+
         public TestConfiguration build() {
             if (docVectors == null) {
                 throw new IllegalArgumentException("Document vectors path must be provided");
@@ -533,7 +548,8 @@ record TestConfiguration(
                 numMergeWorkers,
                 doPrecondition,
                 preconditioningBlockDims,
-                secondaryClusterSize
+                secondaryClusterSize,
+                profile
             );
         }
 
@@ -580,6 +596,7 @@ record TestConfiguration(
             if (searchParams != null) {
                 builder.field(SEARCH_PARAMS.getPreferredName(), searchParams);
             }
+            builder.field(PROFILE_FIELD.getPreferredName(), profile);
             return builder.endObject();
         }
 

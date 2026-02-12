@@ -45,8 +45,8 @@ public class DiversifyingChildrenIVFKnnFloatVectorQuery extends IVFKnnFloatVecto
     }
 
     @Override
-    protected IVFCollectorManager getKnnCollectorManager(int k, IndexSearcher searcher) {
-        return new DiversifiedIVFKnnCollectorManager(k, searcher, parentsFilter);
+    protected IVFCollectorManager getKnnCollectorManager(int k, IndexSearcher searcher, IVFProfileAccumulator profileAccumulator) {
+        return new DiversifiedIVFKnnCollectorManager(k, searcher, parentsFilter, profileAccumulator);
     }
 
     @Override

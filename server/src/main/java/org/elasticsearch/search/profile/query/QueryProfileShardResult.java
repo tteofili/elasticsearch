@@ -9,12 +9,14 @@
 
 package org.elasticsearch.search.profile.query;
 
+import org.elasticsearch.TransportVersion;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.search.profile.ProfileResult;
+import org.elasticsearch.search.vectors.IVFProfile;
 import org.elasticsearch.xcontent.ToXContentObject;
 import org.elasticsearch.xcontent.XContentBuilder;
 
@@ -36,6 +38,8 @@ public final class QueryProfileShardResult implements Writeable, ToXContentObjec
 
     public static final String VECTOR_OPERATIONS_COUNT = "vector_operations_count";
 
+    public static final String IVF = "ivf";
+
     private final List<ProfileResult> queryProfileResults;
 
     private final CollectorResult profileCollector;
@@ -44,17 +48,30 @@ public final class QueryProfileShardResult implements Writeable, ToXContentObjec
 
     private final Long vectorOperationsCount;
 
+    private final IVFProfile ivfProfile;
+
     public QueryProfileShardResult(
         List<ProfileResult> queryProfileResults,
         long rewriteTime,
         CollectorResult profileCollector,
         @Nullable Long vectorOperationsCount
     ) {
+        this(queryProfileResults, rewriteTime, profileCollector, vectorOperationsCount, null);
+    }
+
+    public QueryProfileShardResult(
+        List<ProfileResult> queryProfileResults,
+        long rewriteTime,
+        CollectorResult profileCollector,
+        @Nullable Long vectorOperationsCount,
+        @Nullable IVFProfile ivfProfile
+    ) {
         assert (profileCollector != null);
         this.queryProfileResults = queryProfileResults;
         this.profileCollector = profileCollector;
         this.rewriteTime = rewriteTime;
         this.vectorOperationsCount = vectorOperationsCount;
+        this.ivfProfile = ivfProfile;
     }
 
     /**
@@ -70,6 +87,9 @@ public final class QueryProfileShardResult implements Writeable, ToXContentObjec
         profileCollector = new CollectorResult(in);
         rewriteTime = in.readLong();
         vectorOperationsCount = in.readOptionalLong();
+        ivfProfile = in.getTransportVersion().equals(TransportVersion.current())
+            ? in.readOptionalWriteable(IVFProfile::new)
+            : null;
     }
 
     @Override
@@ -81,6 +101,9 @@ public final class QueryProfileShardResult implements Writeable, ToXContentObjec
         profileCollector.writeTo(out);
         out.writeLong(rewriteTime);
         out.writeOptionalLong(vectorOperationsCount);
+        if (out.getTransportVersion().equals(TransportVersion.current())) {
+            out.writeOptionalWriteable(ivfProfile);
+        }
     }
 
     public List<ProfileResult> getQueryResults() {
@@ -100,6 +123,9 @@ public final class QueryProfileShardResult implements Writeable, ToXContentObjec
         builder.startObject();
         if (vectorOperationsCount != null) {
             builder.field(VECTOR_OPERATIONS_COUNT, vectorOperationsCount);
+        }
+        if (ivfProfile != null) {
+            builder.field(IVF, ivfProfile);
         }
         builder.startArray(QUERY_ARRAY);
         for (ProfileResult p : queryProfileResults) {
@@ -122,12 +148,13 @@ public final class QueryProfileShardResult implements Writeable, ToXContentObjec
         QueryProfileShardResult other = (QueryProfileShardResult) obj;
         return queryProfileResults.equals(other.queryProfileResults)
             && profileCollector.equals(other.profileCollector)
-            && rewriteTime == other.rewriteTime;
+            && rewriteTime == other.rewriteTime
+            && Objects.equals(ivfProfile, other.ivfProfile);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(queryProfileResults, profileCollector, rewriteTime);
+        return Objects.hash(queryProfileResults, profileCollector, rewriteTime, ivfProfile);
     }
 
     @Override
@@ -137,5 +164,9 @@ public final class QueryProfileShardResult implements Writeable, ToXContentObjec
 
     public Long getVectorOperationsCount() {
         return vectorOperationsCount;
+    }
+
+    public IVFProfile getIvfProfile() {
+        return ivfProfile;
     }
 }

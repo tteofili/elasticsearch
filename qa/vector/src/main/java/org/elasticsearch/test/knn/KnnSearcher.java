@@ -60,6 +60,7 @@ import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
 import org.elasticsearch.search.profile.query.QueryProfiler;
 import org.elasticsearch.search.vectors.ESKnnByteVectorQuery;
 import org.elasticsearch.search.vectors.ESKnnFloatVectorQuery;
+import org.elasticsearch.search.vectors.IVFProfile;
 import org.elasticsearch.search.vectors.IVFKnnFloatVectorQuery;
 import org.elasticsearch.search.vectors.QueryProfilerProvider;
 import org.elasticsearch.search.vectors.RescoreKnnVectorQuery;
@@ -76,6 +77,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -106,6 +108,7 @@ class KnnSearcher {
     private final VectorSimilarityFunction similarityFunction;
     private final VectorEncoding vectorEncoding;
     private final boolean doPrecondition;
+    private final boolean profile;
 
     KnnSearcher(Path indexPath, TestConfiguration testConfiguration) {
         this.docPath = testConfiguration.docVectors();
@@ -121,7 +124,13 @@ class KnnSearcher {
         }
         this.indexType = testConfiguration.indexType();
         this.doPrecondition = testConfiguration.doPrecondition();
+        this.profile = testConfiguration.profile();
     }
+
+    /**
+     * Result of a single vector query, optionally including IVF profile when profiling is enabled and index is IVF.
+     */
+    private record VectorQueryResult(TopDocs topDocs, IVFProfile ivfProfile) {}
 
     void runSearch(KnnIndexTester.Results finalResults, SearchParameters searchParameters) throws IOException {
         Query filterQuery = searchParameters.filterSelectivity() < 1f
@@ -137,6 +146,7 @@ class KnnSearcher {
         int[][] resultIds = new int[numQueryVectors][];
         long elapsed, totalCpuTimeMS, totalVisited = 0;
         int offsetByteSize = 0;
+        final List<IVFProfile> ivfProfiles = Collections.synchronizedList(new ArrayList<>());
         try (
             FileChannel input = FileChannel.open(queryPath);
             ExecutorService executorService = Executors.newFixedThreadPool(
@@ -187,7 +197,8 @@ class KnnSearcher {
                             doVectorQuery(targetBytes, searcher, filterQuery, searchParameters);
                         } else {
                             targetReader.next(target);
-                            doVectorQuery(target, searcher, filterQuery, searchParameters);
+                            VectorQueryResult r = doVectorQuery(target, searcher, filterQuery, searchParameters);
+                            assert r != null;
                         }
                     }
                     targetReader.reset();
@@ -214,7 +225,11 @@ class KnnSearcher {
                         for (int s = 0; s < searchParameters.numSearchers(); s++) {
                             queryConsumers[s] = i -> {
                                 try {
-                                    results[i] = doVectorQuery(queries[i], searcher, filterQuery, searchParameters);
+                                    VectorQueryResult r = doVectorQuery(queries[i], searcher, filterQuery, searchParameters);
+                                    results[i] = r.topDocs();
+                                    if (r.ivfProfile() != null) {
+                                        ivfProfiles.add(r.ivfProfile());
+                                    }
                                 } catch (IOException e) {
                                     throw new UncheckedIOException(e);
                                 }
@@ -307,6 +322,9 @@ class KnnSearcher {
         finalResults.filterSelectivity = searchParameters.filterSelectivity();
         finalResults.numCandidates = searchParameters.numCandidates();
         finalResults.earlyTermination = searchParameters.earlyTermination();
+        if (profile && indexType == KnnIndexTester.IndexType.IVF && ivfProfiles.isEmpty() == false) {
+            finalResults.ivfProfiles = new ArrayList<>(ivfProfiles);
+        }
     }
 
     private static Query generateRandomQuery(Random random, Path indexPath, int size, float selectivity, boolean filterCached)
@@ -417,7 +435,7 @@ class KnnSearcher {
         return new TopDocs(new TotalHits(profiler.getVectorOpsCount(), docs.totalHits.relation()), docs.scoreDocs);
     }
 
-    TopDocs doVectorQuery(float[] vector, IndexSearcher searcher, Query filterQuery, SearchParameters searchParameters) throws IOException {
+    VectorQueryResult doVectorQuery(float[] vector, IndexSearcher searcher, Query filterQuery, SearchParameters searchParameters) throws IOException {
         Query knnQuery;
         int overSampledTopK = searchParameters.topK();
         if (searchParameters.overSamplingFactor() > 1f) {
@@ -455,7 +473,9 @@ class KnnSearcher {
         assert knnQuery instanceof QueryProfilerProvider : "this knnQuery doesn't support profiling";
         QueryProfilerProvider queryProfilerProvider = (QueryProfilerProvider) knnQuery;
         queryProfilerProvider.profile(profiler);
-        return new TopDocs(new TotalHits(profiler.getVectorOpsCount(), docs.totalHits.relation()), docs.scoreDocs);
+        TopDocs topDocs = new TopDocs(new TotalHits(profiler.getVectorOpsCount(), docs.totalHits.relation()), docs.scoreDocs);
+        IVFProfile ivfProfile = (profile && indexType == KnnIndexTester.IndexType.IVF) ? profiler.getIvfProfile() : null;
+        return new VectorQueryResult(topDocs, ivfProfile);
     }
 
     private static float checkResults(int[][] results, int[][] nn, int topK) {

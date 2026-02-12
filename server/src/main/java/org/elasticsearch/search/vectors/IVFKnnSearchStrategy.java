@@ -18,10 +18,17 @@ public class IVFKnnSearchStrategy extends KnnSearchStrategy {
     private final float visitRatio;
     private final SetOnce<AbstractMaxScoreKnnCollector> collector = new SetOnce<>();
     private final LongAccumulator accumulator;
+    private final IVFProfileAccumulator profileAccumulator;
+    private IVFProfileAccumulator.IVFSegmentBuilder segmentBuilder;
 
     public IVFKnnSearchStrategy(float visitRatio, LongAccumulator accumulator) {
+        this(visitRatio, accumulator, null);
+    }
+
+    public IVFKnnSearchStrategy(float visitRatio, LongAccumulator accumulator, IVFProfileAccumulator profileAccumulator) {
         this.visitRatio = visitRatio;
         this.accumulator = accumulator;
+        this.profileAccumulator = profileAccumulator;
     }
 
     void setCollector(AbstractMaxScoreKnnCollector collector) {
@@ -67,6 +74,36 @@ public class IVFKnnSearchStrategy extends KnnSearchStrategy {
         long currentScore = accumulator.get();
         if (currentScore > collectorScore) {
             knnCollector.updateMinCompetitiveDocScore(currentScore);
+        }
+    }
+
+    /**
+     * Record the start of a segment (one leaf). No-op if profiling is disabled.
+     */
+    public void recordSegmentStart(int numVectors, int numCentroids) {
+        if (profileAccumulator != null) {
+            segmentBuilder = profileAccumulator.createSegmentBuilder();
+            segmentBuilder.recordSegmentStart(numVectors, numCentroids);
+        }
+    }
+
+    /**
+     * Record one visited cluster (centroid score and posting list size). No-op if profiling is disabled.
+     */
+    public void recordCluster(float centroidScore, int postingListSize) {
+        if (segmentBuilder != null) {
+            segmentBuilder.recordCluster(centroidScore, postingListSize);
+        }
+    }
+
+    /**
+     * Record the end of a segment. No-op if profiling is disabled.
+     */
+    public void recordSegmentEnd(int clustersVisited, int vectorsVisited) {
+        if (segmentBuilder != null && profileAccumulator != null) {
+            segmentBuilder.recordSegmentEnd(vectorsVisited);
+            profileAccumulator.finishSegment(segmentBuilder);
+            segmentBuilder = null;
         }
     }
 }

@@ -30,6 +30,7 @@ import org.apache.lucene.util.NamedThreadFactory;
 import org.elasticsearch.cli.ProcessInfo;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.logging.LogConfigurator;
+import org.elasticsearch.search.vectors.IVFProfile;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.PathUtils;
@@ -502,7 +503,79 @@ public class KnnIndexTester {
 
             printBlock(sb, searchHeaders, queryResultsArray);
 
+            // When profile is enabled and index type is IVF, append IVF profile mean over all queries
+            for (Results queryResult : queryResults) {
+                if (queryResult.ivfProfiles != null && queryResult.ivfProfiles.isEmpty() == false) {
+                    appendIvfProfileMean(sb, queryResult.ivfProfiles);
+                    break;
+                }
+            }
+
             return sb.toString();
+        }
+
+        private void appendIvfProfileMean(StringBuilder sb, List<IVFProfile> ivfProfiles) {
+            int n = ivfProfiles.size();
+            sb.append("\nIVF profile (mean over ").append(n).append(" queries):\n");
+
+            long sumVectors = 0;
+            long sumClusters = 0;
+            double sumCentroidMin = 0, sumCentroidMax = 0, sumCentroidMean = 0, sumCentroidStd = 0;
+            int countCentroidMin = 0, countCentroidMax = 0, countCentroidMean = 0, countCentroidStd = 0;
+            long sumSizeMin = 0, sumSizeMax = 0;
+            double sumSizeMean = 0, sumSizeStd = 0;
+            int countSizeMean = 0, countSizeStd = 0;
+
+            for (IVFProfile p : ivfProfiles) {
+                sumVectors += p.getTotalVectorsVisited();
+                sumClusters += p.getTotalClustersVisited();
+                float v;
+                if (Float.isNaN(v = p.getCentroidScoreMin()) == false) {
+                    sumCentroidMin += v;
+                    countCentroidMin++;
+                }
+                if (Float.isNaN(v = p.getCentroidScoreMax()) == false) {
+                    sumCentroidMax += v;
+                    countCentroidMax++;
+                }
+                if (Float.isNaN(v = p.getCentroidScoreMean()) == false) {
+                    sumCentroidMean += v;
+                    countCentroidMean++;
+                }
+                if (Float.isNaN(v = p.getCentroidScoreStd()) == false) {
+                    sumCentroidStd += v;
+                    countCentroidStd++;
+                }
+                sumSizeMin += p.getClusterSizeMin();
+                sumSizeMax += p.getClusterSizeMax();
+                if (Float.isNaN(v = p.getClusterSizeMean()) == false) {
+                    sumSizeMean += v;
+                    countSizeMean++;
+                }
+                if (Float.isNaN(v = p.getClusterSizeStd()) == false) {
+                    sumSizeStd += v;
+                    countSizeStd++;
+                }
+            }
+
+            sb.append("  total_vectors_visited: ").append(sumVectors / n).append("\n");
+            sb.append("  total_clusters_visited: ").append(sumClusters / n).append("\n");
+            sb.append("  centroid_score_min: ").append(formatMean(sumCentroidMin, countCentroidMin, n)).append("\n");
+            sb.append("  centroid_score_max: ").append(formatMean(sumCentroidMax, countCentroidMax, n)).append("\n");
+            sb.append("  centroid_score_mean: ").append(formatMean(sumCentroidMean, countCentroidMean, n)).append("\n");
+            sb.append("  centroid_score_std: ").append(formatMean(sumCentroidStd, countCentroidStd, n)).append("\n");
+            sb.append("  cluster_size_min: ").append(sumSizeMin / n).append("\n");
+            sb.append("  cluster_size_max: ").append(sumSizeMax / n).append("\n");
+            sb.append("  cluster_size_mean: ").append(formatMean(sumSizeMean, countSizeMean, n)).append("\n");
+            sb.append("  cluster_size_std: ").append(formatMean(sumSizeStd, countSizeStd, n)).append("\n");
+        }
+
+        private static String formatMean(double sum, int validCount, int n) {
+            if (validCount == 0) {
+                return "N/A";
+            }
+            double mean = sum / validCount;
+            return Float.isNaN((float) mean) ? "N/A" : String.format(Locale.ROOT, "%.4f", mean);
         }
 
         private void printBlock(StringBuilder sb, String[] headers, String[][] rows) {
@@ -578,6 +651,7 @@ public class KnnIndexTester {
         double overSamplingFactor;
         boolean earlyTermination;
         int numCandidates;
+        List<IVFProfile> ivfProfiles;
 
         Results(String indexName, String indexType, int numDocs) {
             this.indexName = indexName;
