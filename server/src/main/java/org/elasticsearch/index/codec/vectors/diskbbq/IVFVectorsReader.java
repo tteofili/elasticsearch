@@ -105,6 +105,90 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
         float visitRatio
     ) throws IOException;
 
+    /**
+     * Returns an iterator over all centroids for the given field and query, ordered by
+     * descending centroid-query similarity. Used by global best-first multi-segment search.
+     * Caller must use {@link #visitSingleCluster} to visit individual clusters; do not call
+     * {@link #search(String, float[], KnnCollector, AcceptDocs)} when using this iterator.
+     *
+     * @return centroid iterator in score order, or null if field is not IVF float or missing
+     */
+    public CentroidIterator getOrderedCentroidIterator(String field, float[] target, AcceptDocs acceptDocs) throws IOException {
+        final FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
+        if (fieldInfo == null || fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32) == false) {
+            return null;
+        }
+        FieldEntry entry = fields.get(fieldInfo.number);
+        if (entry == null) {
+            return null;
+        }
+        FloatVectorValues values = getReaderForField(field).getFloatVectorValues(field);
+        if (values == null) {
+            return null;
+        }
+        int numVectors = values.size();
+        final ESAcceptDocs esAcceptDocs = acceptDocs instanceof ESAcceptDocs ? (ESAcceptDocs) acceptDocs : null;
+        float approximateCost = (float) (esAcceptDocs == null
+            ? acceptDocs.cost()
+            : esAcceptDocs instanceof ESAcceptDocs.ESAcceptDocsAll ? numVectors : esAcceptDocs.approximateCost());
+        IndexInput postListSlice = entry.postingListSlice(ivfClusters);
+        CentroidIterator it = getCentroidIterator(
+            fieldInfo,
+            entry.numCentroids,
+            entry.centroidSlice(ivfCentroids),
+            target,
+            postListSlice,
+            acceptDocs,
+            approximateCost,
+            values,
+            1.0f
+        );
+        return it;
+    }
+
+    /**
+     * Visits a single cluster (posting list) for global best-first multi-segment search.
+     * Scores and collects documents from the given cluster into the collector.
+     *
+     * @param field        vector field name
+     * @param target       query vector
+     * @param meta         posting list metadata (from {@link CentroidIterator#nextPosting()})
+     * @param knnCollector collector to receive (docId, score) pairs; docIds are segment-local
+     * @param acceptDocs   accepted documents for this segment
+     * @return the number of vectors in the cluster (for visitRatio budget tracking)
+     */
+    public int visitSingleCluster(
+        String field,
+        float[] target,
+        PostingMetadata meta,
+        KnnCollector knnCollector,
+        AcceptDocs acceptDocs
+    ) throws IOException {
+        final FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
+        if (fieldInfo == null || fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32) == false) {
+            return 0;
+        }
+        FieldEntry entry = fields.get(fieldInfo.number);
+        if (entry == null) {
+            return 0;
+        }
+        IndexInput postListSlice = entry.postingListSlice(ivfClusters);
+        Bits acceptDocsBits = acceptDocs.bits();
+        PostingVisitor scorer = getPostingVisitor(
+            fieldInfo,
+            postListSlice,
+            target,
+            acceptDocsBits,
+            entry.centroidSlice(ivfCentroids)
+        );
+        int clusterSize = scorer.resetPostingsScorer(meta);
+        scorer.visit(knnCollector);
+        if (knnCollector.getSearchStrategy() != null) {
+            knnCollector.getSearchStrategy().nextVectorsBlock();
+        }
+        return clusterSize;
+    }
+
     protected static IndexInput openDataInput(
         SegmentReadState state,
         int versionMeta,
