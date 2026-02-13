@@ -53,6 +53,7 @@ import static org.elasticsearch.simdvec.ESNextOSQVectorsScorer.BULK_SIZE;
 /**
  * Default implementation of {@link IVFVectorsReader}. It scores the posting lists centroids using
  * brute force and then scores the top ones using the posting list.
+ * This implementation uses Next-format quantization and optionally parent/child centroid hierarchies.
  */
 public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements VectorPreconditioner {
 
@@ -112,6 +113,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
             // any matching document.
             acceptCentroids = null;
         } else {
+            // Build a bitset of centroids that contain at least one accepted doc.
             acceptCentroids = new FixedBitSet(numCentroids);
             final KnnVectorValues.DocIndexIterator docIndexIterator = values.iterator();
             final DocIdSetIterator iterator = ConjunctionUtils.intersectIterators(List.of(acceptDocs.iterator(), docIndexIterator));
@@ -121,6 +123,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
                 acceptCentroids.set((int) longValues.get(docIndexIterator.index()));
             }
         }
+        // quantize query once to score centroids efficiently and build the iterator. We will re-quantize the query with the parent centroid if parents exist, however, this initial quantization is still useful to avoid having to read the parent centroids when quantizing the query for the first time.
         final OptimizedScalarQuantizer scalarQuantizer = new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction());
         final int[] scratch = new int[targetQuery.length];
         final OptimizedScalarQuantizer.QuantizationResult queryParams = scalarQuantizer.scalarQuantize(
@@ -296,6 +299,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
         FixedBitSet acceptCentroids,
         int bulkSize
     ) throws IOException {
+        // Score all centroids directly and return them ordered by score.
         final NeighborQueue neighborQueue = new NeighborQueue(numCentroids, true);
         final long centroidQuantizeSize = fieldInfo.getVectorDimension() + 3 * Float.BYTES + Integer.BYTES;
         score(
@@ -347,7 +351,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
         FixedBitSet acceptCentroids,
         int bulkSize
     ) throws IOException {
-        // build the three queues we are going to use
+        // parent/child hierarchy: score parents, then selectively score children based on parent scores. This allows us to skip scoring many children when the centroids are well clustered and we have a good query, while still being able to handle cases where the centroids are not well clustered or the query is not close to the parent centroids.
         final long rawParentSize = (long) fieldInfo.getVectorDimension() * Float.BYTES;
         final long centroidQuantizeSize = fieldInfo.getVectorDimension() + 3 * Float.BYTES + Integer.BYTES;
         final NeighborQueue parentsQueue = new NeighborQueue(numParents, true);
@@ -402,7 +406,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
 
         final long offset = centroids.getFilePointer();
         final long childrenOffset = offset + (long) Long.BYTES * numParents;
-        // populate the children's queue by reading parents one by one
+        // Populate the children's queue by reading parents one by one.
         while (parentsQueue.size() > 0 && neighborQueue.size() < bufferSize) {
             final int pop = parentsQueue.pop();
             populateOneChildrenGroup(
@@ -606,6 +610,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
                 centroidSlice.getFilePointer(),
                 (long) numParents * fieldInfo.getVectorDimension() * Float.BYTES
             );
+            // when parents exist, query quantization depends on the parent centroid, so we need to keep the parents slice around to be able to read the parent centroids when quantizing the query for each posting list. When parents do not exist, the global centroid is used for query quantization, so we can quantize the query right away and discard the centroids slice.
             queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, parentsSlice, entry.globalCentroid());
         } else {
             queryQuantizer = new QueryQuantizer(quantEncoding, fieldInfo, target, null, entry.globalCentroid());

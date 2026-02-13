@@ -55,6 +55,7 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
 
     protected final IndexInput ivfCentroids, ivfClusters;
     private final SegmentReadState state;
+    private final int versionMeta;
     private final FieldInfos fieldInfos;
     protected final IntObjectHashMap<FieldEntry> fields;
     private final GenericFlatVectorReaders genericReaders;
@@ -85,6 +86,7 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
             } finally {
                 CodecUtil.checkFooter(ivfMeta, priorE);
             }
+            this.versionMeta = versionMeta;
             ivfCentroids = openDataInput(state, versionMeta, CENTROID_EXTENSION, ES920DiskBBQVectorsFormat.NAME, state.context);
             ivfClusters = openDataInput(state, versionMeta, CLUSTER_EXTENSION, ES920DiskBBQVectorsFormat.NAME, state.context);
         } catch (Throwable t) {
@@ -150,6 +152,7 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
             }
 
             FieldEntry fieldEntry = readField(meta, info, versionMeta);
+            // attach the field entry to the corresponding flat vectors reader
             genericFields.loadField(fieldNumber, fieldEntry, loadReader);
 
             fields.put(info.number, fieldEntry);
@@ -274,6 +277,7 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
         } else {
             esAcceptDocs = null;
         }
+        // IVF search is only used for float vectors; byte vectors are handled by the flat reader.
         FloatVectorValues values = getReaderForField(field).getFloatVectorValues(field);
         int numVectors = values.size();
         // TODO returning cost 0 in ESAcceptDocs.ESAcceptDocsAll feels wrong? cost is related to the number of matching documents?
@@ -301,6 +305,7 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
         // we account for soar vectors here. We can potentially visit a vector twice so we multiply by 2 here.
         long maxVectorVisited = (long) (2.0 * visitRatio * numVectors);
         IndexInput postListSlice = entry.postingListSlice(ivfClusters);
+        // order centroids by proximity and exposes their posting list metadata
         CentroidIterator centroidPrefetchingIterator = getCentroidIterator(
             fieldInfo,
             entry.numCentroids,
@@ -313,6 +318,8 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
             visitRatio
         );
         Bits acceptDocsBits = acceptDocs.bits();
+        // score vectors inside each posting list until we have visited enough vectors or found good enough matches
+        // we may end up visiting more than maxVectorVisited ?
         PostingVisitor scorer = getPostingVisitor(fieldInfo, postListSlice, target, acceptDocsBits, entry.centroidSlice(ivfCentroids));
         long expectedDocs = 0;
         long actualDocs = 0;
@@ -356,6 +363,149 @@ public abstract class IVFVectorsReader extends KnnVectorsReader {
                 return;
             }
         }
+    }
+
+    /**
+     * Returns the ordered list of posting list metadata (centroid phase only, no vector scoring).
+     * Used by the query layer to partition work for parallel segment search. Caller must pass the
+     * same visitRatio that would be used for a full search.
+     *
+     * @return list of postings in visit order, or empty list if field is not IVF float
+     */
+    public final List<PostingMetadata> getOrderedPostingMetadataList(
+        String field,
+        float[] target,
+        AcceptDocs acceptDocs,
+        float visitRatio
+    ) throws IOException {
+        final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
+        if (fieldInfo == null || fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32) == false) {
+            return List.of();
+        }
+        if (fieldInfo.getVectorDimension() != target.length) {
+            throw new IllegalArgumentException(
+                "vector query dimension: " + target.length + " differs from field dimension: " + fieldInfo.getVectorDimension()
+            );
+        }
+        FieldEntry entry = fields.get(fieldInfo.number);
+        if (entry == null) {
+            return List.of();
+        }
+        FloatVectorValues values = getReaderForField(field).getFloatVectorValues(field);
+        if (values == null || values.size() == 0) {
+            return List.of();
+        }
+        int numVectors = values.size();
+        final ESAcceptDocs esAcceptDocs = acceptDocs instanceof ESAcceptDocs ? (ESAcceptDocs) acceptDocs : null;
+        float approximateCost = (float) (esAcceptDocs == null ? acceptDocs.cost()
+            : esAcceptDocs instanceof ESAcceptDocs.ESAcceptDocsAll ? numVectors
+            : esAcceptDocs.approximateCost());
+        if (visitRatio == DYNAMIC_VISIT_RATIO) {
+            // Fallback when caller does not pass a concrete ratio (e.g. chunked search should pass ratio from query)
+            float estimated = (float) Math.round(
+                Math.log10(numVectors) * Math.log10(numVectors) * Math.min(1000, Math.max(10, numVectors / 100))
+            );
+            visitRatio = Math.max(0f, Math.min(1f, estimated / numVectors));
+        }
+        // Same cap as full search: only include postings that would be visited under visitRatio
+        long maxVectorVisited = Math.max(1, (long) (2.0 * visitRatio * numVectors));
+        IndexInput postListSlice = entry.postingListSlice(ivfClusters);
+        CentroidIterator it = getCentroidIterator(
+            fieldInfo,
+            entry.numCentroids,
+            entry.centroidSlice(ivfCentroids),
+            target,
+            postListSlice,
+            acceptDocs,
+            approximateCost,
+            values,
+            visitRatio
+        );
+        Bits acceptDocsBits = acceptDocs.bits();
+        PostingVisitor scorer = getPostingVisitor(
+            fieldInfo,
+            postListSlice,
+            target,
+            acceptDocsBits,
+            entry.centroidSlice(ivfCentroids)
+        );
+        List<PostingMetadata> list = new ArrayList<>();
+        long cumulativeExpected = 0;
+        while (it.hasNext() && cumulativeExpected < maxVectorVisited) {
+            PostingMetadata pm = it.nextPosting();
+            cumulativeExpected += scorer.resetPostingsScorer(pm);
+            list.add(pm);
+        }
+        return list;
+    }
+
+    /**
+     * Scores a chunk of posting lists using a dedicated IndexInput. Thread-safe when each thread
+     * calls with its own chunk: this method opens and closes its own cluster and centroid
+     * IndexInputs (the directory must support multiple opens of the same file, e.g. MMapDirectory).
+     * Caller is responsible for merging chunk results and applying docBase to doc IDs.
+     *
+     * @param postingsChunk ordered list of postings to score (subset from getOrderedPostingMetadataList)
+     */
+    public final void searchPostingListChunk(
+        String field,
+        float[] target,
+        AcceptDocs acceptDocs,
+        List<PostingMetadata> postingsChunk,
+        KnnCollector knnCollector
+    ) throws IOException {
+        if (postingsChunk.isEmpty()) {
+            return;
+        }
+        final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
+        if (fieldInfo.getVectorEncoding().equals(VectorEncoding.FLOAT32) == false) {
+            getReaderForField(field).search(field, target, knnCollector, acceptDocs);
+            return;
+        }
+        if (fieldInfo.getVectorDimension() != target.length) {
+            throw new IllegalArgumentException(
+                "vector query dimension: " + target.length + " differs from field dimension: " + fieldInfo.getVectorDimension()
+            );
+        }
+        FieldEntry entry = fields.get(fieldInfo.number);
+        if (entry == null) {
+            return;
+        }
+        IndexInput clustersInput = null;
+        IndexInput centroidsInput = null;
+        try {
+            clustersInput = openNewClustersInput();
+            centroidsInput = openNewCentroidsInput();
+            IndexInput postListSlice = entry.postingListSlice(clustersInput);
+            IndexInput centroidSlice = entry.centroidSlice(centroidsInput);
+            Bits acceptDocsBits = acceptDocs.bits();
+            PostingVisitor scorer = getPostingVisitor(fieldInfo, postListSlice, target, acceptDocsBits, centroidSlice);
+            for (PostingMetadata pm : postingsChunk) {
+                scorer.resetPostingsScorer(pm);
+                scorer.visit(knnCollector);
+                if (knnCollector.getSearchStrategy() != null) {
+                    knnCollector.getSearchStrategy().nextVectorsBlock();
+                }
+            }
+        } finally {
+            IOUtils.close(clustersInput, centroidsInput);
+        }
+    }
+
+    /**
+     * Opens a new IndexInput over the segment's cluster file. Each parallel chunk task must use
+     * its own input; the directory must support multiple opens of the same file (e.g. MMapDirectory).
+     */
+    protected final IndexInput openNewClustersInput() throws IOException {
+        return openDataInput(state, versionMeta, CLUSTER_EXTENSION, ES920DiskBBQVectorsFormat.NAME, state.context);
+    }
+
+    /**
+     * Opens a new IndexInput over the segment's centroid file. Each parallel chunk task must use
+     * its own input; the directory must support multiple opens of the same file (e.g. MMapDirectory).
+     */
+    protected final IndexInput openNewCentroidsInput() throws IOException {
+        return openDataInput(state, versionMeta, CENTROID_EXTENSION, ES920DiskBBQVectorsFormat.NAME, state.context);
     }
 
     @Override

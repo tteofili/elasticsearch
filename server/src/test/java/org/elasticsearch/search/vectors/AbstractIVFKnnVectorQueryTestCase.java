@@ -844,6 +844,67 @@ abstract class AbstractIVFKnnVectorQueryTestCase extends LuceneTestCase {
         }
     }
 
+    /**
+     * Tests that when the index has multiple small segments (each below MIN_DOCS_TINY_SEGMENT),
+     * the query batches them and still returns correct top-k results in score order.
+     */
+    public void testBatchedTinySegmentsCorrectness() throws IOException {
+        int dimension = 4;
+        int docsPerSegment = 2_000;
+        int numSegments = 5;
+        int totalDocs = docsPerSegment * numSegments;
+        int k = 20;
+        try (Directory d = newDirectoryForTest()) {
+            IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+            iwc.setCodec(TestUtil.alwaysKnnVectorsFormat(format));
+            iwc.setMergePolicy(NoMergePolicy.INSTANCE);
+            iwc.setMaxBufferedDocs(docsPerSegment);
+            iwc.setRAMBufferSizeMB(IndexWriterConfig.DISABLE_AUTO_FLUSH);
+            try (IndexWriter w = new IndexWriter(d, iwc)) {
+                for (int i = 0; i < totalDocs; i++) {
+                    Document doc = new Document();
+                    doc.add(getKnnVectorField("field", randomVector(dimension)));
+                    doc.add(new StringField("id", "id" + i, Field.Store.YES));
+                    w.addDocument(doc);
+                    if ((i + 1) % docsPerSegment == 0) {
+                        w.flush();
+                    }
+                }
+            }
+            try (IndexReader reader = DirectoryReader.open(d)) {
+                assertEquals("expected multiple segments to trigger batching", numSegments, reader.leaves().size());
+                IndexSearcher searcher = newSearcher(reader, true, true, true);
+                float[] queryVector = randomVector(dimension);
+                AbstractIVFKnnVectorQuery query = getKnnVectorQuery("field", queryVector, k);
+                TopDocs topDocs = searcher.search(query, k);
+                assertTrue("expected at least some hits", topDocs.scoreDocs.length > 0);
+                assertTrue("expected at most k hits", topDocs.scoreDocs.length <= k);
+                float lastScore = Float.MAX_VALUE;
+                for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
+                    assertTrue("scores must be in descending order", scoreDoc.score <= lastScore);
+                    lastScore = scoreDoc.score;
+                }
+            }
+        }
+    }
+
+    /**
+     * Tests that when the index has no segments (empty), rewrite returns NO_DOCS_INSTANCE.
+     */
+    public void testEmptyLeavesNoTasks() throws IOException {
+        try (Directory d = newDirectoryForTest()) {
+            try (IndexWriter w = new IndexWriter(d, new IndexWriterConfig(new MockAnalyzer(random())))) {
+                // no documents added
+            }
+            try (IndexReader reader = DirectoryReader.open(d)) {
+                assertTrue("empty index should have no leaves", reader.leaves().isEmpty());
+                AbstractIVFKnnVectorQuery kvq = getKnnVectorQuery("field", new float[] { 1, 2 }, 10);
+                Query rewritten = kvq.rewrite(newSearcher(reader));
+                assertSame(Queries.NO_DOCS_INSTANCE, rewritten);
+            }
+        }
+    }
+
     /** Creates a new directory and adds documents with the given vectors as kNN vector fields */
     Directory getIndexStore(String field, float[]... contents) throws IOException {
         return getIndexStore(field, VectorSimilarityFunction.EUCLIDEAN, contents);

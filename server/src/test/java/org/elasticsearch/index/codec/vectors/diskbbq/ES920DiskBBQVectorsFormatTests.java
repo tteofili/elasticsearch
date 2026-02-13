@@ -36,6 +36,8 @@ import org.apache.lucene.tests.index.BaseKnnVectorsFormatTestCase;
 import org.apache.lucene.tests.util.TestUtil;
 import org.elasticsearch.common.logging.LogConfigurator;
 import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
+import org.elasticsearch.index.codec.vectors.diskbbq.PostingMetadata;
+import org.elasticsearch.search.vectors.ESAcceptDocs;
 import org.junit.AssumptionViolatedException;
 import org.junit.Before;
 
@@ -337,6 +339,42 @@ public class ES920DiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCase
 
                 for (Thread t : threads) {
                     t.join();
+                }
+            }
+        }
+    }
+
+    /**
+     * Tests that IVFVectorsReader.getOrderedPostingMetadataList returns a non-empty list
+     * for a segment with vectors, supporting the chunked parallel search path.
+     */
+    public void testGetOrderedPostingMetadataList() throws IOException {
+        int dimensions = random().nextInt(12, 128);
+        int numDocs = random().nextInt(50, 500);
+        float[] queryVector = randomVector(dimensions);
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.EUCLIDEAN));
+                w.addDocument(doc);
+            }
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader leafReader = getOnlyLeafReader(reader);
+                if (leafReader instanceof CodecReader codecReader) {
+                    KnnVectorsReader knnVectorsReader = codecReader.getVectorReader();
+                    if (knnVectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader fieldsReader) {
+                        KnnVectorsReader fieldReader = fieldsReader.getFieldReader("f");
+                        if (fieldReader instanceof IVFVectorsReader ivfReader) {
+                            List<PostingMetadata> ordered = ivfReader.getOrderedPostingMetadataList(
+                                "f",
+                                queryVector,
+                                ESAcceptDocs.ESAcceptDocsAll.INSTANCE,
+                                0.1f
+                            );
+                            assertThat("IVF segment should have ordered posting list", ordered.isEmpty(), equalTo(false));
+                        }
+                    }
                 }
             }
         }
