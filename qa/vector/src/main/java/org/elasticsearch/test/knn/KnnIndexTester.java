@@ -518,7 +518,7 @@ public class KnnIndexTester {
             int n = ivfProfiles.size();
             sb.append("\nIVF profile (mean over ").append(n).append(" queries):\n");
 
-            long sumVectors = 0;
+            float sumVectors = 0;
             long sumClusters = 0;
             double sumCentroidMin = 0, sumCentroidMax = 0, sumCentroidMean = 0, sumCentroidStd = 0;
             int countCentroidMin = 0, countCentroidMax = 0, countCentroidMean = 0, countCentroidStd = 0;
@@ -560,17 +560,17 @@ public class KnnIndexTester {
 
             sb.append("  total_vectors_visited: ").append(sumVectors / n).append("\n");
             sb.append("  total_clusters_visited: ").append(sumClusters / n).append("\n");
-            sb.append("  centroid_score_min: ").append(formatMean(sumCentroidMin, countCentroidMin, n)).append("\n");
-            sb.append("  centroid_score_max: ").append(formatMean(sumCentroidMax, countCentroidMax, n)).append("\n");
-            sb.append("  centroid_score_mean: ").append(formatMean(sumCentroidMean, countCentroidMean, n)).append("\n");
-            sb.append("  centroid_score_std: ").append(formatMean(sumCentroidStd, countCentroidStd, n)).append("\n");
+            sb.append("  centroid_score_min: ").append(formatMean(sumCentroidMin, countCentroidMin)).append("\n");
+            sb.append("  centroid_score_max: ").append(formatMean(sumCentroidMax, countCentroidMax)).append("\n");
+            sb.append("  centroid_score_mean: ").append(formatMean(sumCentroidMean, countCentroidMean)).append("\n");
+            sb.append("  centroid_score_std: ").append(formatMean(sumCentroidStd, countCentroidStd)).append("\n");
             sb.append("  cluster_size_min: ").append(sumSizeMin / n).append("\n");
             sb.append("  cluster_size_max: ").append(sumSizeMax / n).append("\n");
-            sb.append("  cluster_size_mean: ").append(formatMean(sumSizeMean, countSizeMean, n)).append("\n");
-            sb.append("  cluster_size_std: ").append(formatMean(sumSizeStd, countSizeStd, n)).append("\n");
+            sb.append("  cluster_size_mean: ").append(formatMean(sumSizeMean, countSizeMean)).append("\n");
+            sb.append("  cluster_size_std: ").append(formatMean(sumSizeStd, countSizeStd)).append("\n");
         }
 
-        private static String formatMean(double sum, int validCount, int n) {
+        private static String formatMean(double sum, int validCount) {
             if (validCount == 0) {
                 return "N/A";
             }
