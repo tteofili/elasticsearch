@@ -28,13 +28,21 @@ import java.nio.ByteOrder;
 import static org.apache.lucene.index.VectorSimilarityFunction.EUCLIDEAN;
 import static org.apache.lucene.index.VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT;
 import static org.elasticsearch.simdvec.internal.Similarities.dotProductD4Q4;
-import static org.elasticsearch.simdvec.internal.Similarities.dotProductD4Q4Bulk;
 
-/** Panamized scorer for quantized vectors stored as a {@link MemorySegment}. */
+/** Panamized scorer for quantized vectors stored as a {@link MemorySegment}. Uses only the first fraction of dimensions for scoring. */
 final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQVectorsScorer.MemorySegmentScorer {
+
+    public static final float SLICING_RATIO = 0.9f;
+    /** Bytes per stripe used for dot-product accumulation. Traversal still uses full {@link #length}. */
+    private final int scoreSize;
+    /** Effective dimensions for correction formulas */
+    private final int effectiveDimensions;
 
     MSInt4SymmetricESNextOSQVectorsScorer(IndexInput in, int dimensions, int dataLength, int bulkSize, MemorySegment memorySegment) {
         super(in, dimensions, dataLength, bulkSize, memorySegment);
+        int size = length / 4;
+        this.scoreSize = (int) (size * SLICING_RATIO);
+        this.effectiveDimensions = (int) (dimensions * SLICING_RATIO);
     }
 
     @Override
@@ -57,21 +65,20 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
 
     private long nativeQuantizeScore(byte[] q) throws IOException {
         long offset = in.getFilePointer();
-        var datasetMemorySegment = memorySegment.asSlice(offset, length);
-
-        final long qScore;
-        if (SUPPORTS_HEAP_SEGMENTS) {
-            var queryMemorySegment = MemorySegment.ofArray(q);
-            qScore = dotProductD4Q4(datasetMemorySegment, queryMemorySegment, length);
-        } else {
-            try (var arena = Arena.ofConfined()) {
-                var queryMemorySegment = arena.allocate(q.length, 32);
-                MemorySegment.copy(q, 0, queryMemorySegment, ValueLayout.JAVA_BYTE, 0, q.length);
-                qScore = dotProductD4Q4(datasetMemorySegment, queryMemorySegment, length);
+        int size = length / 4;
+        try (var arena = Arena.ofConfined()) {
+            var datasetBuf = arena.allocate(4L * scoreSize, 32);
+            for (int stripe = 0; stripe < 4; stripe++) {
+                MemorySegment.copy(memorySegment, offset + (long) stripe * size, datasetBuf, (long) stripe * scoreSize, scoreSize);
             }
+            var queryBuf = arena.allocate(4L * scoreSize, 32);
+            for (int lane = 0; lane < 4; lane++) {
+                MemorySegment.copy(q, lane * size, queryBuf, ValueLayout.JAVA_BYTE, (long) lane * scoreSize, scoreSize);
+            }
+            long qScore = dotProductD4Q4(datasetBuf, queryBuf, 4 * scoreSize);
+            in.skipBytes(length);
+            return qScore;
         }
-        in.skipBytes(length);
-        return qScore;
     }
 
     private long quantizeScoreSymmetric128(byte[] q) throws IOException {
@@ -96,10 +103,11 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
         long subRet2 = 0;
         long subRet3 = 0;
         int i = 0;
-        long offset = in.getFilePointer();
+        long halfStart = in.getFilePointer();
+        long offset = halfStart;
         int size = length / 4;
-        if (size >= ByteVector.SPECIES_256.vectorByteSize() * 2) {
-            int limit = ByteVector.SPECIES_256.loopBound(size);
+        if (scoreSize >= ByteVector.SPECIES_256.vectorByteSize() * 2) {
+            int limit = ByteVector.SPECIES_256.loopBound(scoreSize);
             var sum0 = LongVector.zero(LONG_SPECIES_256);
             var sum1 = LongVector.zero(LONG_SPECIES_256);
             var sum2 = LongVector.zero(LONG_SPECIES_256);
@@ -121,12 +129,12 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
             subRet3 += sum3.reduceLanes(VectorOperators.ADD);
         }
 
-        if (size - i >= ByteVector.SPECIES_128.vectorByteSize()) {
+        if (scoreSize - i >= ByteVector.SPECIES_128.vectorByteSize()) {
             var sum0 = LongVector.zero(LONG_SPECIES_128);
             var sum1 = LongVector.zero(LONG_SPECIES_128);
             var sum2 = LongVector.zero(LONG_SPECIES_128);
             var sum3 = LongVector.zero(LONG_SPECIES_128);
-            int limit = ByteVector.SPECIES_128.loopBound(size);
+            int limit = ByteVector.SPECIES_128.loopBound(scoreSize);
             for (; i < limit; i += ByteVector.SPECIES_128.length(), offset += LONG_SPECIES_128.vectorByteSize()) {
                 var vq0 = ByteVector.fromArray(BYTE_SPECIES_128, q, i).reinterpretAsLongs();
                 var vq1 = ByteVector.fromArray(BYTE_SPECIES_128, q, i + size).reinterpretAsLongs();
@@ -143,29 +151,30 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
             subRet2 += sum2.reduceLanes(VectorOperators.ADD);
             subRet3 += sum3.reduceLanes(VectorOperators.ADD);
         }
-        // process scalar tail
+        // process scalar tail (only up to scoreSize); then skip rest of stripe
         in.seek(offset);
-        for (final int upperBound = size & -Long.BYTES; i < upperBound; i += Long.BYTES) {
+        for (final int upperBound = scoreSize & -Long.BYTES; i < upperBound; i += Long.BYTES) {
             final long value = in.readLong();
             subRet0 += Long.bitCount((long) BitUtil.VH_LE_LONG.get(q, i) & value);
             subRet1 += Long.bitCount((long) BitUtil.VH_LE_LONG.get(q, i + size) & value);
             subRet2 += Long.bitCount((long) BitUtil.VH_LE_LONG.get(q, i + 2 * size) & value);
             subRet3 += Long.bitCount((long) BitUtil.VH_LE_LONG.get(q, i + 3 * size) & value);
         }
-        for (final int upperBound = size & -Integer.BYTES; i < upperBound; i += Integer.BYTES) {
+        for (final int upperBound = scoreSize & -Integer.BYTES; i < upperBound; i += Integer.BYTES) {
             final int value = in.readInt();
             subRet0 += Integer.bitCount((int) BitUtil.VH_LE_INT.get(q, i) & value);
             subRet1 += Integer.bitCount((int) BitUtil.VH_LE_INT.get(q, i + size) & value);
             subRet2 += Integer.bitCount((int) BitUtil.VH_LE_INT.get(q, i + 2 * size) & value);
             subRet3 += Integer.bitCount((int) BitUtil.VH_LE_INT.get(q, i + 3 * size) & value);
         }
-        for (; i < size; i++) {
+        for (; i < scoreSize; i++) {
             int dValue = in.readByte() & 0xFF;
             subRet0 += Integer.bitCount((q[i] & dValue) & 0xFF);
             subRet1 += Integer.bitCount((q[i + size] & dValue) & 0xFF);
             subRet2 += Integer.bitCount((q[i + 2 * size] & dValue) & 0xFF);
             subRet3 += Integer.bitCount((q[i + 3 * size] & dValue) & 0xFF);
         }
+        in.seek(halfStart + size);
         return subRet0 + (subRet1 << 1) + (subRet2 << 2) + (subRet3 << 3);
     }
 
@@ -175,14 +184,15 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
         long subRet2 = 0;
         long subRet3 = 0;
         int i = 0;
-        long offset = in.getFilePointer();
+        long halfStart = in.getFilePointer();
+        long offset = halfStart;
 
         var sum0 = IntVector.zero(INT_SPECIES_128);
         var sum1 = IntVector.zero(INT_SPECIES_128);
         var sum2 = IntVector.zero(INT_SPECIES_128);
         var sum3 = IntVector.zero(INT_SPECIES_128);
         int size = length / 4;
-        int limit = ByteVector.SPECIES_128.loopBound(size);
+        int limit = ByteVector.SPECIES_128.loopBound(scoreSize);
         for (; i < limit; i += ByteVector.SPECIES_128.length(), offset += INT_SPECIES_128.vectorByteSize()) {
             var vd = IntVector.fromMemorySegment(INT_SPECIES_128, memorySegment, offset, ByteOrder.LITTLE_ENDIAN);
             var vq0 = ByteVector.fromArray(BYTE_SPECIES_128, q, i).reinterpretAsInts();
@@ -198,29 +208,30 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
         subRet1 += sum1.reduceLanes(VectorOperators.ADD);
         subRet2 += sum2.reduceLanes(VectorOperators.ADD);
         subRet3 += sum3.reduceLanes(VectorOperators.ADD);
-        // process scalar tail
+        // process scalar tail (only up to scoreSize); then skip rest of stripe
         in.seek(offset);
-        for (final int upperBound = size & -Long.BYTES; i < upperBound; i += Long.BYTES) {
+        for (final int upperBound = scoreSize & -Long.BYTES; i < upperBound; i += Long.BYTES) {
             final long value = in.readLong();
             subRet0 += Long.bitCount((long) BitUtil.VH_LE_LONG.get(q, i) & value);
             subRet1 += Long.bitCount((long) BitUtil.VH_LE_LONG.get(q, i + size) & value);
             subRet2 += Long.bitCount((long) BitUtil.VH_LE_LONG.get(q, i + 2 * size) & value);
             subRet3 += Long.bitCount((long) BitUtil.VH_LE_LONG.get(q, i + 3 * size) & value);
         }
-        for (final int upperBound = size & -Integer.BYTES; i < upperBound; i += Integer.BYTES) {
+        for (final int upperBound = scoreSize & -Integer.BYTES; i < upperBound; i += Integer.BYTES) {
             final int value = in.readInt();
             subRet0 += Integer.bitCount((int) BitUtil.VH_LE_INT.get(q, i) & value);
             subRet1 += Integer.bitCount((int) BitUtil.VH_LE_INT.get(q, i + size) & value);
             subRet2 += Integer.bitCount((int) BitUtil.VH_LE_INT.get(q, i + 2 * size) & value);
             subRet3 += Integer.bitCount((int) BitUtil.VH_LE_INT.get(q, i + 3 * size) & value);
         }
-        for (; i < size; i++) {
+        for (; i < scoreSize; i++) {
             int dValue = in.readByte() & 0xFF;
             subRet0 += Integer.bitCount((q[i] & dValue) & 0xFF);
             subRet1 += Integer.bitCount((q[i + size] & dValue) & 0xFF);
             subRet2 += Integer.bitCount((q[i + 2 * size] & dValue) & 0xFF);
             subRet3 += Integer.bitCount((q[i + 3 * size] & dValue) & 0xFF);
         }
+        in.seek(halfStart + size);
         return subRet0 + (subRet1 << 1) + (subRet2 << 2) + (subRet3 << 3);
     }
 
@@ -261,10 +272,22 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
     private void nativeQuantizeScoreBulk(MemorySegment queryMemorySegment, int count, MemorySegment scoresSegment) throws IOException {
         long initialOffset = in.getFilePointer();
         var datasetLengthInBytes = (long) length * count;
-        MemorySegment datasetSegment = memorySegment.asSlice(initialOffset, datasetLengthInBytes);
-
-        dotProductD4Q4Bulk(datasetSegment, queryMemorySegment, length, count, scoresSegment);
-
+        int size = length / 4;
+        try (var arena = Arena.ofConfined()) {
+            var querySlice = arena.allocate(4L * scoreSize, 32);
+            for (int lane = 0; lane < 4; lane++) {
+                MemorySegment.copy(queryMemorySegment, (long) lane * size, querySlice, (long) lane * scoreSize, scoreSize);
+            }
+            var datasetBuf = arena.allocate(4L * scoreSize, 32);
+            for (int i = 0; i < count; i++) {
+                long vecOffset = initialOffset + (long) i * length;
+                for (int stripe = 0; stripe < 4; stripe++) {
+                    MemorySegment.copy(memorySegment, vecOffset + (long) stripe * size, datasetBuf, (long) stripe * scoreSize, scoreSize);
+                }
+                long qScore = dotProductD4Q4(datasetBuf, querySlice, 4 * scoreSize);
+                scoresSegment.set(ValueLayout.JAVA_FLOAT, (long) i * Float.BYTES, (float) qScore);
+            }
+        }
         in.skipBytes(datasetLengthInBytes);
     }
 
@@ -292,6 +315,10 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
         float[] scores,
         int bulkSize
     ) throws IOException {
+        queryAdditionalCorrection *= SLICING_RATIO;
+        centroidDp *= SLICING_RATIO;
+        queryComponentSum = Math.round(queryComponentSum * SLICING_RATIO);
+
         assert q.length == length;
         // 128 / 8 == 16
         if (length >= 16) {
@@ -377,7 +404,7 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
             similarityFunction,
             memorySegment.asSlice(offset),
             bulkSize,
-            dimensions,
+            effectiveDimensions,
             queryLowerInterval,
             queryUpperInterval,
             queryComponentSum,
@@ -427,12 +454,12 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
                 memorySegment,
                 offset + 12L * bulkSize + i * Float.BYTES,
                 ByteOrder.LITTLE_ENDIAN
-            );
+            ).mul(SLICING_RATIO);
             var qcDist = FloatVector.fromArray(FLOAT_SPECIES_128, scores, i);
-            // ax * ay * dimensions + ay * lx * (float) targetComponentSum + ax * ly * y1 + lx * ly *
+            // ax * ay * effectiveDimensions + ay * lx * (float) targetComponentSum + ax * ly * y1 + lx * ly *
             // qcDist;
-            var res1 = ax.mul(ay).mul(dimensions);
-            var res2 = lx.mul(ay).mul(targetComponentSums);
+            var res1 = ax.mul(ay).mul(effectiveDimensions);
+            var res2 = lx.mul(ay).mul(targetComponentSums).mul(SLICING_RATIO);
             var res3 = ax.mul(ly).mul(y1);
             var res4 = lx.mul(ly).mul(qcDist);
             var res = res1.add(res2).add(res3).add(res4);
@@ -518,12 +545,12 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
                 memorySegment,
                 offset + 12L * bulkSize + i * Float.BYTES,
                 ByteOrder.LITTLE_ENDIAN
-            );
+            ).mul(SLICING_RATIO);
             var qcDist = FloatVector.fromArray(FLOAT_SPECIES_256, scores, i);
-            // ax * ay * dimensions + ay * lx * (float) targetComponentSum + ax * ly * y1 + lx * ly *
+            // ax * ay * effectiveDimensions + ay * lx * (float) targetComponentSum + ax * ly * y1 + lx * ly *
             // qcDist;
-            var res1 = ax.mul(ay).mul(dimensions);
-            var res2 = lx.mul(ay).mul(targetComponentSums);
+            var res1 = ax.mul(ay).mul(effectiveDimensions);
+            var res2 = lx.mul(ay).mul(targetComponentSums).mul(SLICING_RATIO);
             var res3 = ax.mul(ly).mul(y1);
             var res4 = lx.mul(ly).mul(qcDist);
             var res = res1.add(res2).add(res3).add(res4);
@@ -570,6 +597,71 @@ final class MSInt4SymmetricESNextOSQVectorsScorer extends MemorySegmentESNextOSQ
             );
         }
         in.seek(offset + 16L * bulkSize);
+        return maxScore;
+    }
+
+    @Override
+    protected float applyCorrectionsIndividually(
+        float queryAdditionalCorrection,
+        VectorSimilarityFunction similarityFunction,
+        float centroidDp,
+        float indexBitScale,
+        float[] scores,
+        int bulkSize,
+        int limit,
+        long offset,
+        float ay,
+        float ly,
+        float y1,
+        float maxScore
+    ) {
+        for (int j = limit; j < bulkSize; j++) {
+            float ax = memorySegment.get(
+                ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN),
+                offset + (long) j * Float.BYTES
+            );
+
+            float lx = memorySegment.get(
+                ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN),
+                offset + 4L * bulkSize + (long) j * Float.BYTES
+            );
+            lx = (lx - ax) * indexBitScale;
+
+            int targetComponentSum = Math.round(
+                memorySegment.get(
+                    ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN),
+                    offset + 8L * bulkSize + (long) j * Integer.BYTES
+                ) * SLICING_RATIO
+            );
+
+            float additionalCorrection = memorySegment.get(
+                ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN),
+                offset + 12L * bulkSize + (long) j * Float.BYTES
+            ) * SLICING_RATIO;
+
+            float qcDist = scores[j];
+
+            float res = ax * ay * effectiveDimensions + lx * ay * targetComponentSum + ax * ly * y1 + lx * ly * qcDist;
+
+            if (similarityFunction == EUCLIDEAN) {
+                res = res * -2f + additionalCorrection + queryAdditionalCorrection + 1f;
+                res = Math.max(1f / res, 0f);
+                scores[j] = res;
+                maxScore = Math.max(maxScore, res);
+            } else {
+                res = res + queryAdditionalCorrection + additionalCorrection - centroidDp;
+
+                if (similarityFunction == MAXIMUM_INNER_PRODUCT) {
+                    res = VectorUtil.scaleMaxInnerProductScore(res);
+                    scores[j] = res;
+                    maxScore = Math.max(maxScore, res);
+                } else {
+                    res = Math.max((res + 1f) * 0.5f, 0f);
+                    scores[j] = res;
+                    maxScore = Math.max(maxScore, res);
+                }
+            }
+        }
         return maxScore;
     }
 
