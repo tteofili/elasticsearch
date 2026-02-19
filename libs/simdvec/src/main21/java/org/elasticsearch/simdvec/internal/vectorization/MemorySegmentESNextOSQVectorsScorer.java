@@ -150,7 +150,7 @@ public final class MemorySegmentESNextOSQVectorsScorer extends ESNextOSQVectorsS
         MSInt4SymmetricESNextOSQVectorsScorer {
 
         // TODO: split Panama and Native implementations
-        static final boolean NATIVE_SUPPORTED = false;//NativeAccess.instance().getVectorSimilarityFunctions().isPresent();
+        static final boolean NATIVE_SUPPORTED = NativeAccess.instance().getVectorSimilarityFunctions().isPresent();
         static final boolean SUPPORTS_HEAP_SEGMENTS = Runtime.version().feature() >= 22;
 
         static final float ONE_BIT_SCALE = ESNextOSQVectorsScorer.BIT_SCALES[0];

@@ -32,6 +32,7 @@ import static org.elasticsearch.simdvec.internal.Similarities.dotProductD1Q4;
 /** Panamized scorer for quantized vectors stored as a {@link MemorySegment}. Uses only the first 50% of dimensions for scoring. */
 final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVectorsScorer.MemorySegmentScorer {
 
+    public static final double SLICING_RATIO = 0.5;
     /** Byte length used for dot-product accumulation (first half of vector). Traversal still uses full {@link #length}. */
     private final int scoreLength;
     /** Effective dimensions for correction formulas (half of full dimensions). */
@@ -39,8 +40,8 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
 
     MSBitToInt4ESNextOSQVectorsScorer(IndexInput in, int dimensions, int dataLength, int bulkSize, MemorySegment memorySegment) {
         super(in, dimensions, dataLength, bulkSize, memorySegment);
-        this.scoreLength = (int) (length * 0.9);
-        this.effectiveDimensions = (int) (dimensions * 0.9);
+        this.scoreLength = (int) (length * SLICING_RATIO);
+        this.effectiveDimensions = (int) (dimensions * SLICING_RATIO);
     }
 
     @Override
@@ -733,7 +734,9 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
                 res = res * -2f + additionalCorrection + queryAdditionalCorrection + 1f;
                 res = Math.max(1f / res, 0f);
                 scores[j] = res;
-                maxScore = Math.max(maxScore, res);
+                if (Float.isFinite(res)) {
+                    maxScore = Math.max(maxScore, res);
+                }
             } else {
                 res = res + queryAdditionalCorrection + additionalCorrection - centroidDp;
 
