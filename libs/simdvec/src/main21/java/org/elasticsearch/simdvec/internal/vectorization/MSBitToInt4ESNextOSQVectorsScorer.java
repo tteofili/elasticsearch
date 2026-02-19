@@ -12,6 +12,8 @@ import jdk.incubator.vector.ByteVector;
 import jdk.incubator.vector.FloatVector;
 import jdk.incubator.vector.IntVector;
 import jdk.incubator.vector.LongVector;
+import jdk.incubator.vector.Vector;
+import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
 
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -24,6 +26,7 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
+import java.util.Arrays;
 
 import static org.apache.lucene.index.VectorSimilarityFunction.EUCLIDEAN;
 import static org.apache.lucene.index.VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT;
@@ -32,10 +35,10 @@ import static org.elasticsearch.simdvec.internal.Similarities.dotProductD1Q4;
 /** Panamized scorer for quantized vectors stored as a {@link MemorySegment}. Uses only the first 50% of dimensions for scoring. */
 final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVectorsScorer.MemorySegmentScorer {
 
-    public static final double SLICING_RATIO = 0.5;
-    /** Byte length used for dot-product accumulation (first half of vector). Traversal still uses full {@link #length}. */
+    public static final float SLICING_RATIO = 0.9f;
+    /** Byte length used for dot-product accumulation. Traversal still uses full {@link #length}. */
     private final int scoreLength;
-    /** Effective dimensions for correction formulas (half of full dimensions). */
+    /** Effective dimensions for correction formulas */
     private final int effectiveDimensions;
 
     MSBitToInt4ESNextOSQVectorsScorer(IndexInput in, int dimensions, int dataLength, int bulkSize, MemorySegment memorySegment) {
@@ -410,6 +413,10 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
         float[] scores,
         int bulkSize
     ) throws IOException {
+        queryAdditionalCorrection *= SLICING_RATIO;
+        centroidDp *= SLICING_RATIO;
+        queryComponentSum = Math.round(queryComponentSum * SLICING_RATIO);
+
         assert q.length == length * 4;
         // 128 / 8 == 16
         if (length >= 16) {
@@ -545,12 +552,12 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
                 memorySegment,
                 offset + 12L * bulkSize + i * Float.BYTES,
                 ByteOrder.LITTLE_ENDIAN
-            );
+            ).mul(SLICING_RATIO);
             var qcDist = FloatVector.fromArray(FLOAT_SPECIES_128, scores, i);
             // ax * ay * effectiveDimensions + ay * lx * (float) targetComponentSum + ax * ly * y1 + lx * ly *
             // qcDist;
             var res1 = ax.mul(ay).mul(effectiveDimensions);
-            var res2 = lx.mul(ay).mul(targetComponentSums);
+            var res2 = lx.mul(ay).mul(targetComponentSums).mul(SLICING_RATIO);
             var res3 = ax.mul(ly).mul(y1);
             var res4 = lx.mul(ly).mul(qcDist);
             var res = res1.add(res2).add(res3).add(res4);
@@ -559,7 +566,13 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
             if (similarityFunction == EUCLIDEAN) {
                 res = res.mul(-2).add(additionalCorrections).add(queryAdditionalCorrection).add(1f);
                 res = FloatVector.broadcast(FLOAT_SPECIES_128, 1).div(res).max(0);
-                maxScore = Math.max(maxScore, res.test(VectorOperators.IS_FINITE).toVector().reduceLanesToLong(VectorOperators.MAX));
+                VectorMask<Float> finiteMask = res.test(VectorOperators.IS_FINITE);
+                maxScore = Math.max(maxScore, res.reduceLanes(VectorOperators.MAX, finiteMask));
+                if (maxScore < 0) {
+                    float[] resArray = res.toArray();
+                    Arrays.sort(resArray);
+                    maxScore = resArray[resArray.length - 1];
+                }
                 res.intoArray(scores, i);
             } else {
                 // For cosine and max inner product, we need to apply the additional correction, which is
@@ -575,7 +588,13 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
                 } else {
                     res = res.add(1f).mul(0.5f).max(0);
                     res.intoArray(scores, i);
-                    maxScore = Math.max(maxScore, res.reduceLanes(VectorOperators.MAX));
+                    VectorMask<Float> finiteMask = res.test(VectorOperators.IS_FINITE);
+                    maxScore = Math.max(maxScore, res.reduceLanes(VectorOperators.MAX, finiteMask));
+                    if (maxScore < 0) {
+                        float[] resArray = res.toArray();
+                        Arrays.sort(resArray);
+                        maxScore = resArray[resArray.length - 1];
+                    }
                 }
             }
         }
@@ -635,12 +654,12 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
                 memorySegment,
                 offset + 12L * bulkSize + i * Float.BYTES,
                 ByteOrder.LITTLE_ENDIAN
-            );
+            ).mul(SLICING_RATIO);
             var qcDist = FloatVector.fromArray(FLOAT_SPECIES_256, scores, i);
             // ax * ay * effectiveDimensions + ay * lx * (float) targetComponentSum + ax * ly * y1 + lx * ly *
             // qcDist;
             var res1 = ax.mul(ay).mul(effectiveDimensions);
-            var res2 = lx.mul(ay).mul(targetComponentSums);
+            var res2 = lx.mul(ay).mul(targetComponentSums).mul(SLICING_RATIO);
             var res3 = ax.mul(ly).mul(y1);
             var res4 = lx.mul(ly).mul(qcDist);
             var res = res1.add(res2).add(res3).add(res4);
@@ -716,15 +735,15 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
             );
             lx = (lx - ax) * indexBitScale;
 
-            int targetComponentSum = memorySegment.get(
+            int targetComponentSum = Math.round(memorySegment.get(
                 ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN),
                 offset + 8L * bulkSize + (long) j * Integer.BYTES
-            );
+            )  * SLICING_RATIO);
 
             float additionalCorrection = memorySegment.get(
                 ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN),
                 offset + 12L * bulkSize + (long) j * Float.BYTES
-            );
+            ) * SLICING_RATIO;
 
             float qcDist = scores[j];
 
