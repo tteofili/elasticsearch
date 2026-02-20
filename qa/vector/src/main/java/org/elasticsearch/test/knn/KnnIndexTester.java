@@ -51,6 +51,7 @@ import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.XContentType;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.management.ManagementFactory;
@@ -59,6 +60,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -381,6 +383,13 @@ public class KnnIndexTester {
                     }
                 }
                 numSegments(indexPath, indexResults);
+                Map<Integer, Map<Integer, Integer>> qrelsMap = null;
+                if (testConfiguration.qrels() != null) {
+                    if (Files.exists(testConfiguration.qrels()) == false) {
+                        throw new IllegalArgumentException("Qrels file does not exist: " + testConfiguration.qrels());
+                    }
+                    qrelsMap = Qrels.load(testConfiguration.qrels());
+                }
                 if (testConfiguration.queryVectors() != null && testConfiguration.numQueries() > 0) {
                     if (parsedArgs.warmUpIterations() > 0) {
                         logger.info("Running the searches for " + parsedArgs.warmUpIterations() + " warm up iterations");
@@ -396,7 +405,7 @@ public class KnnIndexTester {
 
                     for (int i = 0; i < results.length; i++) {
                         KnnSearcher knnSearcher = new KnnSearcher(indexPath, testConfiguration);
-                        knnSearcher.runSearch(results[i], testConfiguration.searchParams().get(i));
+                        knnSearcher.runSearch(results[i], testConfiguration.searchParams().get(i), qrelsMap);
                     }
                 }
                 formattedResults.queryResults.addAll(List.of(results));
@@ -466,22 +475,30 @@ public class KnnIndexTester {
                 "force_merge_time(ms)",
                 "num_segments" };
 
-            // Define column headers
-            String[] searchHeaders = {
-                "index_name",
-                "index_type",
-                "visit_percentage(%)",
-                "latency(ms)",
-                "net_cpu_time(ms)",
-                "avg_cpu_count",
-                "QPS",
-                "recall",
-                "visited",
-                "filter_selectivity",
-                "filter_cached",
-                "oversampling_factor",
-                "num_candidates",
-                "early_termination" };
+            // Define column headers; add ndcg@k when any result has it
+            boolean includeNdcg = queryResults.stream().anyMatch(r -> r.avgNdcgAtK != null);
+            List<String> searchHeaderList = new ArrayList<>(
+                List.of(
+                    "index_name",
+                    "index_type",
+                    "visit_percentage(%)",
+                    "latency(ms)",
+                    "net_cpu_time(ms)",
+                    "avg_cpu_count",
+                    "QPS",
+                    "recall",
+                    "visited",
+                    "filter_selectivity",
+                    "filter_cached",
+                    "oversampling_factor",
+                    "num_candidates",
+                    "early_termination"
+                )
+            );
+            if (includeNdcg) {
+                searchHeaderList.add("ndcg@k");
+            }
+            String[] searchHeaders = searchHeaderList.toArray(new String[0]);
 
             // Calculate appropriate column widths based on headers and data
 
@@ -503,21 +520,32 @@ public class KnnIndexTester {
             String[][] queryResultsArray = new String[queryResults.size()][];
             for (int i = 0; i < queryResults.size(); i++) {
                 Results queryResult = queryResults.get(i);
-                queryResultsArray[i] = new String[] {
-                    queryResult.indexName,
-                    queryResult.indexType,
-                    String.format(Locale.ROOT, "%.3f", queryResult.visitPercentage),
-                    String.format(Locale.ROOT, "%.2f", queryResult.avgLatency),
-                    String.format(Locale.ROOT, "%.2f", queryResult.netCpuTimeMS),
-                    String.format(Locale.ROOT, "%.2f", queryResult.avgCpuCount),
-                    String.format(Locale.ROOT, "%.2f", queryResult.qps),
-                    String.format(Locale.ROOT, "%.2f", queryResult.avgRecall),
-                    String.format(Locale.ROOT, "%.2f", queryResult.averageVisited),
-                    String.format(Locale.ROOT, "%.2f", queryResult.filterSelectivity),
-                    Boolean.toString(queryResult.filterCached),
-                    String.format(Locale.ROOT, "%.2f", queryResult.overSamplingFactor),
-                    String.format(Locale.ROOT, "%d", queryResult.numCandidates),
-                    Boolean.toString(queryResult.earlyTermination) };
+                List<String> row = new ArrayList<>(
+                    List.of(
+                        queryResult.indexName,
+                        queryResult.indexType,
+                        String.format(Locale.ROOT, "%.3f", queryResult.visitPercentage),
+                        String.format(Locale.ROOT, "%.2f", queryResult.avgLatency),
+                        String.format(Locale.ROOT, "%.2f", queryResult.netCpuTimeMS),
+                        String.format(Locale.ROOT, "%.2f", queryResult.avgCpuCount),
+                        String.format(Locale.ROOT, "%.2f", queryResult.qps),
+                        String.format(Locale.ROOT, "%.2f", queryResult.avgRecall),
+                        String.format(Locale.ROOT, "%.2f", queryResult.averageVisited),
+                        String.format(Locale.ROOT, "%.2f", queryResult.filterSelectivity),
+                        Boolean.toString(queryResult.filterCached),
+                        String.format(Locale.ROOT, "%.2f", queryResult.overSamplingFactor),
+                        String.format(Locale.ROOT, "%d", queryResult.numCandidates),
+                        Boolean.toString(queryResult.earlyTermination)
+                    )
+                );
+                if (includeNdcg) {
+                    row.add(
+                        queryResult.avgNdcgAtK != null
+                            ? String.format(Locale.ROOT, "%.4f", queryResult.avgNdcgAtK)
+                            : "-"
+                    );
+                }
+                queryResultsArray[i] = row.toArray(new String[0]);
             }
 
             printBlock(sb, searchHeaders, queryResultsArray);
@@ -595,6 +623,7 @@ public class KnnIndexTester {
         double netCpuTimeMS;
         double avgCpuCount;
         boolean filterCached;
+        Double avgNdcgAtK; // NDCG@k when qrels were provided; null otherwise
         double overSamplingFactor;
         boolean earlyTermination;
         int numCandidates;
@@ -618,6 +647,50 @@ public class KnnIndexTester {
             threadIDs = threadBean.getAllThreadIds();
             cpuTimesNS = threadBean.getThreadCpuTime(threadIDs);
             threadInfos = threadBean.getThreadInfo(threadIDs);
+        }
+    }
+
+    /**
+     * Loader for TREC-style qrels files.
+     * Format: one line per judgment, whitespace-separated: {@code query_id doc_id relevance}.
+     * Optional fourth field (e.g. iteration) is ignored. Blank lines and lines starting with
+     * {@code #} are skipped. Query and doc IDs are 0-based to match KnnIndexTester (query index
+     * and stored doc id). Duplicate (query_id, doc_id) entries: last relevance wins.
+     */
+    public static final class Qrels {
+
+        private Qrels() {}
+
+        /**
+         * Load qrels from a TREC-style file.
+         *
+         * @param qrelsPath path to the qrels file
+         * @return map from query_id to (doc_id to relevance)
+         */
+        public static Map<Integer, Map<Integer, Integer>> load(Path qrelsPath) throws IOException {
+            Map<Integer, Map<Integer, Integer>> byQuery = new HashMap<>();
+            try (BufferedReader reader = Files.newBufferedReader(qrelsPath)) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    line = line.trim();
+                    if (line.isEmpty() || line.startsWith("#")) {
+                        continue;
+                    }
+                    String[] parts = line.split(",");
+                    if (parts.length < 3) {
+                        continue;
+                    }
+                    int base = 0;
+                    if (parts.length == 4) {
+                        base = 1;
+                    }
+                    int queryId = Integer.parseInt(parts[base]);
+                    int docId = Integer.parseInt(parts[base+1]);
+                    int relevance = Integer.parseInt(parts[base+2]);
+                    byQuery.computeIfAbsent(queryId, k -> new HashMap<>()).put(docId, relevance);
+                }
+            }
+            return byQuery;
         }
     }
 }

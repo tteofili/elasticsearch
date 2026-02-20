@@ -56,7 +56,8 @@ record TestConfiguration(
     int numMergeWorkers,
     boolean doPrecondition,
     int preconditioningBlockDims,
-    int secondaryClusterSize
+    int secondaryClusterSize,
+    Path qrels
 ) {
 
     static final ParseField DOC_VECTORS_FIELD = new ParseField("doc_vectors");
@@ -94,6 +95,7 @@ record TestConfiguration(
     static final ParseField PRECONDITIONING_BLOCK_DIMS = new ParseField("preconditioning_block_dims");
     static final ParseField FILTER_CACHED = new ParseField("filter_cache");
     static final ParseField SEARCH_PARAMS = new ParseField("search_params");
+    static final ParseField QRELS_FIELD = new ParseField("qrels");
 
     /** By default, in ES the default writer buffer size is 10% of the heap space
      * (see {@code IndexingMemoryController.INDEX_BUFFER_SIZE_SETTING}).
@@ -155,6 +157,7 @@ record TestConfiguration(
         PARSER.declareObjectArray(Builder::setSearchParams, (p, c) -> SearchParameters.fromXContent(p), SEARCH_PARAMS);
         PARSER.declareInt(Builder::setMergeWorkers, MERGE_WORKERS_FIELD);
         PARSER.declareInt(Builder::setSecondaryClusterSize, SECONDARY_CLUSTER_SIZE);
+        PARSER.declareString(Builder::setQrels, QRELS_FIELD);
     }
 
     public int numberOfSearchRuns() {
@@ -175,6 +178,11 @@ record TestConfiguration(
         List<ParameterHelp> params = List.of(
             new ParameterHelp("doc_vectors", "array[string]", "Required. Paths to document vectors files used for indexing."),
             new ParameterHelp("query_vectors", "string", "Optional. Path to query vectors file; omit to skip searches."),
+            new ParameterHelp(
+                "qrels",
+                "string",
+                "Optional. Path to TREC-style qrels file (query_id doc_id relevance per line) for NDCG@k; IDs are 0-based."
+            ),
             new ParameterHelp("num_docs", "int", "Number of documents to index."),
             new ParameterHelp("num_queries", "int", "Number of queries to run from the query vectors file."),
             new ParameterHelp("index_type", "string", "Index type: hnsw, flat, ivf, or gpu_hnsw."),
@@ -281,6 +289,7 @@ record TestConfiguration(
         private List<SearchParameters.Builder> searchParams = null;
         private int numMergeWorkers = 1;
         private int secondaryClusterSize = -1;
+        private Path qrels = null;
 
         /**
          * Elasticsearch does not set this explicitly, and in Lucene this setting is
@@ -467,6 +476,11 @@ record TestConfiguration(
             return this;
         }
 
+        public Builder setQrels(String qrelsPath) {
+            this.qrels = (qrelsPath == null || qrelsPath.isEmpty()) ? null : PathUtils.get(qrelsPath);
+            return this;
+        }
+
         public TestConfiguration build() {
             if (docVectors == null) {
                 throw new IllegalArgumentException("Document vectors path must be provided");
@@ -538,7 +552,8 @@ record TestConfiguration(
                 numMergeWorkers,
                 doPrecondition,
                 preconditioningBlockDims,
-                secondaryClusterSize
+                secondaryClusterSize,
+                qrels
             );
         }
 
@@ -586,6 +601,9 @@ record TestConfiguration(
             }
             if (searchParams != null) {
                 builder.field(SEARCH_PARAMS.getPreferredName(), searchParams);
+            }
+            if (qrels != null) {
+                builder.field(QRELS_FIELD.getPreferredName(), qrels.toString());
             }
             return builder.endObject();
         }

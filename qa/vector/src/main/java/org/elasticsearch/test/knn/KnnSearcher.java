@@ -76,8 +76,10 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
@@ -124,6 +126,14 @@ class KnnSearcher {
     }
 
     void runSearch(KnnIndexTester.Results finalResults, SearchParameters searchParameters) throws IOException {
+        runSearch(finalResults, searchParameters, null);
+    }
+
+    void runSearch(
+        KnnIndexTester.Results finalResults,
+        SearchParameters searchParameters,
+        Map<Integer, Map<Integer, Integer>> qrels
+    ) throws IOException {
         Query filterQuery = searchParameters.filterSelectivity() < 1f
             ? generateRandomQuery(
                 new Random(searchParameters.seed()),
@@ -307,6 +317,15 @@ class KnnSearcher {
         finalResults.filterSelectivity = searchParameters.filterSelectivity();
         finalResults.numCandidates = searchParameters.numCandidates();
         finalResults.earlyTermination = searchParameters.earlyTermination();
+        if (qrels != null && qrels.isEmpty() == false) {
+            int topK = searchParameters.topK();
+            double sumNdcg = 0;
+            for (int i = 0; i < numQueryVectors; i++) {
+                Map<Integer, Integer> queryRatings = qrels.getOrDefault(i, Collections.emptyMap());
+                sumNdcg += NdcgAtK.ndcgAtK(topK, resultIds[i], queryRatings);
+            }
+            finalResults.avgNdcgAtK = sumNdcg / numQueryVectors;
+        }
     }
 
     private static Query generateRandomQuery(Random random, Path indexPath, int size, float selectivity, boolean filterCached)
@@ -730,4 +749,53 @@ class KnnSearcher {
         }
     }
 
+    /**
+     * Computes NDCG@k (Normalized Discounted Cumulative Gain at k).
+     * Uses the same DCG formula as {@code org.elasticsearch.index.rankeval.DiscountedCumulativeGain}:
+     * (2^rating - 1) / log2(rank + 1). Unrated documents in the result list are assigned relevance 0.
+     */
+    public static final class NdcgAtK {
+
+        private static final double LOG2 = Math.log(2.0);
+
+        private NdcgAtK() {}
+
+        /**
+         * Compute NDCG@k for a single query.
+         *
+         * @param k              cutoff (top-k results)
+         * @param resultDocIds   doc IDs in search result order (rank 0, 1, 2, ...)
+         * @param queryRatings   doc_id to relevance for this query (unrated docs treated as 0)
+         * @return NDCG@k in [0, 1], or 0 if IDCG is 0
+         */
+        public static double ndcgAtK(int k, int[] resultDocIds, Map<Integer, Integer> queryRatings) {
+            int n = Math.min(k, resultDocIds.length);
+            List<Integer> ratingsInOrder = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) {
+                int docId = resultDocIds[i];
+                ratingsInOrder.add(queryRatings.getOrDefault(docId, 0));
+            }
+            double dcg = computeDcg(ratingsInOrder);
+            List<Integer> idealRatings = new ArrayList<>(queryRatings.values());
+            idealRatings.sort(Collections.reverseOrder());
+            int idealSize = Math.min(k, idealRatings.size());
+            double idcg = computeDcg(idealRatings.subList(0, idealSize));
+            if (idcg == 0) {
+                return 0.0;
+            }
+            return dcg / idcg;
+        }
+
+        private static double computeDcg(List<Integer> ratings) {
+            int rank = 1;
+            double dcg = 0;
+            for (Integer rating : ratings) {
+                if (rating != null && rating > 0) {
+                    dcg += (Math.pow(2, rating) - 1) / (Math.log(rank + 1) / LOG2);
+                }
+                rank++;
+            }
+            return dcg;
+        }
+    }
 }
