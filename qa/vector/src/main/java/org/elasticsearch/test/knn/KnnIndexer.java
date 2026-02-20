@@ -80,7 +80,7 @@ class KnnIndexer {
     private final MergePolicy mergePolicy;
     private final double writerBufferSizeInMb;
     private final int writerMaxBufferedDocs;
-    private final VectorSlicer.SliceType vectorSliceType;
+    private final KnnIndexTester.VectorSlicer.SliceType vectorSliceType;
     private final int vectorSliceSize;
     private final long randomProjectionSeed;
 
@@ -96,7 +96,7 @@ class KnnIndexer {
         MergePolicy mergePolicy,
         double writerBufferSizeInMb,
         int writerMaxBufferedDocs,
-        VectorSlicer.SliceType vectorSliceType,
+        KnnIndexTester.VectorSlicer.SliceType vectorSliceType,
         int vectorSliceSize,
         long randomProjectionSeed
     ) {
@@ -149,7 +149,7 @@ class KnnIndexer {
 
         long start = System.nanoTime();
         AtomicInteger numDocsIndexed = new AtomicInteger();
-        VectorSlicer slicer = null;
+        KnnIndexTester.VectorSlicer slicer = null;
         try (Directory dir = getDirectory(indexPath); IndexWriter iw = new IndexWriter(dir, iwc)) {
             for (Path docsPath : this.docsPath) {
                 int dim = this.dim;
@@ -170,8 +170,8 @@ class KnnIndexer {
                             throw new IllegalArgumentException("docsPath \"" + docsPath + "\" has invalid dimension: " + dim);
                         }
                     }
-                    if (slicer == null && vectorSliceType != VectorSlicer.SliceType.NONE) {
-                        slicer = VectorSlicer.create(dim, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+                    if (slicer == null && vectorSliceType != KnnIndexTester.VectorSlicer.SliceType.NONE) {
+                        slicer = KnnIndexTester.VectorSlicer.create(dim, vectorSliceType, vectorSliceSize, randomProjectionSeed);
                     }
                     int effectiveDim = slicer != null ? slicer.slicedDimension() : dim;
                     FieldType fieldType = switch (vectorEncoding) {
@@ -296,7 +296,7 @@ class KnnIndexer {
         private final byte[] byteSlicedBuffer;
         private final float[] floatSlicedBuffer;
         private final VectorReader in;
-        private final VectorSlicer slicer;
+        private final KnnIndexTester.VectorSlicer slicer;
 
         long readTime;
         long docAddTime;
@@ -310,7 +310,7 @@ class KnnIndexer {
             FieldType fieldType,
             AtomicInteger numDocsIndexed,
             int numDocsToIndex,
-            VectorSlicer slicer
+            KnnIndexTester.VectorSlicer slicer
         ) {
             this.iw = iw;
             this.in = in;

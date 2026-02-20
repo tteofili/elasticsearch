@@ -57,7 +57,7 @@ record TestConfiguration(
     boolean doPrecondition,
     int preconditioningBlockDims,
     int secondaryClusterSize,
-    VectorSlicer.SliceType vectorSliceType,
+    KnnIndexTester.VectorSlicer.SliceType vectorSliceType,
     int vectorSliceSize,
     long randomProjectionSeed
 ) {
@@ -170,13 +170,13 @@ record TestConfiguration(
      * Create a VectorSlicer for the given full dimension. Returns null when vector_slice_type is none.
      * Call this once the full dimension is known (from config or from the vector file).
      */
-    public VectorSlicer vectorSlicer(int fullDimension) {
-        return VectorSlicer.create(fullDimension, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+    public KnnIndexTester.VectorSlicer vectorSlicer(int fullDimension) {
+        return KnnIndexTester.VectorSlicer.create(fullDimension, vectorSliceType, vectorSliceSize, randomProjectionSeed);
     }
 
     /** Effective dimension for indexing and search: sliced dimension when slicing is enabled, otherwise full. */
     public int effectiveDimensions(int fullDimension) {
-        VectorSlicer slicer = vectorSlicer(fullDimension);
+        KnnIndexTester.VectorSlicer slicer = vectorSlicer(fullDimension);
         return slicer != null ? slicer.slicedDimension() : fullDimension;
     }
 
@@ -213,16 +213,8 @@ record TestConfiguration(
             new ParameterHelp("quantize_bits", "int", "Quantization bits; valid values depend on index_type."),
             new ParameterHelp("vector_encoding", "string", "Vector encoding: byte, float32, or bfloat16."),
             new ParameterHelp("dimensions", "int", "Vector dimensions; -1 uses dimensions from the vector file."),
-            new ParameterHelp(
-                "vector_slice_type",
-                "string",
-                "Slice type: none, prefix, suffix, or random_projection. Default none."
-            ),
-            new ParameterHelp(
-                "vector_slice_size",
-                "int",
-                "Target dimension after slicing; required when vector_slice_type is not none."
-            ),
+            new ParameterHelp("vector_slice_type", "string", "Slice type: none, prefix, suffix, or random_projection. Default none."),
+            new ParameterHelp("vector_slice_size", "int", "Target dimension after slicing; required when vector_slice_type is not none."),
             new ParameterHelp(
                 "random_projection_seed",
                 "long",
@@ -319,7 +311,7 @@ record TestConfiguration(
         private List<SearchParameters.Builder> searchParams = null;
         private int numMergeWorkers = 1;
         private int secondaryClusterSize = -1;
-        private VectorSlicer.SliceType vectorSliceType = VectorSlicer.SliceType.NONE;
+        private KnnIndexTester.VectorSlicer.SliceType vectorSliceType = KnnIndexTester.VectorSlicer.SliceType.NONE;
         private int vectorSliceSize = 0;
         private long randomProjectionSeed = 0L;
 
@@ -509,7 +501,9 @@ record TestConfiguration(
         }
 
         public Builder setVectorSliceType(String vectorSliceType) {
-            this.vectorSliceType = VectorSlicer.SliceType.valueOf(vectorSliceType.toUpperCase(Locale.ROOT).replace("-", "_"));
+            this.vectorSliceType = KnnIndexTester.VectorSlicer.SliceType.valueOf(
+                vectorSliceType.toUpperCase(Locale.ROOT).replace("-", "_")
+            );
             return this;
         }
 
@@ -532,18 +526,18 @@ record TestConfiguration(
                     "dimensions must be a positive integer or -1 for when dimension is available in the vector file"
                 );
             }
-            if (vectorSliceType != VectorSlicer.SliceType.NONE && vectorSliceSize <= 0) {
+            if (vectorSliceType != KnnIndexTester.VectorSlicer.SliceType.NONE && vectorSliceSize <= 0) {
                 throw new IllegalArgumentException(
                     "vector_slice_size must be positive when vector_slice_type is " + vectorSliceType.name().toLowerCase(Locale.ROOT)
                 );
             }
-            if (vectorSliceType == VectorSlicer.SliceType.RANDOM_PROJECTION
+            if (vectorSliceType == KnnIndexTester.VectorSlicer.SliceType.RANDOM_PROJECTION
                 && vectorEncoding == KnnIndexTester.VectorEncoding.BYTE) {
                 throw new IllegalArgumentException("random_projection is not supported for byte vector encoding");
             }
-            if (dimensions > 0 && vectorSliceType != VectorSlicer.SliceType.NONE) {
+            if (dimensions > 0 && vectorSliceType != KnnIndexTester.VectorSlicer.SliceType.NONE) {
                 // Validate slice size against known dimensions
-                VectorSlicer.create(dimensions, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+                KnnIndexTester.VectorSlicer.create(dimensions, vectorSliceType, vectorSliceSize, randomProjectionSeed);
             }
 
             // length of the longest array parameter
@@ -659,10 +653,13 @@ record TestConfiguration(
             if (searchParams != null) {
                 builder.field(SEARCH_PARAMS.getPreferredName(), searchParams);
             }
-            if (vectorSliceType != VectorSlicer.SliceType.NONE) {
-                builder.field(VECTOR_SLICE_TYPE_FIELD.getPreferredName(), vectorSliceType.name().toLowerCase(Locale.ROOT).replace("_", "-"));
+            if (vectorSliceType != KnnIndexTester.VectorSlicer.SliceType.NONE) {
+                builder.field(
+                    VECTOR_SLICE_TYPE_FIELD.getPreferredName(),
+                    vectorSliceType.name().toLowerCase(Locale.ROOT).replace("_", "-")
+                );
                 builder.field(VECTOR_SLICE_SIZE_FIELD.getPreferredName(), vectorSliceSize);
-                if (vectorSliceType == VectorSlicer.SliceType.RANDOM_PROJECTION) {
+                if (vectorSliceType == KnnIndexTester.VectorSlicer.SliceType.RANDOM_PROJECTION) {
                     builder.field(RANDOM_PROJECTION_SEED_FIELD.getPreferredName(), randomProjectionSeed);
                 }
             }

@@ -62,6 +62,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -628,6 +630,181 @@ public class KnnIndexTester {
             threadIDs = threadBean.getAllThreadIds();
             cpuTimesNS = threadBean.getThreadCpuTime(threadIDs);
             threadInfos = threadBean.getThreadInfo(threadIDs);
+        }
+    }
+
+    /**
+     * Transforms a full-dimension vector into a reduced-dimension vector for indexing and querying.
+     * Supports prefix truncation, suffix truncation, and random projection. The same slicer must be
+     * used at index time and search time.
+     */
+    public abstract static class VectorSlicer {
+
+        private final int fullDimension;
+        private final int slicedDimension;
+
+        protected VectorSlicer(int fullDimension, int slicedDimension) {
+            this.fullDimension = fullDimension;
+            this.slicedDimension = slicedDimension;
+        }
+
+        /** Full (input) dimension. */
+        public int fullDimension() {
+            return fullDimension;
+        }
+
+        /** Sliced (output) dimension. */
+        public int slicedDimension() {
+            return slicedDimension;
+        }
+
+        /**
+         * Slice a float vector into the destination buffer.
+         * @param full source vector of length {@link #fullDimension()}
+         * @param dest destination buffer of length {@link #slicedDimension()}; must not be null
+         */
+        public abstract void slice(float[] full, float[] dest);
+
+        /**
+         * Slice a byte vector into the destination buffer. Not supported by random projection.
+         * @param full source vector of length {@link #fullDimension()}
+         * @param dest destination buffer of length {@link #slicedDimension()}; must not be null
+         */
+        public abstract void slice(byte[] full, byte[] dest);
+
+        /** Slice type for configuration. */
+        public enum SliceType {
+            NONE,
+            PREFIX,
+            SUFFIX,
+            RANDOM_PROJECTION
+        }
+
+        /**
+         * Build a slicer from config. Returns null when sliceType is NONE.
+         */
+        public static VectorSlicer create(int fullDimension, SliceType sliceType, int sliceSize, long randomProjectionSeed) {
+            if (sliceType == SliceType.NONE) {
+                return null;
+            }
+            Objects.requireNonNull(sliceType);
+            if (sliceSize <= 0) {
+                throw new IllegalArgumentException("vector_slice_size must be positive, got: " + sliceSize);
+            }
+            return switch (sliceType) {
+                case PREFIX -> {
+                    if (sliceSize > fullDimension) {
+                        throw new IllegalArgumentException(
+                            "vector_slice_size must be <= dimensions for prefix slice, got slice_size="
+                                + sliceSize
+                                + " dimensions="
+                                + fullDimension
+                        );
+                    }
+                    yield new PrefixSlicer(fullDimension, sliceSize);
+                }
+                case SUFFIX -> {
+                    if (sliceSize > fullDimension) {
+                        throw new IllegalArgumentException(
+                            "vector_slice_size must be <= dimensions for suffix slice, got slice_size="
+                                + sliceSize
+                                + " dimensions="
+                                + fullDimension
+                        );
+                    }
+                    yield new SuffixSlicer(fullDimension, sliceSize);
+                }
+                case RANDOM_PROJECTION -> {
+                    if (sliceSize >= fullDimension) {
+                        throw new IllegalArgumentException(
+                            "vector_slice_size must be < dimensions for random_projection, got slice_size="
+                                + sliceSize
+                                + " dimensions="
+                                + fullDimension
+                        );
+                    }
+                    yield new RandomProjectionSlicer(fullDimension, sliceSize, randomProjectionSeed);
+                }
+                default -> throw new IllegalStateException("Unexpected value: " + sliceType);
+            };
+        }
+
+        private static final class PrefixSlicer extends VectorSlicer {
+            PrefixSlicer(int fullDimension, int sliceSize) {
+                super(fullDimension, sliceSize);
+            }
+
+            @Override
+            public void slice(float[] full, float[] dest) {
+                assert full.length >= slicedDimension() && dest.length == slicedDimension();
+                System.arraycopy(full, 0, dest, 0, slicedDimension());
+            }
+
+            @Override
+            public void slice(byte[] full, byte[] dest) {
+                assert full.length >= slicedDimension() && dest.length == slicedDimension();
+                System.arraycopy(full, 0, dest, 0, slicedDimension());
+            }
+        }
+
+        private static final class SuffixSlicer extends VectorSlicer {
+            private final int start;
+
+            SuffixSlicer(int fullDimension, int sliceSize) {
+                super(fullDimension, sliceSize);
+                this.start = fullDimension - sliceSize;
+            }
+
+            @Override
+            public void slice(float[] full, float[] dest) {
+                assert full.length >= fullDimension() && dest.length == slicedDimension();
+                System.arraycopy(full, start, dest, 0, slicedDimension());
+            }
+
+            @Override
+            public void slice(byte[] full, byte[] dest) {
+                assert full.length >= fullDimension() && dest.length == slicedDimension();
+                System.arraycopy(full, start, dest, 0, slicedDimension());
+            }
+        }
+
+        private static final class RandomProjectionSlicer extends VectorSlicer {
+            /** Matrix fullDim x slicedDim; project via y = A^T x. */
+            private final float[][] matrix;
+
+            RandomProjectionSlicer(int fullDimension, int sliceSize, long seed) {
+                super(fullDimension, sliceSize);
+                this.matrix = buildMatrix(fullDimension, sliceSize, seed);
+            }
+
+            private static float[][] buildMatrix(int fullDim, int slicedDim, long seed) {
+                Random rng = new Random(seed);
+                float[][] a = new float[fullDim][slicedDim];
+                double scale = 1.0 / Math.sqrt(slicedDim);
+                for (int i = 0; i < fullDim; i++) {
+                    for (int j = 0; j < slicedDim; j++) {
+                        a[i][j] = (float) (rng.nextGaussian() * scale);
+                    }
+                }
+                return a;
+            }
+
+            @Override
+            public void slice(float[] full, float[] dest) {
+                assert full.length >= fullDimension() && dest.length == slicedDimension();
+                for (int j = 0; j < slicedDimension(); j++) {
+                    double sum = 0;
+                    for (int i = 0; i < fullDimension(); i++) {
+                        sum += full[i] * matrix[i][j];
+                    }
+                    dest[j] = (float) sum;
+                }
+            }
+
+            @Override
+            public void slice(byte[] full, byte[] dest) {
+                throw new UnsupportedOperationException("random_projection is not supported for byte vectors");
+            }
         }
     }
 }

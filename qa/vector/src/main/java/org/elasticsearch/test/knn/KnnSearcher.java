@@ -106,7 +106,7 @@ class KnnSearcher {
     private final VectorSimilarityFunction similarityFunction;
     private final VectorEncoding vectorEncoding;
     private final boolean doPrecondition;
-    private final VectorSlicer.SliceType vectorSliceType;
+    private final KnnIndexTester.VectorSlicer.SliceType vectorSliceType;
     private final int vectorSliceSize;
     private final long randomProjectionSeed;
 
@@ -171,7 +171,12 @@ class KnnSearcher {
                     "docsPath \"" + queryPath + "\" does not contain a whole number of vectors?  size=" + queryPathSizeInBytes
                 );
             }
-            VectorSlicer slicer = VectorSlicer.create(dim, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+            KnnIndexTester.VectorSlicer slicer = KnnIndexTester.VectorSlicer.create(
+                dim,
+                vectorSliceType,
+                vectorSliceSize,
+                randomProjectionSeed
+            );
             int effectiveDim = slicer != null ? slicer.slicedDimension() : dim;
             logger.info(
                 "queryPath size: "
@@ -547,7 +552,12 @@ class KnnSearcher {
 
     private int[][] computeExactNN(Path queryPath, Query filterQuery, int topK, int vectorFileOffsetBytes) throws IOException {
         int[][] result = new int[numQueryVectors][];
-        VectorSlicer slicer = VectorSlicer.create(dim, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+        KnnIndexTester.VectorSlicer slicer = KnnIndexTester.VectorSlicer.create(
+            dim,
+            vectorSliceType,
+            vectorSliceSize,
+            randomProjectionSeed
+        );
         int effectiveDim = slicer != null ? slicer.slicedDimension() : dim;
         try (Directory dir = FSDirectory.open(indexPath); DirectoryReader reader = DirectoryReader.open(dir)) {
             List<Callable<Void>> tasks = new ArrayList<>();
@@ -577,7 +587,12 @@ class KnnSearcher {
 
     private int[][] computeExactNNByte(Path queryPath, Query filterQuery, int vectorFileOffsetBytes) throws IOException {
         int[][] result = new int[numQueryVectors][];
-        VectorSlicer slicer = VectorSlicer.create(dim, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+        KnnIndexTester.VectorSlicer slicer = KnnIndexTester.VectorSlicer.create(
+            dim,
+            vectorSliceType,
+            vectorSliceSize,
+            randomProjectionSeed
+        );
         int effectiveDim = slicer != null ? slicer.slicedDimension() : dim;
         try (Directory dir = FSDirectory.open(indexPath); DirectoryReader reader = DirectoryReader.open(dir)) {
             List<Callable<Void>> tasks = new ArrayList<>();
