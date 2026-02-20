@@ -56,7 +56,10 @@ record TestConfiguration(
     int numMergeWorkers,
     boolean doPrecondition,
     int preconditioningBlockDims,
-    int secondaryClusterSize
+    int secondaryClusterSize,
+    VectorSlicer.SliceType vectorSliceType,
+    int vectorSliceSize,
+    long randomProjectionSeed
 ) {
 
     static final ParseField DOC_VECTORS_FIELD = new ParseField("doc_vectors");
@@ -94,6 +97,9 @@ record TestConfiguration(
     static final ParseField PRECONDITIONING_BLOCK_DIMS = new ParseField("preconditioning_block_dims");
     static final ParseField FILTER_CACHED = new ParseField("filter_cache");
     static final ParseField SEARCH_PARAMS = new ParseField("search_params");
+    static final ParseField VECTOR_SLICE_TYPE_FIELD = new ParseField("vector_slice_type");
+    static final ParseField VECTOR_SLICE_SIZE_FIELD = new ParseField("vector_slice_size");
+    static final ParseField RANDOM_PROJECTION_SEED_FIELD = new ParseField("random_projection_seed");
 
     /** By default, in ES the default writer buffer size is 10% of the heap space
      * (see {@code IndexingMemoryController.INDEX_BUFFER_SIZE_SETTING}).
@@ -155,6 +161,23 @@ record TestConfiguration(
         PARSER.declareObjectArray(Builder::setSearchParams, (p, c) -> SearchParameters.fromXContent(p), SEARCH_PARAMS);
         PARSER.declareInt(Builder::setMergeWorkers, MERGE_WORKERS_FIELD);
         PARSER.declareInt(Builder::setSecondaryClusterSize, SECONDARY_CLUSTER_SIZE);
+        PARSER.declareString(Builder::setVectorSliceType, VECTOR_SLICE_TYPE_FIELD);
+        PARSER.declareInt(Builder::setVectorSliceSize, VECTOR_SLICE_SIZE_FIELD);
+        PARSER.declareLong(Builder::setRandomProjectionSeed, RANDOM_PROJECTION_SEED_FIELD);
+    }
+
+    /**
+     * Create a VectorSlicer for the given full dimension. Returns null when vector_slice_type is none.
+     * Call this once the full dimension is known (from config or from the vector file).
+     */
+    public VectorSlicer vectorSlicer(int fullDimension) {
+        return VectorSlicer.create(fullDimension, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+    }
+
+    /** Effective dimension for indexing and search: sliced dimension when slicing is enabled, otherwise full. */
+    public int effectiveDimensions(int fullDimension) {
+        VectorSlicer slicer = vectorSlicer(fullDimension);
+        return slicer != null ? slicer.slicedDimension() : fullDimension;
     }
 
     public int numberOfSearchRuns() {
@@ -190,6 +213,21 @@ record TestConfiguration(
             new ParameterHelp("quantize_bits", "int", "Quantization bits; valid values depend on index_type."),
             new ParameterHelp("vector_encoding", "string", "Vector encoding: byte, float32, or bfloat16."),
             new ParameterHelp("dimensions", "int", "Vector dimensions; -1 uses dimensions from the vector file."),
+            new ParameterHelp(
+                "vector_slice_type",
+                "string",
+                "Slice type: none, prefix, suffix, or random_projection. Default none."
+            ),
+            new ParameterHelp(
+                "vector_slice_size",
+                "int",
+                "Target dimension after slicing; required when vector_slice_type is not none."
+            ),
+            new ParameterHelp(
+                "random_projection_seed",
+                "long",
+                "Seed for random projection matrix; used only when vector_slice_type is random_projection."
+            ),
             new ParameterHelp("merge_policy", "string", "Merge policy: tiered, log_byte, log_doc, or no."),
             new ParameterHelp("merge_workers", "int", "Number of merge worker threads for vector formats."),
             new ParameterHelp("writer_buffer_mb", "double", "Index writer RAM buffer size in MB."),
@@ -281,6 +319,9 @@ record TestConfiguration(
         private List<SearchParameters.Builder> searchParams = null;
         private int numMergeWorkers = 1;
         private int secondaryClusterSize = -1;
+        private VectorSlicer.SliceType vectorSliceType = VectorSlicer.SliceType.NONE;
+        private int vectorSliceSize = 0;
+        private long randomProjectionSeed = 0L;
 
         /**
          * Elasticsearch does not set this explicitly, and in Lucene this setting is
@@ -467,6 +508,21 @@ record TestConfiguration(
             return this;
         }
 
+        public Builder setVectorSliceType(String vectorSliceType) {
+            this.vectorSliceType = VectorSlicer.SliceType.valueOf(vectorSliceType.toUpperCase(Locale.ROOT).replace("-", "_"));
+            return this;
+        }
+
+        public Builder setVectorSliceSize(int vectorSliceSize) {
+            this.vectorSliceSize = vectorSliceSize;
+            return this;
+        }
+
+        public Builder setRandomProjectionSeed(long randomProjectionSeed) {
+            this.randomProjectionSeed = randomProjectionSeed;
+            return this;
+        }
+
         public TestConfiguration build() {
             if (docVectors == null) {
                 throw new IllegalArgumentException("Document vectors path must be provided");
@@ -475,6 +531,19 @@ record TestConfiguration(
                 throw new IllegalArgumentException(
                     "dimensions must be a positive integer or -1 for when dimension is available in the vector file"
                 );
+            }
+            if (vectorSliceType != VectorSlicer.SliceType.NONE && vectorSliceSize <= 0) {
+                throw new IllegalArgumentException(
+                    "vector_slice_size must be positive when vector_slice_type is " + vectorSliceType.name().toLowerCase(Locale.ROOT)
+                );
+            }
+            if (vectorSliceType == VectorSlicer.SliceType.RANDOM_PROJECTION
+                && vectorEncoding == KnnIndexTester.VectorEncoding.BYTE) {
+                throw new IllegalArgumentException("random_projection is not supported for byte vector encoding");
+            }
+            if (dimensions > 0 && vectorSliceType != VectorSlicer.SliceType.NONE) {
+                // Validate slice size against known dimensions
+                VectorSlicer.create(dimensions, vectorSliceType, vectorSliceSize, randomProjectionSeed);
             }
 
             // length of the longest array parameter
@@ -538,7 +607,10 @@ record TestConfiguration(
                 numMergeWorkers,
                 doPrecondition,
                 preconditioningBlockDims,
-                secondaryClusterSize
+                secondaryClusterSize,
+                vectorSliceType,
+                vectorSliceSize,
+                randomProjectionSeed
             );
         }
 
@@ -586,6 +658,13 @@ record TestConfiguration(
             }
             if (searchParams != null) {
                 builder.field(SEARCH_PARAMS.getPreferredName(), searchParams);
+            }
+            if (vectorSliceType != VectorSlicer.SliceType.NONE) {
+                builder.field(VECTOR_SLICE_TYPE_FIELD.getPreferredName(), vectorSliceType.name().toLowerCase(Locale.ROOT).replace("_", "-"));
+                builder.field(VECTOR_SLICE_SIZE_FIELD.getPreferredName(), vectorSliceSize);
+                if (vectorSliceType == VectorSlicer.SliceType.RANDOM_PROJECTION) {
+                    builder.field(RANDOM_PROJECTION_SEED_FIELD.getPreferredName(), randomProjectionSeed);
+                }
             }
             return builder.endObject();
         }

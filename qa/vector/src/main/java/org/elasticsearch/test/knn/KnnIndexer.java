@@ -80,6 +80,9 @@ class KnnIndexer {
     private final MergePolicy mergePolicy;
     private final double writerBufferSizeInMb;
     private final int writerMaxBufferedDocs;
+    private final VectorSlicer.SliceType vectorSliceType;
+    private final int vectorSliceSize;
+    private final long randomProjectionSeed;
 
     KnnIndexer(
         List<Path> docsPath,
@@ -92,7 +95,10 @@ class KnnIndexer {
         int numDocs,
         MergePolicy mergePolicy,
         double writerBufferSizeInMb,
-        int writerMaxBufferedDocs
+        int writerMaxBufferedDocs,
+        VectorSlicer.SliceType vectorSliceType,
+        int vectorSliceSize,
+        long randomProjectionSeed
     ) {
         this.docsPath = docsPath;
         this.indexPath = indexPath;
@@ -105,6 +111,9 @@ class KnnIndexer {
         this.mergePolicy = mergePolicy;
         this.writerBufferSizeInMb = writerBufferSizeInMb;
         this.writerMaxBufferedDocs = writerMaxBufferedDocs;
+        this.vectorSliceType = vectorSliceType;
+        this.vectorSliceSize = vectorSliceSize;
+        this.randomProjectionSeed = randomProjectionSeed;
     }
 
     void createIndex(KnnIndexTester.Results result) throws IOException, InterruptedException, ExecutionException {
@@ -140,6 +149,7 @@ class KnnIndexer {
 
         long start = System.nanoTime();
         AtomicInteger numDocsIndexed = new AtomicInteger();
+        VectorSlicer slicer = null;
         try (Directory dir = getDirectory(indexPath); IndexWriter iw = new IndexWriter(dir, iwc)) {
             for (Path docsPath : this.docsPath) {
                 int dim = this.dim;
@@ -160,9 +170,13 @@ class KnnIndexer {
                             throw new IllegalArgumentException("docsPath \"" + docsPath + "\" has invalid dimension: " + dim);
                         }
                     }
+                    if (slicer == null && vectorSliceType != VectorSlicer.SliceType.NONE) {
+                        slicer = VectorSlicer.create(dim, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+                    }
+                    int effectiveDim = slicer != null ? slicer.slicedDimension() : dim;
                     FieldType fieldType = switch (vectorEncoding) {
-                        case BYTE -> KnnByteVectorField.createFieldType(dim, similarityFunction);
-                        case FLOAT32 -> KnnFloatVectorField.createFieldType(dim, similarityFunction);
+                        case BYTE -> KnnByteVectorField.createFieldType(effectiveDim, similarityFunction);
+                        case FLOAT32 -> KnnFloatVectorField.createFieldType(effectiveDim, similarityFunction);
                     };
                     if (docsPathSizeInBytes % (((long) dim * vectorEncoding.byteSize + offsetByteSize)) != 0) {
                         throw new IllegalArgumentException(
@@ -193,7 +207,17 @@ class KnnIndexer {
                         List<Future<?>> futures = new ArrayList<>();
                         List<IndexerThread> threads = new ArrayList<>();
                         for (int i = 0; i < numIndexThreads; i++) {
-                            var t = new IndexerThread(iw, inReader, dim, vectorEncoding, fieldType, numDocsIndexed, numDocs);
+                            var t = new IndexerThread(
+                                iw,
+                                inReader,
+                                dim,
+                                effectiveDim,
+                                vectorEncoding,
+                                fieldType,
+                                numDocsIndexed,
+                                numDocs,
+                                slicer
+                            );
                             threads.add(t);
                             t.setDaemon(true);
                             futures.add(exec.submit(t));
@@ -269,7 +293,10 @@ class KnnIndexer {
         private final VectorEncoding vectorEncoding;
         private final byte[] byteVectorBuffer;
         private final float[] floatVectorBuffer;
+        private final byte[] byteSlicedBuffer;
+        private final float[] floatSlicedBuffer;
         private final VectorReader in;
+        private final VectorSlicer slicer;
 
         long readTime;
         long docAddTime;
@@ -277,11 +304,13 @@ class KnnIndexer {
         private IndexerThread(
             IndexWriter iw,
             VectorReader in,
-            int dims,
+            int fullDims,
+            int effectiveDims,
             VectorEncoding vectorEncoding,
             FieldType fieldType,
             AtomicInteger numDocsIndexed,
-            int numDocsToIndex
+            int numDocsToIndex,
+            VectorSlicer slicer
         ) {
             this.iw = iw;
             this.in = in;
@@ -289,14 +318,19 @@ class KnnIndexer {
             this.fieldType = fieldType;
             this.numDocsIndexed = numDocsIndexed;
             this.numDocsToIndex = numDocsToIndex;
+            this.slicer = slicer;
             switch (vectorEncoding) {
                 case BYTE -> {
-                    byteVectorBuffer = new byte[dims];
+                    byteVectorBuffer = new byte[fullDims];
                     floatVectorBuffer = null;
+                    byteSlicedBuffer = slicer != null ? new byte[effectiveDims] : null;
+                    floatSlicedBuffer = null;
                 }
                 case FLOAT32 -> {
-                    floatVectorBuffer = new float[dims];
+                    floatVectorBuffer = new float[fullDims];
                     byteVectorBuffer = null;
+                    floatSlicedBuffer = slicer != null ? new float[effectiveDims] : null;
+                    byteSlicedBuffer = null;
                 }
                 default -> throw new IllegalArgumentException("unexpected vector encoding: " + vectorEncoding);
             }
@@ -325,11 +359,21 @@ class KnnIndexer {
                 switch (vectorEncoding) {
                     case BYTE -> {
                         in.next(byteVectorBuffer);
-                        field = new KnnByteVectorField(VECTOR_FIELD, byteVectorBuffer, fieldType);
+                        if (slicer != null) {
+                            slicer.slice(byteVectorBuffer, byteSlicedBuffer);
+                            field = new KnnByteVectorField(VECTOR_FIELD, byteSlicedBuffer, fieldType);
+                        } else {
+                            field = new KnnByteVectorField(VECTOR_FIELD, byteVectorBuffer, fieldType);
+                        }
                     }
                     case FLOAT32 -> {
                         in.next(floatVectorBuffer);
-                        field = new KnnFloatVectorField(VECTOR_FIELD, floatVectorBuffer, fieldType);
+                        if (slicer != null) {
+                            slicer.slice(floatVectorBuffer, floatSlicedBuffer);
+                            field = new KnnFloatVectorField(VECTOR_FIELD, floatSlicedBuffer, fieldType);
+                        } else {
+                            field = new KnnFloatVectorField(VECTOR_FIELD, floatVectorBuffer, fieldType);
+                        }
                     }
                     default -> throw new UnsupportedOperationException();
                 }

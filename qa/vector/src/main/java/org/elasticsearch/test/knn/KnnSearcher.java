@@ -106,6 +106,9 @@ class KnnSearcher {
     private final VectorSimilarityFunction similarityFunction;
     private final VectorEncoding vectorEncoding;
     private final boolean doPrecondition;
+    private final VectorSlicer.SliceType vectorSliceType;
+    private final int vectorSliceSize;
+    private final long randomProjectionSeed;
 
     KnnSearcher(Path indexPath, TestConfiguration testConfiguration) {
         this.docPath = testConfiguration.docVectors();
@@ -121,6 +124,9 @@ class KnnSearcher {
         }
         this.indexType = testConfiguration.indexType();
         this.doPrecondition = testConfiguration.doPrecondition();
+        this.vectorSliceType = testConfiguration.vectorSliceType();
+        this.vectorSliceSize = testConfiguration.vectorSliceSize();
+        this.randomProjectionSeed = testConfiguration.randomProjectionSeed();
     }
 
     void runSearch(KnnIndexTester.Results finalResults, SearchParameters searchParameters) throws IOException {
@@ -165,6 +171,8 @@ class KnnSearcher {
                     "docsPath \"" + queryPath + "\" does not contain a whole number of vectors?  size=" + queryPathSizeInBytes
                 );
             }
+            VectorSlicer slicer = VectorSlicer.create(dim, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+            int effectiveDim = slicer != null ? slicer.slicedDimension() : dim;
             logger.info(
                 "queryPath size: "
                     + queryPathSizeInBytes
@@ -180,22 +188,40 @@ class KnnSearcher {
                         : new IndexSearcher(reader);
                     byte[] targetBytes = new byte[dim];
                     float[] target = new float[dim];
+                    byte[] targetBytesSliced = slicer != null ? new byte[effectiveDim] : null;
+                    float[] targetSliced = slicer != null ? new float[effectiveDim] : null;
                     // warm up
                     for (int i = 0; i < numQueryVectors; i++) {
                         if (vectorEncoding.equals(VectorEncoding.BYTE)) {
                             targetReader.next(targetBytes);
-                            doVectorQuery(targetBytes, searcher, filterQuery, searchParameters);
+                            if (slicer != null) {
+                                slicer.slice(targetBytes, targetBytesSliced);
+                                doVectorQuery(targetBytesSliced, searcher, filterQuery, searchParameters);
+                            } else {
+                                doVectorQuery(targetBytes, searcher, filterQuery, searchParameters);
+                            }
                         } else {
                             targetReader.next(target);
-                            doVectorQuery(target, searcher, filterQuery, searchParameters);
+                            if (slicer != null) {
+                                slicer.slice(target, targetSliced);
+                                doVectorQuery(targetSliced, searcher, filterQuery, searchParameters);
+                            } else {
+                                doVectorQuery(target, searcher, filterQuery, searchParameters);
+                            }
                         }
                     }
                     targetReader.reset();
                     final IntConsumer[] queryConsumers = new IntConsumer[searchParameters.numSearchers()];
                     if (vectorEncoding.equals(VectorEncoding.BYTE)) {
-                        byte[][] queries = new byte[numQueryVectors][dim];
+                        byte[][] queries = new byte[numQueryVectors][effectiveDim];
+                        byte[] fullBuffer = new byte[dim];
                         for (int i = 0; i < numQueryVectors; i++) {
-                            targetReader.next(queries[i]);
+                            targetReader.next(fullBuffer);
+                            if (slicer != null) {
+                                slicer.slice(fullBuffer, queries[i]);
+                            } else {
+                                System.arraycopy(fullBuffer, 0, queries[i], 0, dim);
+                            }
                         }
                         for (int s = 0; s < searchParameters.numSearchers(); s++) {
                             queryConsumers[s] = i -> {
@@ -207,9 +233,15 @@ class KnnSearcher {
                             };
                         }
                     } else {
-                        float[][] queries = new float[numQueryVectors][dim];
+                        float[][] queries = new float[numQueryVectors][effectiveDim];
+                        float[] fullBuffer = new float[dim];
                         for (int i = 0; i < numQueryVectors; i++) {
-                            targetReader.next(queries[i]);
+                            targetReader.next(fullBuffer);
+                            if (slicer != null) {
+                                slicer.slice(fullBuffer, queries[i]);
+                            } else {
+                                System.arraycopy(fullBuffer, 0, queries[i], 0, dim);
+                            }
                         }
                         for (int s = 0; s < searchParameters.numSearchers(); s++) {
                             queryConsumers[s] = i -> {
@@ -349,7 +381,10 @@ class KnnSearcher {
                 numQueryVectors,
                 searchParameters.topK(),
                 similarityFunction.ordinal(),
-                searchParameters.filterSelectivity()
+                searchParameters.filterSelectivity(),
+                vectorSliceType,
+                vectorSliceSize,
+                randomProjectionSeed
             ),
             36
         );
@@ -512,6 +547,8 @@ class KnnSearcher {
 
     private int[][] computeExactNN(Path queryPath, Query filterQuery, int topK, int vectorFileOffsetBytes) throws IOException {
         int[][] result = new int[numQueryVectors][];
+        VectorSlicer slicer = VectorSlicer.create(dim, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+        int effectiveDim = slicer != null ? slicer.slicedDimension() : dim;
         try (Directory dir = FSDirectory.open(indexPath); DirectoryReader reader = DirectoryReader.open(dir)) {
             List<Callable<Void>> tasks = new ArrayList<>();
             try (FileChannel qIn = FileChannel.open(queryPath)) {
@@ -524,7 +561,13 @@ class KnnSearcher {
                 for (int i = 0; i < numQueryVectors; i++) {
                     float[] queryVector = new float[dim];
                     queryReader.next(queryVector);
-                    tasks.add(new ComputeNNFloatTask(i, topK, queryVector, result, reader, filterQuery, similarityFunction));
+                    float[] queryForTask = queryVector;
+                    if (slicer != null) {
+                        float[] sliced = new float[effectiveDim];
+                        slicer.slice(queryVector, sliced);
+                        queryForTask = sliced;
+                    }
+                    tasks.add(new ComputeNNFloatTask(i, topK, queryForTask, result, reader, filterQuery, similarityFunction));
                 }
                 ForkJoinPool.commonPool().invokeAll(tasks);
             }
@@ -534,6 +577,8 @@ class KnnSearcher {
 
     private int[][] computeExactNNByte(Path queryPath, Query filterQuery, int vectorFileOffsetBytes) throws IOException {
         int[][] result = new int[numQueryVectors][];
+        VectorSlicer slicer = VectorSlicer.create(dim, vectorSliceType, vectorSliceSize, randomProjectionSeed);
+        int effectiveDim = slicer != null ? slicer.slicedDimension() : dim;
         try (Directory dir = FSDirectory.open(indexPath); DirectoryReader reader = DirectoryReader.open(dir)) {
             List<Callable<Void>> tasks = new ArrayList<>();
             try (FileChannel qIn = FileChannel.open(queryPath)) {
@@ -541,7 +586,13 @@ class KnnSearcher {
                 for (int i = 0; i < numQueryVectors; i++) {
                     byte[] queryVector = new byte[dim];
                     queryReader.next(queryVector);
-                    tasks.add(new ComputeNNByteTask(i, queryVector, result, reader, filterQuery, similarityFunction));
+                    byte[] queryForTask = queryVector;
+                    if (slicer != null) {
+                        byte[] sliced = new byte[effectiveDim];
+                        slicer.slice(queryVector, sliced);
+                        queryForTask = sliced;
+                    }
+                    tasks.add(new ComputeNNByteTask(i, queryForTask, result, reader, filterQuery, similarityFunction));
                 }
                 ForkJoinPool.commonPool().invokeAll(tasks);
             }

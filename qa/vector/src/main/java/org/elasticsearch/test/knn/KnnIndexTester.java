@@ -147,6 +147,13 @@ public class KnnIndexTester {
                 }
             }
         }
+        if (args.vectorSliceType() != VectorSlicer.SliceType.NONE) {
+            suffix.add(args.vectorSliceType().name().toLowerCase(Locale.ROOT));
+            suffix.add(Integer.toString(args.vectorSliceSize()));
+            if (args.vectorSliceType() == VectorSlicer.SliceType.RANDOM_PROJECTION) {
+                suffix.add(Long.toString(args.randomProjectionSeed()));
+            }
+        }
 
         return INDEX_DIR + "/" + args.docVectors().getFirst().getFileName() + "-" + String.join("-", suffix) + ".index";
     }
@@ -368,7 +375,10 @@ public class KnnIndexTester {
                         testConfiguration.numDocs(),
                         mergePolicy,
                         testConfiguration.writerBufferSizeInMb(),
-                        testConfiguration.writerMaxBufferedDocs()
+                        testConfiguration.writerMaxBufferedDocs(),
+                        testConfiguration.vectorSliceType(),
+                        testConfiguration.vectorSliceSize(),
+                        testConfiguration.randomProjectionSeed()
                     );
                     if (testConfiguration.reindex() == false && Files.exists(indexPath) == false) {
                         throw new IllegalArgumentException("Index path does not exist: " + indexPath);
