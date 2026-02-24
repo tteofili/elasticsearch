@@ -26,15 +26,13 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.util.Arrays;
-import java.util.Random;
 
 import static org.apache.lucene.index.VectorSimilarityFunction.EUCLIDEAN;
 import static org.apache.lucene.index.VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT;
 import static org.elasticsearch.simdvec.internal.Similarities.dotProductD1Q4;
 
-/** Panamized scorer for quantized vectors stored as a {@link MemorySegment}. Uses a random subset of
- * byte positions (same mask for query and document) for scoring; the mask is fixed at construction and
- * deterministic (seeded by byte length). Traversal still uses full {@link #length}. */
+/** Panamized scorer for quantized vectors stored as a {@link MemorySegment}. Uses the first
+ * {@link #scoreLength} bytes (contiguous prefix) for scoring; traversal still uses full {@link #length}. */
 final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVectorsScorer.MemorySegmentScorer {
 
     public static final float SLICING_RATIO = 0.9f;
@@ -42,75 +40,51 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
     private final int scoreLength;
     /** Effective dimensions for correction formulas */
     private final int effectiveDimensions;
-    /** Indices of dimensions used for scoring (same for query and document). */
-    private final int[] dimensionMask;
-    /** Reusable buffer for gathering one document's sliced bytes. */
+    /** Reusable buffer for one document's sliced bytes (prefix). */
     private final byte[] docBuffer;
-    /** Reusable buffer for gathering query bytes (4 packed vectors). */
+    /** Reusable buffer for query bytes (4 packed vectors, prefix only). */
     private final byte[] reorderedQuery;
+    /** Cached segment views over docBuffer and reorderedQuery for native/dot-product calls. */
+    private final MemorySegment docBufferSegment;
+    private final MemorySegment reorderedQuerySegment;
+    /** Precomputed bounds for scalar tail loops. */
+    private final int scoreLengthLongAligned;
+    private final int scoreLengthIntAligned;
+    /** Reused when heap segments not supported: arena and native segment for query copy. */
+    private final Arena queryArena;
+    private final MemorySegment queryNativeSegment;
 
     MSBitToInt4ESNextOSQVectorsScorer(IndexInput in, int dimensions, int dataLength, int bulkSize, MemorySegment memorySegment) {
         super(in, dimensions, dataLength, bulkSize, memorySegment);
         this.scoreLength = (int) (length * SLICING_RATIO);
         this.effectiveDimensions = (int) (dimensions * SLICING_RATIO);
-        this.dimensionMask = buildDimensionMask(length, scoreLength);
         this.docBuffer = new byte[scoreLength];
         this.reorderedQuery = new byte[scoreLength * 4];
+        this.docBufferSegment = MemorySegment.ofArray(docBuffer).asSlice(0, scoreLength);
+        this.reorderedQuerySegment = MemorySegment.ofArray(reorderedQuery).asSlice(0, (long) scoreLength * 4);
+        this.scoreLengthLongAligned = scoreLength & -Long.BYTES;
+        this.scoreLengthIntAligned = scoreLength & -Integer.BYTES;
+        this.queryArena = Arena.ofConfined();
+        this.queryNativeSegment = queryArena.allocate((long) scoreLength * 4, 32);
     }
 
-    /**
-     * Builds a deterministic random subset of byte indices in [0, byteLength) of size selectCount.
-     * Used so that query and document use the same byte positions when scoring (random slice instead of prefix).
-     */
-    private static int[] buildDimensionMask(int byteLength, int selectCount) {
-        if (selectCount <= 0) {
-            return new int[0];
-        }
-        if (selectCount >= byteLength) {
-            int[] mask = new int[byteLength];
-            for (int i = 0; i < byteLength; i++) {
-                mask[i] = i;
-            }
-            return mask;
-        }
-        int[] mask = new int[selectCount];
-        Random rng = new Random(31L * byteLength + 0x9E3779B9);
-        int[] all = new int[byteLength];
-        for (int i = 0; i < byteLength; i++) {
-            all[i] = i;
-        }
-        for (int i = 0; i < selectCount; i++) {
-            int j = i + rng.nextInt(byteLength - i);
-            int t = all[i];
-            all[i] = all[j];
-            all[j] = t;
-        }
-        System.arraycopy(all, 0, mask, 0, selectCount);
-        return mask;
+    /** Fills reorderedQuery with the first scoreLength bytes of each of the 4 query lanes (contiguous copy). */
+    private void fillQueryPrefix(byte[] q, byte[] reorderedQuery) {
+        System.arraycopy(q, 0, reorderedQuery, 0, scoreLength);
+        System.arraycopy(q, length, reorderedQuery, scoreLength, scoreLength);
+        System.arraycopy(q, length * 2, reorderedQuery, scoreLength * 2, scoreLength);
+        System.arraycopy(q, length * 3, reorderedQuery, scoreLength * 3, scoreLength);
     }
 
-    /** Fills reorderedQuery with query bytes at byte indices from the mask (layout: 4 packed vectors). */
-    private void gatherQuery(byte[] q, byte[] reorderedQuery) {
-        for (int k = 0; k < scoreLength; k++) {
-            int d = dimensionMask[k];
-            reorderedQuery[k] = q[d];
-            reorderedQuery[k + scoreLength] = q[d + length];
-            reorderedQuery[k + scoreLength * 2] = q[d + length * 2];
-            reorderedQuery[k + scoreLength * 3] = q[d + length * 3];
-        }
-    }
-
-    /** Fills docBuffer with document bytes at byte indices from the mask. */
-    private void gatherDoc(long offset, byte[] docBuf) {
-        for (int k = 0; k < scoreLength; k++) {
-            docBuf[k] = memorySegment.get(ValueLayout.JAVA_BYTE, offset + dimensionMask[k]);
-        }
+    /** Fills docBuf with the first scoreLength bytes of the document at the given offset (bulk copy). */
+    private void fillDocPrefix(long offset, byte[] docBuf) {
+        MemorySegment.copy(memorySegment, ValueLayout.JAVA_BYTE, offset, docBuf, 0, scoreLength);
     }
 
     @Override
     public long quantizeScore(byte[] q) throws IOException {
         assert q.length == length * 4;
-        gatherQuery(q, reorderedQuery);
+        fillQueryPrefix(q, reorderedQuery);
         // 128 / 8 == 16
         if (length >= 16) {
             if (NATIVE_SUPPORTED) {
@@ -128,19 +102,14 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
 
     private long nativeQuantizeScore() throws IOException {
         long offset = in.getFilePointer();
-        gatherDoc(offset, docBuffer);
-        var datasetMemorySegment = MemorySegment.ofArray(docBuffer).asSlice(0, scoreLength);
+        fillDocPrefix(offset, docBuffer);
 
         final long qScore;
         if (SUPPORTS_HEAP_SEGMENTS) {
-            var queryMemorySegment = MemorySegment.ofArray(reorderedQuery).asSlice(0, (long) scoreLength * 4);
-            qScore = dotProductD1Q4(datasetMemorySegment, queryMemorySegment, scoreLength);
+            qScore = dotProductD1Q4(docBufferSegment, reorderedQuerySegment, scoreLength);
         } else {
-            try (var arena = Arena.ofConfined()) {
-                var queryMemorySegment = arena.allocate((long) scoreLength * 4, 32);
-                MemorySegment.copy(reorderedQuery, 0, queryMemorySegment, ValueLayout.JAVA_BYTE, 0, scoreLength * 4);
-                qScore = dotProductD1Q4(datasetMemorySegment, queryMemorySegment, scoreLength);
-            }
+            MemorySegment.copy(reorderedQuery, 0, queryNativeSegment, ValueLayout.JAVA_BYTE, 0, scoreLength * 4);
+            qScore = dotProductD1Q4(docBufferSegment, queryNativeSegment, scoreLength);
         }
         in.skipBytes(length);
         return qScore;
@@ -153,7 +122,7 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
         long subRet3 = 0;
         int i = 0;
         long offset = in.getFilePointer();
-        gatherDoc(offset, docBuffer);
+        fillDocPrefix(offset, docBuffer);
         if (scoreLength >= ByteVector.SPECIES_256.vectorByteSize() * 2) {
             int limit = ByteVector.SPECIES_256.loopBound(scoreLength);
             var sum0 = LongVector.zero(LONG_SPECIES_256);
@@ -200,14 +169,14 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
             subRet3 += sum3.reduceLanes(VectorOperators.ADD);
         }
         // process scalar tail (only up to scoreLength)
-        for (final int upperBound = scoreLength & -Long.BYTES; i < upperBound; i += Long.BYTES) {
+        for (final int upperBound = scoreLengthLongAligned; i < upperBound; i += Long.BYTES) {
             final long value = (Long) BitUtil.VH_LE_LONG.get(docBuffer, i);
             subRet0 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i) & value);
             subRet1 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + scoreLength) & value);
             subRet2 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + 2 * scoreLength) & value);
             subRet3 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + 3 * scoreLength) & value);
         }
-        for (final int upperBound = scoreLength & -Integer.BYTES; i < upperBound; i += Integer.BYTES) {
+        for (final int upperBound = scoreLengthIntAligned; i < upperBound; i += Integer.BYTES) {
             final int value = (Integer) BitUtil.VH_LE_INT.get(docBuffer, i);
             subRet0 += Integer.bitCount((Integer) BitUtil.VH_LE_INT.get(reorderedQuery, i) & value);
             subRet1 += Integer.bitCount((Integer) BitUtil.VH_LE_INT.get(reorderedQuery, i + scoreLength) & value);
@@ -221,7 +190,7 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
             subRet2 += Integer.bitCount((reorderedQuery[i + 2 * scoreLength] & dValue) & 0xFF);
             subRet3 += Integer.bitCount((reorderedQuery[i + 3 * scoreLength] & dValue) & 0xFF);
         }
-        in.seek(offset + length);
+        in.skipBytes(length);
         return subRet0 + (subRet1 << 1) + (subRet2 << 2) + (subRet3 << 3);
     }
 
@@ -232,7 +201,7 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
         long subRet3 = 0;
         int i = 0;
         long offset = in.getFilePointer();
-        gatherDoc(offset, docBuffer);
+        fillDocPrefix(offset, docBuffer);
 
         var sum0 = IntVector.zero(INT_SPECIES_128);
         var sum1 = IntVector.zero(INT_SPECIES_128);
@@ -255,14 +224,14 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
         subRet2 += sum2.reduceLanes(VectorOperators.ADD);
         subRet3 += sum3.reduceLanes(VectorOperators.ADD);
         // process scalar tail (only up to scoreLength)
-        for (final int upperBound = scoreLength & -Long.BYTES; i < upperBound; i += Long.BYTES) {
+        for (final int upperBound = scoreLengthLongAligned; i < upperBound; i += Long.BYTES) {
             final long value = (Long) BitUtil.VH_LE_LONG.get(docBuffer, i);
             subRet0 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i) & value);
             subRet1 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + scoreLength) & value);
             subRet2 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + 2 * scoreLength) & value);
             subRet3 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + 3 * scoreLength) & value);
         }
-        for (final int upperBound = scoreLength & -Integer.BYTES; i < upperBound; i += Integer.BYTES) {
+        for (final int upperBound = scoreLengthIntAligned; i < upperBound; i += Integer.BYTES) {
             final int value = (Integer) BitUtil.VH_LE_INT.get(docBuffer, i);
             subRet0 += Integer.bitCount((Integer) BitUtil.VH_LE_INT.get(reorderedQuery, i) & value);
             subRet1 += Integer.bitCount((Integer) BitUtil.VH_LE_INT.get(reorderedQuery, i + scoreLength) & value);
@@ -276,14 +245,14 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
             subRet2 += Integer.bitCount((reorderedQuery[i + 2 * scoreLength] & dValue) & 0xFF);
             subRet3 += Integer.bitCount((reorderedQuery[i + 3 * scoreLength] & dValue) & 0xFF);
         }
-        in.seek(offset + length);
+        in.skipBytes(length);
         return subRet0 + (subRet1 << 1) + (subRet2 << 2) + (subRet3 << 3);
     }
 
     @Override
     public boolean quantizeScoreBulk(byte[] q, int count, float[] scores) throws IOException {
         assert q.length == length * 4;
-        gatherQuery(q, reorderedQuery);
+        fillQueryPrefix(q, reorderedQuery);
         // 128 / 8 == 16
         if (length >= 16) {
             if (NATIVE_SUPPORTED) {
@@ -314,11 +283,9 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
     private void nativeQuantizeScoreBulk(int count, MemorySegment scoresSegment) throws IOException {
         long initialOffset = in.getFilePointer();
         var datasetLengthInBytes = (long) length * count;
-        var querySlice = MemorySegment.ofArray(reorderedQuery).asSlice(0, (long) scoreLength * 4);
         for (int i = 0; i < count; i++) {
-            gatherDoc(initialOffset + (long) i * length, docBuffer);
-            var datasetSlice = MemorySegment.ofArray(docBuffer).asSlice(0, scoreLength);
-            long qScore = dotProductD1Q4(datasetSlice, querySlice, scoreLength);
+            fillDocPrefix(initialOffset + (long) i * length, docBuffer);
+            long qScore = dotProductD1Q4(docBufferSegment, reorderedQuerySegment, scoreLength);
             scoresSegment.set(ValueLayout.JAVA_FLOAT, (long) i * Float.BYTES, (float) qScore);
         }
         in.skipBytes(datasetLengthInBytes);
@@ -332,7 +299,7 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
             long subRet3 = 0;
             int i = 0;
             long offset = in.getFilePointer();
-            gatherDoc(offset, docBuffer);
+            fillDocPrefix(offset, docBuffer);
 
             var sum0 = IntVector.zero(INT_SPECIES_128);
             var sum1 = IntVector.zero(INT_SPECIES_128);
@@ -355,14 +322,14 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
             subRet2 += sum2.reduceLanes(VectorOperators.ADD);
             subRet3 += sum3.reduceLanes(VectorOperators.ADD);
             // process scalar tail (only up to scoreLength); then skip rest of vector
-            for (final int upperBound = scoreLength & -Long.BYTES; i < upperBound; i += Long.BYTES) {
+            for (final int upperBound = scoreLengthLongAligned; i < upperBound; i += Long.BYTES) {
                 final long value = (Long) BitUtil.VH_LE_LONG.get(docBuffer, i);
                 subRet0 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i) & value);
                 subRet1 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + scoreLength) & value);
                 subRet2 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + 2 * scoreLength) & value);
                 subRet3 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + 3 * scoreLength) & value);
             }
-            for (final int upperBound = scoreLength & -Integer.BYTES; i < upperBound; i += Integer.BYTES) {
+            for (final int upperBound = scoreLengthIntAligned; i < upperBound; i += Integer.BYTES) {
                 final int value = (Integer) BitUtil.VH_LE_INT.get(docBuffer, i);
                 subRet0 += Integer.bitCount((Integer) BitUtil.VH_LE_INT.get(reorderedQuery, i) & value);
                 subRet1 += Integer.bitCount((Integer) BitUtil.VH_LE_INT.get(reorderedQuery, i + scoreLength) & value);
@@ -377,7 +344,7 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
                 subRet3 += Integer.bitCount((reorderedQuery[i + 3 * scoreLength] & dValue) & 0xFF);
             }
             scores[iter] = subRet0 + (subRet1 << 1) + (subRet2 << 2) + (subRet3 << 3);
-            in.seek(offset + length);
+            in.skipBytes(length);
         }
     }
 
@@ -389,7 +356,7 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
             long subRet3 = 0;
             int i = 0;
             long offset = in.getFilePointer();
-            gatherDoc(offset, docBuffer);
+            fillDocPrefix(offset, docBuffer);
             if (scoreLength >= ByteVector.SPECIES_256.vectorByteSize() * 2) {
                 int limit = ByteVector.SPECIES_256.loopBound(scoreLength);
                 var sum0 = LongVector.zero(LONG_SPECIES_256);
@@ -436,14 +403,14 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
                 subRet3 += sum3.reduceLanes(VectorOperators.ADD);
             }
             // process scalar tail (only up to scoreLength); then skip rest of vector
-            for (final int upperBound = scoreLength & -Long.BYTES; i < upperBound; i += Long.BYTES) {
+            for (final int upperBound = scoreLengthLongAligned; i < upperBound; i += Long.BYTES) {
                 final long value = (Long) BitUtil.VH_LE_LONG.get(docBuffer, i);
                 subRet0 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i) & value);
                 subRet1 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + scoreLength) & value);
                 subRet2 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + 2 * scoreLength) & value);
                 subRet3 += Long.bitCount((Long) BitUtil.VH_LE_LONG.get(reorderedQuery, i + 3 * scoreLength) & value);
             }
-            for (final int upperBound = scoreLength & -Integer.BYTES; i < upperBound; i += Integer.BYTES) {
+            for (final int upperBound = scoreLengthIntAligned; i < upperBound; i += Integer.BYTES) {
                 final int value = (Integer) BitUtil.VH_LE_INT.get(docBuffer, i);
                 subRet0 += Integer.bitCount((Integer) BitUtil.VH_LE_INT.get(reorderedQuery, i) & value);
                 subRet1 += Integer.bitCount((Integer) BitUtil.VH_LE_INT.get(reorderedQuery, i + scoreLength) & value);
@@ -458,7 +425,7 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
                 subRet3 += Integer.bitCount((reorderedQuery[i + 3 * scoreLength] & dValue) & 0xFF);
             }
             scores[iter] = subRet0 + (subRet1 << 1) + (subRet2 << 2) + (subRet3 << 3);
-            in.seek(offset + length);
+            in.skipBytes(length);
         }
     }
 
@@ -479,7 +446,7 @@ final class MSBitToInt4ESNextOSQVectorsScorer extends MemorySegmentESNextOSQVect
         queryComponentSum = Math.round(queryComponentSum * SLICING_RATIO);
 
         assert q.length == length * 4;
-        gatherQuery(q, reorderedQuery);
+        fillQueryPrefix(q, reorderedQuery);
         // 128 / 8 == 16
         if (length >= 16) {
             if (PanamaESVectorUtilSupport.HAS_FAST_INTEGER_VECTORS) {
