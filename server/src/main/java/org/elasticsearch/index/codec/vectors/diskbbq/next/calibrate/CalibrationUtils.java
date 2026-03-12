@@ -15,8 +15,8 @@ import java.io.IOException;
 import java.util.Random;
 
 /**
- * Utility methods for quantization calibration: vector math, sampling from
- * {@link FloatVectorValues}, and the Neyshabur-Srebro transform.
+ * Utility methods for quantization calibration: vector math and sampling from
+ * {@link FloatVectorValues}.
  */
 public final class CalibrationUtils {
 
@@ -25,6 +25,12 @@ public final class CalibrationUtils {
     static final long CALIBRATION_SEED = 215873873L;
 
     private CalibrationUtils() {}
+
+    /**
+     * Sampled data from a {@link FloatVectorValues}: materialized query vectors and
+     * ordinal indices into the original {@code FloatVectorValues} for the corpus.
+     */
+    public record SampledData(float[][] queries, int[] corpusOrdinals) {}
 
     /**
      * Dot product of two float arrays of length {@code dim}.
@@ -54,23 +60,41 @@ public final class CalibrationUtils {
      */
     public static void normalize(float[][] vectors) {
         for (float[] v : vectors) {
-            double norm = 0;
-            for (float f : v) {
-                norm += (double) f * f;
-            }
-            norm = Math.sqrt(norm);
-            if (norm == 0) norm = 1;
-            for (int j = 0; j < v.length; j++) {
-                v[j] = (float) (v[j] / norm);
-            }
+            normalizeVector(v);
         }
     }
 
     /**
-     * Sample random, disjoint query and corpus subsets from {@link FloatVectorValues}.
-     * Returns {@code float[][][2]} where index 0 is queries and index 1 is corpus.
+     * L2-normalize a single vector in place.
      */
-    public static float[][][] sampleQueriesAndCorpus(FloatVectorValues vectorValues, int dim) throws IOException {
+    public static void normalizeVector(float[] v) {
+        double norm = 0;
+        for (float f : v) {
+            norm += (double) f * f;
+        }
+        norm = Math.sqrt(norm);
+        if (norm == 0) norm = 1;
+        for (int j = 0; j < v.length; j++) {
+            v[j] = (float) (v[j] / norm);
+        }
+    }
+
+    /**
+     * Copy a vector into a scratch buffer and L2-normalize the copy.
+     * Returns the scratch buffer for convenience.
+     */
+    public static float[] copyAndNormalize(float[] src, float[] scratch) {
+        System.arraycopy(src, 0, scratch, 0, src.length);
+        normalizeVector(scratch);
+        return scratch;
+    }
+
+    /**
+     * Sample random, disjoint query and corpus subsets from {@link FloatVectorValues}.
+     * Queries are materialized (cloned); corpus vectors are represented as ordinal indices
+     * into the original {@code vectorValues}, avoiding bulk materialization.
+     */
+    public static SampledData sampleData(FloatVectorValues vectorValues, int dim) throws IOException {
         int n = vectorValues.size();
         Random rng = new Random(CALIBRATION_SEED);
         int nQueries = Math.min(MAX_QUERY_SAMPLE, n / 2);
@@ -86,62 +110,9 @@ public final class CalibrationUtils {
         for (int i = 0; i < nQueries; i++) {
             queries[i] = vectorValues.vectorValue(indices[i]).clone();
         }
-        float[][] corpus = new float[nDocs][];
-        for (int i = 0; i < nDocs; i++) {
-            corpus[i] = vectorValues.vectorValue(indices[nQueries + i]).clone();
-        }
-        return new float[][][] { queries, corpus };
-    }
-
-    /**
-     * Sample random, disjoint query and corpus subsets from {@link FloatVectorValues}.
-     * Returns {@code float[][][2]} where index 0 is queries and index 1 is corpus.
-     */
-    public static int[] sampleQueryIndices(FloatVectorValues vectorValues, int dim) throws IOException {
-        int n = vectorValues.size();
-        Random rng = new Random(CALIBRATION_SEED);
-        int nQueries = Math.min(MAX_QUERY_SAMPLE, n / 2);
-        int nDocs = Math.min(MAX_CORPUS_SAMPLE, n - nQueries);
-
-        int[] indices = new int[n];
-        for (int i = 0; i < n; i++) {
-            indices[i] = i;
-        }
-        fisherYatesShuffle(indices, rng);
-
-        return indices;
-    }
-
-    /**
-     * Neyshabur-Srebro transform: converts dot-product similarity to Euclidean distance
-     * by appending an extra coordinate. Returns {@code float[][][2]} where index 0 is
-     * transformed queries and index 1 is transformed corpus; both have dimension dim+1.
-     */
-    public static float[][][] neyshaburSrebroTransform(int dim, float[][] queries, float[][] corpus) {
-        double maxNormSq = 0;
-        for (float[] v : corpus) {
-            double normSq = 0;
-            for (int j = 0; j < dim; j++) {
-                normSq += (double) v[j] * v[j];
-            }
-            if (normSq > maxNormSq) maxNormSq = normSq;
-        }
-        int newDim = dim + 1;
-        float[][] tq = new float[queries.length][newDim];
-        for (int i = 0; i < queries.length; i++) {
-            System.arraycopy(queries[i], 0, tq[i], 0, dim);
-            tq[i][dim] = 0f;
-        }
-        float[][] tc = new float[corpus.length][newDim];
-        for (int i = 0; i < corpus.length; i++) {
-            double normSq = 0;
-            for (int j = 0; j < dim; j++) {
-                normSq += (double) corpus[i][j] * corpus[i][j];
-            }
-            System.arraycopy(corpus[i], 0, tc[i], 0, dim);
-            tc[i][dim] = (float) Math.sqrt(Math.max(0, maxNormSq - normSq));
-        }
-        return new float[][][] { tq, tc };
+        int[] corpusOrdinals = new int[nDocs];
+        System.arraycopy(indices, nQueries, corpusOrdinals, 0, nDocs);
+        return new SampledData(queries, corpusOrdinals);
     }
 
     private static void fisherYatesShuffle(int[] a, Random rng) {

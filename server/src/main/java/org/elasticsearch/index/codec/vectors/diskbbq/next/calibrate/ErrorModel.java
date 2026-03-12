@@ -9,6 +9,7 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate;
 
+import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
 import org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans;
@@ -26,6 +27,10 @@ import java.util.List;
  * Error model for representation (quantization) error in scalar quantization.
  * Estimates the standard deviation of the error in distance/similarity after quantizing
  * queries and documents. Used by calibration to predict recall.
+ * <p>
+ * Corpus vectors are accessed lazily via {@link FloatVectorValues} and ordinal arrays
+ * to avoid materializing a large {@code float[][]}. Queries are kept materialized as
+ * they are small (~128 vectors).
  * <p>
  * Fits two OLS regressions:
  * <ul>
@@ -88,15 +93,21 @@ public final class ErrorModel {
      * Centroid representation error standard deviation. For each query, finds the top 5%
      * of clusters by similarity and measures the error between the exact similarity to
      * each document and the similarity to its assigned centroid.
+     *
+     * @param fvv the vector values source for lazy access
+     * @param corpusOrdinals ordinal indices into {@code fvv}
+     * @param cosine if true, normalize corpus vectors on-the-fly
      */
     static double centroidRepErrorStd(
         VectorSimilarityFunction sim,
         int dim,
         float[][] queries,
-        float[][] corpus,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
         int[][] perClusterAssignments,
         float[][] centroids
-    ) {
+    ) throws IOException {
         int k = perClusterAssignments.length;
         int visit = Math.max(1, (5 * k + 99) / 100);
         OnlineMeanAndVariance moments = new OnlineMeanAndVariance();
@@ -105,6 +116,7 @@ public final class ErrorModel {
         for (int i = 0; i < k; i++) {
             order[i] = i;
         }
+        float[] scratch = cosine ? new float[dim] : null;
 
         for (float[] query : queries) {
             Arrays.sort(order, (a, b) -> Double.compare(simExact(sim, dim, query, centroids[b]), simExact(sim, dim, query, centroids[a])));
@@ -112,7 +124,11 @@ public final class ErrorModel {
                 int ci = order[idx];
                 float[] cent = centroids[ci];
                 for (int j : perClusterAssignments[ci]) {
-                    double err = simExact(sim, dim, query, corpus[j]) - simExact(sim, dim, query, cent);
+                    float[] doc = fvv.vectorValue(corpusOrdinals[j]);
+                    if (cosine) {
+                        doc = CalibrationUtils.copyAndNormalize(doc, scratch);
+                    }
+                    double err = simExact(sim, dim, query, doc) - simExact(sim, dim, query, cent);
                     moments.add(err);
                 }
             }
@@ -124,12 +140,18 @@ public final class ErrorModel {
      * Quantized representation error standard deviation. Quantizes doc residuals and
      * query residuals using OSQ, estimates dot products, and compares to exact
      * similarities for the top-5k ranked documents per query.
+     *
+     * @param fvv the vector values source for lazy access
+     * @param corpusOrdinals ordinal indices into {@code fvv}
+     * @param cosine if true, normalize corpus vectors on-the-fly
      */
     static double quantizedRepErrorStd(
         VectorSimilarityFunction sim,
         int dim,
         float[][] queries,
-        float[][] corpus,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
         int[] docAssignments,
         float[][] docCentroids,
         int nQueryClusters,
@@ -163,31 +185,31 @@ public final class ErrorModel {
         for (int i = 0; i < nDocClusters; i++) {
             centroidDotCentroid[i] = CalibrationUtils.dot(dim, queryCentroids[docCentroidAssignments[i]], docCentroids[i]);
         }
-        double[] corpusDotCentroid = new double[nDocs];
-        for (int i = 0; i < nDocs; i++) {
-            int qc = docCentroidAssignments[docAssignments[i]];
-            corpusDotCentroid[i] = CalibrationUtils.dot(dim, queryCentroids[qc], corpus[i]);
-        }
 
         OptimizedScalarQuantizer quantizer = new OptimizedScalarQuantizer(VectorSimilarityFunction.EUCLIDEAN);
         float[] residualScratch = new float[dim];
+        float[] normScratch = cosine ? new float[dim] : null;
 
         float[] docLower = new float[nDocs];
         float[] docUpper = new float[nDocs];
         int[] docL1 = new int[nDocs];
         int[][] docQuantized = new int[nDocs][dim];
+        double[] corpusDotCentroid = new double[nDocs];
+        double[] docDotDoc = sim == VectorSimilarityFunction.EUCLIDEAN ? new double[nDocs] : null;
+
         for (int i = 0; i < nDocs; i++) {
-            var qr = quantizer.scalarQuantize(corpus[i], residualScratch, docQuantized[i], (byte) dbits, docCentroids[docAssignments[i]]);
+            float[] doc = fvv.vectorValue(corpusOrdinals[i]);
+            if (cosine) {
+                doc = CalibrationUtils.copyAndNormalize(doc, normScratch);
+            }
+            int qc = docCentroidAssignments[docAssignments[i]];
+            corpusDotCentroid[i] = CalibrationUtils.dot(dim, queryCentroids[qc], doc);
+            var qr = quantizer.scalarQuantize(doc, residualScratch, docQuantized[i], (byte) dbits, docCentroids[docAssignments[i]]);
             docLower[i] = qr.lowerInterval();
             docUpper[i] = qr.upperInterval();
             docL1[i] = qr.quantizedComponentSum();
-        }
-
-        double[] docDotDoc = null;
-        if (sim == VectorSimilarityFunction.EUCLIDEAN) {
-            docDotDoc = new double[nDocs];
-            for (int i = 0; i < nDocs; i++) {
-                docDotDoc[i] = CalibrationUtils.dot(dim, corpus[i], corpus[i]);
+            if (docDotDoc != null) {
+                docDotDoc[i] = CalibrationUtils.dot(dim, doc, doc);
             }
         }
 
@@ -242,9 +264,13 @@ public final class ErrorModel {
 
             int topN = Math.min(5 * k, nDocs);
             for (int i = 0; i < topN; i++) {
-                int idx = order[i];
-                double exact = simExact(sim, dim, query, corpus[idx]);
-                moments.add(exact - simOsq[idx]);
+                int docIdx = order[i];
+                float[] doc = fvv.vectorValue(corpusOrdinals[docIdx]);
+                if (cosine) {
+                    doc = CalibrationUtils.copyAndNormalize(doc, normScratch);
+                }
+                double exact = simExact(sim, dim, query, doc);
+                moments.add(exact - simOsq[docIdx]);
             }
         }
 
@@ -255,20 +281,25 @@ public final class ErrorModel {
      * Clusters the corpus and measures both centroid and quantized representation error
      * standard deviations for the given configuration.
      *
+     * @param fvv the vector values source for lazy access
+     * @param corpusOrdinals ordinal indices into {@code fvv}
+     * @param cosine if true, normalize corpus vectors on-the-fly
      * @return {@code double[]{centroidStd, quantizedStd}}
      */
     static double[] repErrorStds(
         VectorSimilarityFunction sim,
         int dim,
         float[][] queries,
-        float[][] corpus,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
         int nQueryClusters,
         int nDocsPerCluster,
         int qbits,
         int dbits,
         int k
     ) throws IOException {
-        KMeansFloatVectorValues corpusVectors = KMeansFloatVectorValues.build(Arrays.asList(corpus), null, dim);
+        KMeansFloatVectorValues corpusVectors = KMeansFloatVectorValues.wrap(fvv, corpusOrdinals);
         KMeansResult docClusters = HierarchicalKMeans.ofSerial(dim).cluster(corpusVectors, nDocsPerCluster);
 
         float[][] centroids = docClusters.centroids();
@@ -291,12 +322,14 @@ public final class ErrorModel {
             perClusterAssignments[i] = list.stream().mapToInt(Integer::intValue).toArray();
         }
 
-        double cStd = centroidRepErrorStd(sim, dim, queries, corpus, perClusterAssignments, centroids);
+        double cStd = centroidRepErrorStd(sim, dim, queries, fvv, corpusOrdinals, cosine, perClusterAssignments, centroids);
         double qStd = quantizedRepErrorStd(
             sim,
             dim,
             queries,
-            corpus,
+            fvv,
+            corpusOrdinals,
+            cosine,
             flatAssignments,
             centroids,
             nQueryClusters,
@@ -348,16 +381,22 @@ public final class ErrorModel {
      * Estimate the scaling of representation error by sweeping 15 (nDocsPerCluster, sampleSize) pairs,
      * clustering the corpus at each, measuring centroid and quantized error, and fitting OLS on
      * {@code log(error_std) ~ beta0 + beta1 * (log(L) - log(N))}.
+     *
+     * @param fvv the vector values source for lazy access
+     * @param corpusOrdinals ordinal indices into {@code fvv}
+     * @param cosine if true, normalize corpus vectors on-the-fly
      */
     public static RepErrorStdModel estimateRepErrorStdScalingParameter(
         VectorSimilarityFunction similarityFunction,
         int dim,
         float[][] queries,
-        float[][] corpus,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
         int k
     ) {
         int m = N_DOCS_PER_CLUSTER_SCALING.length;
-        int nDocsTotal = corpus.length;
+        int nDocsTotal = corpusOrdinals.length;
 
         List<Double> logCentroidStds = new ArrayList<>();
         List<Double> logQuantizedStds = new ArrayList<>();
@@ -370,13 +409,15 @@ public final class ErrorModel {
             if (ss < 2) {
                 continue;
             }
-            float[][] corpusSample = Arrays.copyOf(corpus, ss);
+            int[] subOrdinals = Arrays.copyOf(corpusOrdinals, ss);
             try {
                 double[] stds = repErrorStds(
                     similarityFunction,
                     dim,
                     queries,
-                    corpusSample,
+                    fvv,
+                    subOrdinals,
+                    cosine,
                     N_QUERY_CLUSTERS,
                     N_DOCS_PER_CLUSTER_SCALING[i],
                     4,
@@ -423,20 +464,26 @@ public final class ErrorModel {
      * Estimate the magnitude of representation error for a specific (qbits, dbits) pair.
      * Sweeps 9 cluster sizes at a fixed sample size and fits a plug-in regression that
      * reuses the slope from the scaling model.
+     *
+     * @param fvv the vector values source for lazy access
+     * @param corpusOrdinals ordinal indices into {@code fvv}
+     * @param cosine if true, normalize corpus vectors on-the-fly
      */
     public static RepErrorStdModel estimateRepErrorStdMagnitudeParameter(
         RepErrorStdModel scalingModel,
         VectorSimilarityFunction similarityFunction,
         int dim,
         float[][] queries,
-        float[][] corpus,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
         int k,
         int qbits,
         int dbits
     ) {
         int m = N_DOCS_PER_CLUSTER_MAGNITUDE.length;
-        int sampleSize = Math.min(SAMPLE_SIZE_MAGNITUDE, corpus.length);
-        float[][] corpusSample = Arrays.copyOf(corpus, sampleSize);
+        int sampleSize = Math.min(SAMPLE_SIZE_MAGNITUDE, corpusOrdinals.length);
+        int[] subOrdinals = Arrays.copyOf(corpusOrdinals, sampleSize);
 
         List<Double> logQuantizedStds = new ArrayList<>();
         for (int i = 0; i < m; i++) {
@@ -445,7 +492,9 @@ public final class ErrorModel {
                     similarityFunction,
                     dim,
                     queries,
-                    corpusSample,
+                    fvv,
+                    subOrdinals,
+                    cosine,
                     N_QUERY_CLUSTERS,
                     N_DOCS_PER_CLUSTER_MAGNITUDE[i],
                     qbits,

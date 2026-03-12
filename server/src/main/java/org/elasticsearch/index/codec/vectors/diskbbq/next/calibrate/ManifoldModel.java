@@ -9,7 +9,10 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate;
 
+import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.VectorSimilarityFunction;
+
+import java.io.IOException;
 
 /**
  * Manifold model for distance/similarity as a function of rank and corpus size.
@@ -76,19 +79,25 @@ public final class ManifoldModel {
 
     /**
      * Estimate manifold parameters (alpha, invDim) from query-corpus distances at various
-     * ranks and sample sizes. Fits OLS: log(distance) ~ alpha + invDim * (log(rank) - log(sampleSize)).
+     * ranks and sample sizes. Corpus vectors are accessed lazily via {@code fvv} and
+     * {@code corpusOrdinals} rather than materializing a {@code float[][]}.
      *
+     * @param fvv the underlying vector values source
+     * @param corpusOrdinals ordinal indices into {@code fvv} for the corpus subset
+     * @param cosine if true, corpus vectors are L2-normalized into a scratch buffer before distance computation
      * @return double[2] containing {alpha, invDim}
      */
     public static double[] estimateManifoldParameters(
         VectorSimilarityFunction similarityFunction,
         int dim,
         float[][] queries,
-        float[][] corpus,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
         int k
-    ) {
+    ) throws IOException {
         int nQueries = queries.length;
-        int nDocsTotal = corpus.length;
+        int nDocsTotal = corpusOrdinals.length;
         int m = Math.min(RANKS_FOR_K.length, SAMPLE_SIZES.length);
 
         int logCount = 0;
@@ -96,6 +105,7 @@ public final class ManifoldModel {
         double[] logSampleSizes = new double[m];
         double[] logDistances = new double[m];
 
+        float[] scratch = cosine ? new float[dim] : null;
         int sampleStart = 0;
         for (int i = 0; i < m; i++) {
             int rank = RANKS_FOR_K[i];
@@ -103,7 +113,18 @@ public final class ManifoldModel {
             if (sampleEnd > nDocsTotal) break;
             double avgDist = 0;
             for (int q = 0; q < nQueries; q++) {
-                double d = ithDistance(similarityFunction, dim, rank, queries[q], corpus, sampleStart, sampleEnd);
+                double d = ithDistance(
+                    similarityFunction,
+                    dim,
+                    rank,
+                    queries[q],
+                    fvv,
+                    corpusOrdinals,
+                    sampleStart,
+                    sampleEnd,
+                    cosine,
+                    scratch
+                );
                 avgDist += d;
             }
             avgDist /= nQueries;
@@ -131,18 +152,25 @@ public final class ManifoldModel {
         int dim,
         int rank,
         float[] query,
-        float[][] corpus,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
         int start,
-        int end
-    ) {
+        int end,
+        boolean cosine,
+        float[] scratch
+    ) throws IOException {
         int count = end - start;
         double[] dists = new double[count];
         boolean isDot = isDotLike(similarityFunction);
         for (int i = 0; i < count; i++) {
+            float[] doc = fvv.vectorValue(corpusOrdinals[start + i]);
+            if (cosine) {
+                doc = CalibrationUtils.copyAndNormalize(doc, scratch);
+            }
             if (isDot) {
-                dists[i] = -CalibrationUtils.dot(dim, query, corpus[start + i]);
+                dists[i] = -CalibrationUtils.dot(dim, query, doc);
             } else {
-                dists[i] = CalibrationUtils.euclideanSq(dim, query, corpus[start + i]);
+                dists[i] = CalibrationUtils.euclideanSq(dim, query, doc);
             }
         }
         int idx = Math.min(rank - 1, dists.length - 1);

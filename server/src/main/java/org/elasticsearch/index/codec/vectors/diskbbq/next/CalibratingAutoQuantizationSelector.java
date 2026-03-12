@@ -98,34 +98,34 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
         VectorSimilarityFunction similarityFunction,
         int N
     ) throws IOException {
-        float[][][] sampled = CalibrationUtils.sampleQueriesAndCorpus(floatVectorValues, dim);
-        float[][] queries = sampled[0];
-        float[][] corpus = sampled[1];
+        CalibrationUtils.SampledData sampled = CalibrationUtils.sampleData(floatVectorValues, dim);
+        float[][] queries = sampled.queries();
+        int[] corpusOrdinals = sampled.corpusOrdinals();
 
-        int dimWork = dim;
-
-        if (similarityFunction == VectorSimilarityFunction.COSINE) {
+        boolean cosine = similarityFunction == VectorSimilarityFunction.COSINE;
+        if (cosine) {
             CalibrationUtils.normalize(queries);
-            CalibrationUtils.normalize(corpus);
         }
 
-        if (similarityFunction == VectorSimilarityFunction.DOT_PRODUCT
-            || similarityFunction == VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT) {
-            float[][][] transformed = CalibrationUtils.neyshaburSrebroTransform(dimWork, queries, corpus);
-            queries = transformed[0];
-            corpus = transformed[1];
-            dimWork = dim + 1;
-        }
-
-        double[] manifold = ManifoldModel.estimateManifoldParameters(similarityFunction, dimWork, queries, corpus, k);
+        double[] manifold = ManifoldModel.estimateManifoldParameters(
+            similarityFunction,
+            dim,
+            queries,
+            floatVectorValues,
+            corpusOrdinals,
+            cosine,
+            k
+        );
         double alpha = manifold[0];
         double invDim = manifold[1];
 
         RepErrorStdModel errorScalingModel = ErrorModel.estimateRepErrorStdScalingParameter(
             similarityFunction,
-            dimWork,
+            dim,
             queries,
-            corpus,
+            floatVectorValues,
+            corpusOrdinals,
+            cosine,
             k
         );
 
@@ -136,15 +136,14 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
 
         for (CandidateEncoding candidate : CANDIDATES) {
             for (boolean precondition : preconditionValues) {
-                float[][] qUse = queries;
-                float[][] cUse = corpus;
-
                 RepErrorStdModel errorModel = ErrorModel.estimateRepErrorStdMagnitudeParameter(
                     errorScalingModel,
                     similarityFunction,
-                    dimWork,
-                    qUse,
-                    cUse,
+                    dim,
+                    queries,
+                    floatVectorValues,
+                    corpusOrdinals,
+                    cosine,
                     k,
                     candidate.qbits(),
                     candidate.dbits()
@@ -167,7 +166,7 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
 
                     if (expected >= targetRecall) {
                         logger.info(
-                            "Calibration selected encoding [{}] (precondigion={}, rerank={}) with expected recall [{}]",
+                            "Calibration selected encoding [{}] (precondition={}, rerank={}) with expected recall [{}]",
                             candidate.encoding(),
                             precondition,
                             rerankVal,
