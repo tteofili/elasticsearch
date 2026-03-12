@@ -183,7 +183,12 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
             }
         }
 
-        logger.info("Calibration: no encoding met target recall [{}], selecting best [{}] with recall [{}]", targetRecall, bestEncoding, maxRecall);
+        logger.info(
+            "Calibration: no encoding met target recall [{}], selecting best [{}] with recall [{}]",
+            targetRecall,
+            bestEncoding,
+            maxRecall
+        );
         return bestEncoding;
     }
 

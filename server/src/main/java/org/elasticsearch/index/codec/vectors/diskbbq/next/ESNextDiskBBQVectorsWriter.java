@@ -112,7 +112,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         this.centroidsPerParentCluster = centroidsPerParentCluster;
         this.quantEncoding = encoding;
         this.quantizationAuto = quantizationAuto;
-        this.autoQuantizationSelector = autoQuantizationSelector != null ? autoQuantizationSelector : NoOpAutomaticQuantizationSelector.INSTANCE;
+        this.autoQuantizationSelector = autoQuantizationSelector != null
+            ? autoQuantizationSelector
+            : NoOpAutomaticQuantizationSelector.INSTANCE;
         this.mergeExec = mergeExec;
         this.numMergeWorkers = numMergeWorkers;
         this.blockDimension = blockDimension;

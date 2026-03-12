@@ -27,7 +27,6 @@ import org.elasticsearch.test.ESTestCase;
 import java.io.IOException;
 import java.util.List;
 
-
 public class AutoQuantizationSelectorTests extends ESTestCase {
 
     public void testDefaultSelectorReturnsValidEncoding() throws IOException {

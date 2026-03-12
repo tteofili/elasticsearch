@@ -25,6 +25,14 @@ public final class RepErrorStdModel {
         this.qparams = qparams;
     }
 
+    public Regression.OLSResult cparams() {
+        return cparams;
+    }
+
+    public Regression.OLSResult qparams() {
+        return qparams;
+    }
+
     /**
      * Predicted error std for centroid representation at given cluster/sample sizes.
      */
