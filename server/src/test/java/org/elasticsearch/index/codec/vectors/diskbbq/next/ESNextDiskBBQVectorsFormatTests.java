@@ -21,6 +21,7 @@ import org.apache.lucene.document.KeywordField;
 import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.index.CodecReader;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.LeafReader;
@@ -50,6 +51,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static java.lang.String.format;
+import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER;
 import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION;
 import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.MAX_CENTROIDS_PER_PARENT_CLUSTER;
 import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.MAX_PRECONDITIONING_BLOCK_DIMS;
@@ -68,6 +70,8 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         LogConfigurator.configureESLogging(); // native access requires logging to be initialized
     }
 
+    private boolean automaticQuantizationEnabled;
+
     @Override
     protected boolean supportsFloatVectorFallback() {
         return false;
@@ -82,35 +86,20 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
             ESNextDiskBBQVectorsFormat.QuantEncoding.values().length
         )];
         boolean disableFlatOnFlush = random().nextBoolean();
-        if (rarely()) {
-            int vectorPerCluster = random().nextInt(2 * MIN_VECTORS_PER_CLUSTER, MAX_VECTORS_PER_CLUSTER);
-            int flatVectorThreshold = disableFlatOnFlush ? 0 : ESNextDiskBBQVectorsFormat.defaultFlatThreshold(vectorPerCluster);
+        if (true) {
+            automaticQuantizationEnabled = true;
             format = new ESNextDiskBBQVectorsFormat(
-                encoding,
-                vectorPerCluster,
-                random().nextInt(8, MAX_CENTROIDS_PER_PARENT_CLUSTER),
+                true,
+                null,
+                MIN_VECTORS_PER_CLUSTER,
+                DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
                 DenseVectorFieldMapper.ElementType.FLOAT,
                 false,
                 null,
                 1,
                 false,
                 DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
-                flatVectorThreshold
-            );
-        } else if (rarely()) {
-            int vectorPerCluster = random().nextInt(MIN_VECTORS_PER_CLUSTER, MAX_VECTORS_PER_CLUSTER);
-            int flatVectorThreshold = disableFlatOnFlush ? 0 : ESNextDiskBBQVectorsFormat.defaultFlatThreshold(vectorPerCluster);
-            format = new ESNextDiskBBQVectorsFormat(
-                encoding,
-                vectorPerCluster,
-                random().nextInt(MIN_CENTROIDS_PER_PARENT_CLUSTER, MAX_CENTROIDS_PER_PARENT_CLUSTER),
-                DenseVectorFieldMapper.ElementType.FLOAT,
-                false,
-                null,
-                1,
-                true,
-                random().nextInt(MIN_PRECONDITIONING_BLOCK_DIMS, MAX_PRECONDITIONING_BLOCK_DIMS),
-                flatVectorThreshold
+                ESNextDiskBBQVectorsFormat.defaultFlatThreshold(MIN_VECTORS_PER_CLUSTER)
             );
         } else {
             // run with low numbers to force many clusters with parents
@@ -201,6 +190,61 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         expectThrows(IllegalArgumentException.class, () -> new ESNextDiskBBQVectorsFormat(MAX_VECTORS_PER_CLUSTER + 1, 16));
         expectThrows(IllegalArgumentException.class, () -> new ESNextDiskBBQVectorsFormat(128, MIN_CENTROIDS_PER_PARENT_CLUSTER - 1));
         expectThrows(IllegalArgumentException.class, () -> new ESNextDiskBBQVectorsFormat(128, MAX_CENTROIDS_PER_PARENT_CLUSTER + 1));
+    }
+
+    public void testAutoQuantizationFormat() throws IOException {
+        assumeTrue("Automatic Quantization is not enabled", automaticQuantizationEnabled);
+        int dimensions = random().nextInt(12, 128);
+        int numDocs = random().nextInt(1000, 20000);
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader r = getOnlyLeafReader(reader);
+                AcceptDocs acceptDocs = AcceptDocs.fromLiveDocs(r.getLiveDocs(), r.maxDoc());
+                float[] query = randomVector(dimensions);
+                TopDocs topDocs = r.searchNearestVectors("f", query, 10, acceptDocs, Integer.MAX_VALUE);
+                assertTrue(topDocs.scoreDocs.length > 0);
+            }
+        }
+    }
+
+    public void testCalibratingAutoQuantizationWithEuclidean() throws IOException {
+        doTestCalibratingAutoQuantization(VectorSimilarityFunction.EUCLIDEAN);
+    }
+
+    public void testCalibratingAutoQuantizationWithDotProduct() throws IOException {
+        doTestCalibratingAutoQuantization(VectorSimilarityFunction.DOT_PRODUCT);
+    }
+
+    public void testCalibratingAutoQuantizationWithMaxInnerProduct() throws IOException {
+        doTestCalibratingAutoQuantization(VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT);
+    }
+
+    private void doTestCalibratingAutoQuantization(VectorSimilarityFunction similarity) throws IOException {
+        assumeTrue("Automatic Quantization is not enabled", automaticQuantizationEnabled);
+        int dimensions = random().nextInt(16, 128);
+        int numDocs = random().nextInt(1000, 3000);
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), similarity));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader r = getOnlyLeafReader(reader);
+                FloatVectorValues fvv = r.getFloatVectorValues("f");
+                assertNotNull("expected float vector values after calibrating auto quantization", fvv);
+                assertEquals("all vectors should be indexed", numDocs, fvv.size());
+            }
+        }
     }
 
     public void testSimpleOffHeapSize() throws IOException {

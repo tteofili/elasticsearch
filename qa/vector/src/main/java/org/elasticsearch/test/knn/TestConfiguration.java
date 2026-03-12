@@ -151,12 +151,11 @@ record TestConfiguration(
         PARSER.declareBoolean(Builder::setReindex, REINDEX_FIELD);
         PARSER.declareBoolean(Builder::setForceMerge, FORCE_MERGE_FIELD);
         PARSER.declareString(Builder::setVectorSpace, VECTOR_SPACE_FIELD);
-        PARSER.declareField(
-            Builder::setQuantizeBits,
-            p -> p.currentToken() == XContentParser.Token.VALUE_NULL ? null : p.intValue(),
-            QUANTIZE_BITS_FIELD,
-            ObjectParser.ValueType.INT_OR_NULL
-        );
+        PARSER.declareField(Builder::setQuantizeBits, p -> {
+            if (p.currentToken() == XContentParser.Token.VALUE_NULL) return null;
+            if (p.currentToken() == XContentParser.Token.VALUE_STRING && "auto".equals(p.text())) return 0;
+            return p.intValue();
+        }, QUANTIZE_BITS_FIELD, ObjectParser.ValueType.VALUE);
         PARSER.declareString(Builder::setVectorEncoding, VECTOR_ENCODING_FIELD);
         PARSER.declareInt(Builder::setDimensions, DIMENSIONS_FIELD);
         PARSER.declareFieldArray(
@@ -213,7 +212,7 @@ record TestConfiguration(
             new ParameterHelp("force_merge", "boolean", "Whether to force-merge the index after indexing."),
             new ParameterHelp("force_merge_max_num_segments", "int", "Force-merge target number of segments."),
             new ParameterHelp("vector_space", "string", "Similarity: euclidean, dot_product, or cosine."),
-            new ParameterHelp("quantize_bits", "int", "Quantization bits; valid values depend on index_type."),
+            new ParameterHelp("quantize_bits", "int|\"auto\"", "Quantization bits (1,2,4,7) or \"auto\" for IVF calibration."),
             new ParameterHelp("vector_encoding", "string", "Vector encoding: byte, float32, or bfloat16."),
             new ParameterHelp("dimensions", "int", "Vector dimensions; -1 uses dimensions from the vector file."),
             new ParameterHelp("merge_policy", "string", "Merge policy: tiered, log_byte, log_doc, or no."),
@@ -874,7 +873,7 @@ record TestConfiguration(
                 builder.field(VECTOR_SPACE_FIELD.getPreferredName(), vectorSpace.name().toLowerCase(Locale.ROOT));
             }
             if (quantizeBits != null) {
-                builder.field(QUANTIZE_BITS_FIELD.getPreferredName(), quantizeBits);
+                builder.field(QUANTIZE_BITS_FIELD.getPreferredName(), quantizeBits == 0 ? "auto" : quantizeBits);
             }
             builder.field(VECTOR_ENCODING_FIELD.getPreferredName(), vectorEncoding.name().toLowerCase(Locale.ROOT));
             builder.field(DIMENSIONS_FIELD.getPreferredName(), dimensions);

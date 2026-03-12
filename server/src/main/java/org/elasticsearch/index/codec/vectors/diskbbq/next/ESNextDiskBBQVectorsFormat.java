@@ -276,6 +276,8 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
     }
 
     private final QuantEncoding quantEncoding;
+    private final boolean quantizationAuto;
+    private final AutoQuantizationSelector autoQuantizationSelector;
     private final int vectorPerCluster;
     private final int centroidsPerParentCluster;
     private final boolean useDirectIO;
@@ -293,6 +295,8 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
     public ESNextDiskBBQVectorsFormat(QuantEncoding quantEncoding, int vectorPerCluster, int centroidsPerParentCluster) {
         this(
             quantEncoding,
+            false,
+            null,
             vectorPerCluster,
             centroidsPerParentCluster,
             DenseVectorFieldMapper.ElementType.FLOAT,
@@ -302,6 +306,40 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             false,
             DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
             defaultFlatThreshold(vectorPerCluster)
+        );
+    }
+
+    /**
+     * Constructor for automatic quantization: encoding is resolved at segment write time via the selector.
+     */
+    public ESNextDiskBBQVectorsFormat(
+        boolean quantizationAuto,
+        AutoQuantizationSelector autoQuantizationSelector,
+        int vectorPerCluster,
+        int centroidsPerParentCluster,
+        DenseVectorFieldMapper.ElementType elementType,
+        boolean useDirectIO,
+        ExecutorService mergingExecutorService,
+        int maxMergingWorkers,
+        boolean doPrecondition,
+        int preconditioningBlockDimension,
+        int flatVectorThreshold
+    ) {
+        this(
+            QuantEncoding.ONE_BIT_4BIT_QUERY,
+            quantizationAuto,
+            autoQuantizationSelector != null
+                ? autoQuantizationSelector
+                : new CalibratingAutoQuantizationSelector(vectorPerCluster, doPrecondition),
+            vectorPerCluster,
+            centroidsPerParentCluster,
+            elementType,
+            useDirectIO,
+            mergingExecutorService,
+            maxMergingWorkers,
+            doPrecondition,
+            preconditioningBlockDimension,
+            flatVectorThreshold
         );
     }
 
@@ -318,6 +356,8 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
     ) {
         this(
             quantEncoding,
+            false,
+            null,
             vectorPerCluster,
             centroidsPerParentCluster,
             elementType,
@@ -332,6 +372,36 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
 
     public ESNextDiskBBQVectorsFormat(
         QuantEncoding quantEncoding,
+        int vectorPerCluster,
+        int centroidsPerParentCluster,
+        DenseVectorFieldMapper.ElementType elementType,
+        boolean useDirectIO,
+        ExecutorService mergingExecutorService,
+        int maxMergingWorkers,
+        boolean doPrecondition,
+        int preconditioningBlockDimension,
+        int flatVectorThreshold
+    ) {
+        this(
+            quantEncoding,
+            false,
+            null,
+            vectorPerCluster,
+            centroidsPerParentCluster,
+            elementType,
+            useDirectIO,
+            mergingExecutorService,
+            maxMergingWorkers,
+            doPrecondition,
+            preconditioningBlockDimension,
+            flatVectorThreshold
+        );
+    }
+
+    private ESNextDiskBBQVectorsFormat(
+        QuantEncoding quantEncoding,
+        boolean quantizationAuto,
+        AutoQuantizationSelector autoQuantizationSelector,
         int vectorPerCluster,
         int centroidsPerParentCluster,
         DenseVectorFieldMapper.ElementType elementType,
@@ -383,6 +453,8 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
         this.vectorPerCluster = vectorPerCluster;
         this.centroidsPerParentCluster = centroidsPerParentCluster;
         this.quantEncoding = quantEncoding;
+        this.quantizationAuto = quantizationAuto;
+        this.autoQuantizationSelector = autoQuantizationSelector;
         this.rawVectorFormat = switch (elementType) {
             case FLOAT -> float32VectorFormat;
             case BFLOAT16 -> bfloat16VectorFormat;
@@ -409,6 +481,8 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             useDirectIO,
             rawVectorFormat.fieldsWriter(state),
             quantEncoding,
+            quantizationAuto,
+            autoQuantizationSelector,
             vectorPerCluster,
             centroidsPerParentCluster,
             mergeExec,

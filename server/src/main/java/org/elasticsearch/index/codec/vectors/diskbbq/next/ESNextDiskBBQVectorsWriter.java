@@ -67,10 +67,17 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     private final int vectorPerCluster;
     private final int centroidsPerParentCluster;
     private final ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding;
+    private final boolean quantizationAuto;
+    private final AutoQuantizationSelector autoQuantizationSelector;
     private final TaskExecutor mergeExec;
     private final int numMergeWorkers;
     private final int blockDimension;
     private final boolean doPrecondition;
+
+    /**
+     * Resolved encoding for the current field during buildAndWritePostingsLists; used when quantizationAuto is true.
+     */
+    private ESNextDiskBBQVectorsFormat.QuantEncoding effectiveQuantEncodingForCurrentField;
 
     public ESNextDiskBBQVectorsWriter(
         SegmentWriteState state,
@@ -78,6 +85,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         boolean useDirectIOReads,
         FlatVectorsWriter rawVectorDelegate,
         ESNextDiskBBQVectorsFormat.QuantEncoding encoding,
+        boolean quantizationAuto,
+        AutoQuantizationSelector autoQuantizationSelector,
         int vectorPerCluster,
         int centroidsPerParentCluster,
         TaskExecutor mergeExec,
@@ -102,6 +111,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         this.vectorPerCluster = vectorPerCluster;
         this.centroidsPerParentCluster = centroidsPerParentCluster;
         this.quantEncoding = encoding;
+        this.quantizationAuto = quantizationAuto;
+        this.autoQuantizationSelector = autoQuantizationSelector != null ? autoQuantizationSelector : NoOpAutomaticQuantizationSelector.INSTANCE;
         this.mergeExec = mergeExec;
         this.numMergeWorkers = numMergeWorkers;
         this.blockDimension = blockDimension;
@@ -216,6 +227,16 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] assignments,
         int[] overspillAssignments
     ) throws IOException {
+        final ESNextDiskBBQVectorsFormat.QuantEncoding effectiveEncoding = resolveQuantEncoding(
+            fieldInfo,
+            floatVectorValues,
+            centroidSupplier,
+            assignments,
+            overspillAssignments,
+            null
+        );
+        effectiveQuantEncodingForCurrentField = effectiveEncoding;
+
         KMeansResult centroidClusters = centroidSupplier.secondLevelClusters();
         int[] centroidVectorCount = new int[centroidSupplier.size()];
         for (int i = 0; i < assignments.length; i++) {
@@ -249,11 +270,11 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         // write the posting lists
         final PackedLongValues.Builder offsets = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
         final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
-        DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(quantEncoding.bits(), BULK_SIZE, postingsOutput, true, true);
+        DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(effectiveEncoding.bits(), BULK_SIZE, postingsOutput, true, true);
         OnHeapQuantizedVectors onHeapQuantizedVectors = new OnHeapQuantizedVectors(
             floatVectorValues,
             fieldInfo.getVectorSimilarityFunction(),
-            quantEncoding,
+            effectiveEncoding,
             fieldInfo.getVectorDimension(),
             new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction())
         );
@@ -309,6 +330,16 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] assignments,
         int[] overspillAssignments
     ) throws IOException {
+        final ESNextDiskBBQVectorsFormat.QuantEncoding effectiveEncoding = resolveQuantEncoding(
+            fieldInfo,
+            floatVectorValues,
+            centroidSupplier,
+            assignments,
+            overspillAssignments,
+            mergeState
+        );
+        effectiveQuantEncodingForCurrentField = effectiveEncoding;
+
         // first, quantize all the vectors into a temporary file
         var vectorSimilarityFunction = fieldInfo.getVectorSimilarityFunction();
         KMeansResult centroidClusters = centroidSupplier.secondLevelClusters();
@@ -322,8 +353,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         ) {
             quantizedVectorsTempName = quantizedVectorsTemp.getName();
             OptimizedScalarQuantizer quantizer = new OptimizedScalarQuantizer(vectorSimilarityFunction);
-            int[] quantized = new int[quantEncoding.discretizedDimensions(fieldInfo.getVectorDimension())];
-            byte[] binary = new byte[quantEncoding.getDocPackedLength(fieldInfo.getVectorDimension())];
+            int[] quantized = new int[effectiveEncoding.discretizedDimensions(fieldInfo.getVectorDimension())];
+            byte[] binary = new byte[effectiveEncoding.getDocPackedLength(fieldInfo.getVectorDimension())];
             float[] scratch = new float[fieldInfo.getVectorDimension()];
             for (int i = 0; i < assignments.length; i++) {
                 int c = assignments[i];
@@ -335,7 +366,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                     vector,
                     scratch,
                     quantized,
-                    quantEncoding.bits(),
+                    effectiveEncoding.bits(),
                     centroid
                 );
                 if (parentCentroid != null) {
@@ -349,14 +380,14 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                         result.quantizedComponentSum()
                     );
                 }
-                quantEncoding.pack(quantized, binary);
+                effectiveEncoding.pack(quantized, binary);
                 writeQuantizedValue(quantizedVectorsTemp, binary, result);
                 if (overspill) {
                     int s = overspillAssignments[i];
                     float[] overspillCentroid = centroidSupplier.centroid(s);
                     float[] overspillParentCentroid = centroidClusters.getCentroid(s);
                     // write the overspill vector as well
-                    result = quantizer.scalarQuantize(vector, scratch, quantized, quantEncoding.bits(), overspillCentroid);
+                    result = quantizer.scalarQuantize(vector, scratch, quantized, effectiveEncoding.bits(), overspillCentroid);
                     if (overspillParentCentroid != null) {
                         float additionalCorrection = vectorSimilarityFunction == VectorSimilarityFunction.EUCLIDEAN
                             ? ESVectorUtil.squareDistance(vector, overspillParentCentroid)
@@ -368,7 +399,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                             result.quantizedComponentSum()
                         );
                     }
-                    quantEncoding.pack(quantized, binary);
+                    effectiveEncoding.pack(quantized, binary);
                     writeQuantizedValue(quantizedVectorsTemp, binary, result);
                 } else {
                     // write a zero vector for the overspill
@@ -421,10 +452,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
             OffHeapQuantizedVectors offHeapQuantizedVectors = new OffHeapQuantizedVectors(
                 quantizedVectorsInput,
-                quantEncoding,
+                effectiveEncoding,
                 fieldInfo.getVectorDimension()
             );
-            DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(quantEncoding.bits(), BULK_SIZE, postingsOutput, true, true);
+            DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(effectiveEncoding.bits(), BULK_SIZE, postingsOutput, true, true);
             // write the posting lists
             final int[] docIds = new int[maxPostingListSize];
             final int[] docDeltas = new int[maxPostingListSize];
@@ -539,11 +570,35 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         long preconditionerLength
     ) throws IOException {
         metaOutput.writeInt(ESNextOSQVectorsScorer.BULK_SIZE);
-        metaOutput.writeInt(quantEncoding.id());
+        ESNextDiskBBQVectorsFormat.QuantEncoding encodingToWrite = quantizationAuto && effectiveQuantEncodingForCurrentField != null
+            ? effectiveQuantEncodingForCurrentField
+            : quantEncoding;
+        metaOutput.writeInt(encodingToWrite.id());
         metaOutput.writeLong(preconditionerLength);
         if (preconditionerLength > 0) {
             metaOutput.writeLong(preconditionerOffset);
         }
+    }
+
+    private ESNextDiskBBQVectorsFormat.QuantEncoding resolveQuantEncoding(
+        FieldInfo fieldInfo,
+        FloatVectorValues floatVectorValues,
+        CentroidSupplier centroidSupplier,
+        int[] assignments,
+        int[] overspillAssignments,
+        MergeState mergeState
+    ) {
+        if (quantizationAuto) {
+            return autoQuantizationSelector.select(
+                fieldInfo,
+                floatVectorValues,
+                centroidSupplier,
+                assignments,
+                overspillAssignments != null ? overspillAssignments : new int[0],
+                mergeState
+            );
+        }
+        return quantEncoding;
     }
 
     @Override

@@ -198,7 +198,7 @@ public class KnnIndexTester {
                             : args.secondaryClusterSize()
                     )
                 );
-                suffix.add(Integer.toString(args.quantizeBits()));
+                suffix.add(args.quantizeBits() == 0 ? "auto" : Integer.toString(args.quantizeBits()));
             }
             case HNSW -> {
                 suffix.add(Integer.toString(args.hnswM()));
@@ -220,9 +220,25 @@ public class KnnIndexTester {
 
         format = switch (args.indexType()) {
             case IVF -> {
-                var encoding = ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(quantizeBits.byteValue());
-                // Use flatVectorThreshold from config, or default to -1 (dynamic) if not specified
                 int flatVectorThreshold = args.flatVectorThreshold() >= 0 ? args.flatVectorThreshold() : -1;
+                if (quantizeBits == 0) {
+                    yield new ESNextDiskBBQVectorsFormat(
+                        true,
+                        null,
+                        args.ivfClusterSize(),
+                        args.secondaryClusterSize() == -1
+                            ? ES920DiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER
+                            : args.secondaryClusterSize(),
+                        elementType,
+                        args.onDiskRescore(),
+                        exec,
+                        mergeWorkers,
+                        args.doPrecondition(),
+                        args.preconditioningBlockDims(),
+                        flatVectorThreshold
+                    );
+                }
+                var encoding = ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(quantizeBits.byteValue());
                 yield new ESNextDiskBBQVectorsFormat(
                     encoding,
                     args.ivfClusterSize(),
@@ -571,9 +587,9 @@ public class KnnIndexTester {
     private static void checkQuantizeBits(TestConfiguration args) {
         switch (args.indexType()) {
             case IVF:
-                if (args.quantizeBits() == null || !Set.of(1, 2, 4, 7).contains(args.quantizeBits())) {
+                if (args.quantizeBits() == null || !Set.of(0, 1, 2, 4, 7).contains(args.quantizeBits())) {
                     throw new IllegalArgumentException(
-                        "IVF index type only supports 1, 2, 4 or 7 bits quantization, but got: " + args.quantizeBits()
+                        "IVF index type only supports 1, 2, 4, 7 bits or \"auto\" (0) quantization, but got: " + args.quantizeBits()
                     );
                 }
                 break;

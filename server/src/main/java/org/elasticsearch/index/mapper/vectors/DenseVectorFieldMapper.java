@@ -1844,13 +1844,21 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 boolean onDiskRescore = XContentMapValues.nodeBooleanValue(onDiskRescoreNode, false);
 
                 Object quantizeBitsNode = indexOptionsMap.remove("bits");
-                int quantizeBits = XContentMapValues.nodeIntegerValue(quantizeBitsNode, DEFAULT_BBQ_IVF_QUANTIZE_BITS);
-                if ((quantizeBits == 1 || quantizeBits == 2 || quantizeBits == 4 || quantizeBits == 7) == false) {
-                    throw new IllegalArgumentException(
-                        "'bits' must be 1, 2, 4 or 7, got: " + quantizeBits + " for field [" + fieldName + "]"
-                    );
+                boolean quantizationAuto = false;
+                int quantizeBits = DEFAULT_BBQ_IVF_QUANTIZE_BITS;
+                if (quantizeBitsNode != null) {
+                    if ("auto".equals(quantizeBitsNode)) {
+                        quantizationAuto = true;
+                    } else {
+                        quantizeBits = XContentMapValues.nodeIntegerValue(quantizeBitsNode, DEFAULT_BBQ_IVF_QUANTIZE_BITS);
+                        if ((quantizeBits == 1 || quantizeBits == 2 || quantizeBits == 4 || quantizeBits == 7) == false) {
+                            throw new IllegalArgumentException(
+                                "'bits' must be 1, 2, 4, 7 or \"auto\", got: " + quantizeBitsNode + " for field [" + fieldName + "]"
+                            );
+                        }
+                    }
                 }
-                if (rescoreVector == null) {
+                if (rescoreVector == null && quantizationAuto == false) {
                     // adjust the oversampling factor based on quantization scheme
                     // no oversampling with 4 bits
                     if (quantizeBits == 2) {
@@ -1872,6 +1880,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     indexVersion,
                     doPrecondition,
                     quantizeBits,
+                    quantizationAuto,
                     experimentalFeaturesEnabled
                 );
             }
@@ -2577,6 +2586,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
         final IndexVersion indexVersionCreated;
         final int bits;
         final boolean doPrecondition;
+        final boolean quantizationAuto;
         final boolean experimentalFeaturesEnabled;
 
         BBQIVFIndexOptions(
@@ -2588,6 +2598,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
             IndexVersion indexVersionCreated,
             boolean doPrecondition,
             int bits,
+            boolean quantizationAuto,
             boolean experimentalFeaturesEnabled
         ) {
             super(VectorIndexType.BBQ_DISK, rescoreVector);
@@ -2598,6 +2609,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
             this.indexVersionCreated = indexVersionCreated;
             this.bits = bits;
             this.doPrecondition = doPrecondition;
+            this.quantizationAuto = quantizationAuto;
             this.experimentalFeaturesEnabled = experimentalFeaturesEnabled;
         }
 
@@ -2613,6 +2625,21 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 );
             }
             if (indexVersionCreated.onOrAfter(DISK_BBQ_QUANTIZE_BITS) && experimentalFeaturesEnabled) {
+                if (quantizationAuto) {
+                    return new ESNextDiskBBQVectorsFormat(
+                        true,
+                        null,
+                        clusterSize,
+                        ES940DiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
+                        elementType,
+                        onDiskRescore,
+                        mergingExecutorService,
+                        numMergeWorkers,
+                        doPrecondition,
+                        ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
+                        flatIndexThreshold
+                    );
+                }
                 return new ESNextDiskBBQVectorsFormat(
                     ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) bits),
                     clusterSize,
@@ -2654,12 +2681,13 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 && defaultVisitPercentage == that.defaultVisitPercentage
                 && onDiskRescore == that.onDiskRescore
                 && bits == that.bits
+                && quantizationAuto == that.quantizationAuto
                 && Objects.equals(rescoreVector, that.rescoreVector);
         }
 
         @Override
         int doHashCode() {
-            return Objects.hash(clusterSize, flatIndexThreshold, defaultVisitPercentage, onDiskRescore, rescoreVector);
+            return Objects.hash(clusterSize, flatIndexThreshold, defaultVisitPercentage, onDiskRescore, rescoreVector, quantizationAuto);
         }
 
         @Override
@@ -2680,7 +2708,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
             if (rescoreVector != null) {
                 rescoreVector.toXContent(builder, params);
             }
-            builder.field("bits", bits);
+            builder.field("bits", quantizationAuto ? "auto" : bits);
             if (doPrecondition) {
                 builder.field("precondition", doPrecondition);
             }
