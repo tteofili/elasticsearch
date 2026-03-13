@@ -264,6 +264,24 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
         return ((NextFieldEntry) fieldEntry).calibratedDoPrecondition();
     }
 
+    @Override
+    public ESNextDiskBBQVectorsFormat.QuantEncoding getQuantEncoding(FieldInfo fieldInfo) {
+        final FieldEntry fieldEntry = fields.get(fieldInfo.number);
+        if (fieldEntry == null) {
+            return null;
+        }
+        return ((NextFieldEntry) fieldEntry).quantEncoding();
+    }
+
+    @Override
+    public float[] getGlobalCentroid(FieldInfo fieldInfo) {
+        final FieldEntry fieldEntry = fields.get(fieldInfo.number);
+        if (fieldEntry == null) {
+            return null;
+        }
+        return fieldEntry.globalCentroid();
+    }
+
     static class NextFieldEntry extends FieldEntry {
         private final ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding;
         private final float calibratedOversample;

@@ -28,4 +28,16 @@ public interface CalibrationAwareReader {
      * for the given field. Returns {@code false} if no calibration data is available.
      */
     boolean shouldPrecondition(FieldInfo fieldInfo);
+
+    /**
+     * Returns the quantization encoding selected by calibration for the given field,
+     * or {@code null} if no calibration data is available.
+     */
+    ESNextDiskBBQVectorsFormat.QuantEncoding getQuantEncoding(FieldInfo fieldInfo);
+
+    /**
+     * Returns the global centroid (mean vector) stored for the given field,
+     * or {@code null} if no data is available. Used to detect distribution drift during merge.
+     */
+    float[] getGlobalCentroid(FieldInfo fieldInfo);
 }

@@ -9,6 +9,7 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.next;
 
+import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.MergeState;
@@ -22,8 +23,11 @@ import org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate.ManifoldMode
 import org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate.RepErrorStdModel;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
+import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
+import java.util.EnumMap;
+import java.util.Map;
 
 /**
  * Selects a {@link ESNextDiskBBQVectorsFormat.QuantEncoding} at segment write time by running
@@ -38,6 +42,24 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
     static final double DEFAULT_TARGET_RECALL = 0.9;
     static final int DEFAULT_K = 10;
     static final int MIN_VECTORS_FOR_CALIBRATION = 4096;
+
+    /**
+     * If the merged segment is more than this factor larger than the largest input segment,
+     * re-run calibration because the OLS models may not extrapolate well.
+     */
+    static final double RECALIBRATE_GROWTH_RATIO = 4.0;
+
+    /**
+     * Maximum per-dimension squared centroid shift before triggering re-calibration.
+     * squareDistance(inputGlobalCentroid, mergedGlobalCentroid) / dim must stay below this.
+     */
+    static final float RECALIBRATE_DRIFT_THRESHOLD = 0.1f;
+
+    /**
+     * Minimum fraction of total docs that must agree on a single encoding to skip re-calibration
+     * when input segments disagree.
+     */
+    static final double ENCODING_AGREEMENT_THRESHOLD = 0.8;
 
     /**
      * Candidate encodings in ascending bit-cost order paired with their (qbits, dbits) for
@@ -97,12 +119,139 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
             return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC, DEFAULT_CALIBRATED_OVERSAMPLE, false);
         }
 
+        if (mergeState != null) {
+            CalibrationResult reused = selectFromMergeState(fieldInfo, floatVectorValues, centroidSupplier, mergeState);
+            if (reused != null) {
+                return reused;
+            }
+            logger.debug("Merge calibration reuse not possible, running fast calibration");
+            try {
+                return calibrateFast(floatVectorValues, dim, similarityFunction, N);
+            } catch (IOException e) {
+                logger.warn("fast calibration failed, falling back to ONE_BIT_4BIT_QUERY", e);
+                return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, NO_CALIBRATED_OVERSAMPLE, false);
+            }
+        }
+
         try {
             return calibrate(floatVectorValues, dim, similarityFunction, N);
         } catch (IOException e) {
             logger.warn("calibration failed, falling back to ONE_BIT_4BIT_QUERY", e);
             return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, NO_CALIBRATED_OVERSAMPLE, false);
         }
+    }
+
+    /**
+     * Attempts to reuse calibration results from the input segments being merged.
+     * Returns a merged {@link CalibrationResult} if the data has not changed significantly,
+     * or {@code null} if full calibration should be performed.
+     */
+    CalibrationResult selectFromMergeState(
+        FieldInfo fieldInfo,
+        FloatVectorValues mergedVectors,
+        CentroidSupplier centroidSupplier,
+        MergeState mergeState
+    ) {
+        int dim = fieldInfo.getVectorDimension();
+        Map<ESNextDiskBBQVectorsFormat.QuantEncoding, Long> encodingDocCounts = new EnumMap<>(
+            ESNextDiskBBQVectorsFormat.QuantEncoding.class
+        );
+        double oversampleWeightedSum = 0;
+        long totalDocs = 0;
+        long largestSegmentDocs = 0;
+        long preconditionTrueDocs = 0;
+        long preconditionFalseDocs = 0;
+        int calibratedSegments = 0;
+
+        float[] mergedGlobalCentroid = null;
+        try {
+            if (centroidSupplier != null && centroidSupplier.size() > 0) {
+                mergedGlobalCentroid = centroidSupplier.centroid(0);
+            }
+        } catch (IOException e) {
+            logger.debug("could not read merged global centroid for drift detection", e);
+        }
+
+        for (int i = 0; i < mergeState.knnVectorsReaders.length; i++) {
+            KnnVectorsReader reader = mergeState.knnVectorsReaders[i];
+            if (reader instanceof CalibrationAwareReader car) {
+                ESNextDiskBBQVectorsFormat.QuantEncoding enc = car.getQuantEncoding(fieldInfo);
+                if (enc == null) {
+                    continue;
+                }
+                long docs = mergeState.maxDocs[i];
+                calibratedSegments++;
+                encodingDocCounts.merge(enc, docs, Long::sum);
+                float oversample = car.getOversampleFactor(fieldInfo);
+                oversampleWeightedSum += oversample * docs;
+                totalDocs += docs;
+                largestSegmentDocs = Math.max(largestSegmentDocs, docs);
+
+                if (car.shouldPrecondition(fieldInfo)) {
+                    preconditionTrueDocs += docs;
+                } else {
+                    preconditionFalseDocs += docs;
+                }
+
+                if (mergedGlobalCentroid != null) {
+                    float[] segmentCentroid = car.getGlobalCentroid(fieldInfo);
+                    if (segmentCentroid != null) {
+                        float drift = ESVectorUtil.squareDistance(segmentCentroid, mergedGlobalCentroid) / dim;
+                        if (drift > RECALIBRATE_DRIFT_THRESHOLD) {
+                            logger.info(
+                                "Merge calibration: centroid drift [{}] exceeds threshold [{}] for segment [{}], re-calibrating",
+                                drift,
+                                RECALIBRATE_DRIFT_THRESHOLD,
+                                i
+                            );
+                            return null;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (calibratedSegments == 0) {
+            return null;
+        }
+
+        long mergedSize = mergedVectors.size();
+        if (mergedSize > RECALIBRATE_GROWTH_RATIO * largestSegmentDocs) {
+            logger.info(
+                "Merge calibration: growth ratio [{}] exceeds threshold [{}], re-calibrating",
+                (double) mergedSize / largestSegmentDocs,
+                RECALIBRATE_GROWTH_RATIO
+            );
+            return null;
+        }
+
+        if (encodingDocCounts.size() > 1) {
+            long maxEncDocs = encodingDocCounts.values().stream().mapToLong(Long::longValue).max().orElse(0);
+            if (maxEncDocs < ENCODING_AGREEMENT_THRESHOLD * totalDocs) {
+                logger.info(
+                    "Merge calibration: encoding disagreement (max encoding covers [{}]% of docs), re-calibrating",
+                    (100.0 * maxEncDocs / totalDocs)
+                );
+                return null;
+            }
+        }
+
+        ESNextDiskBBQVectorsFormat.QuantEncoding bestEncoding = encodingDocCounts.entrySet()
+            .stream()
+            .max(Map.Entry.comparingByValue())
+            .get()
+            .getKey();
+        float avgOversample = (float) (oversampleWeightedSum / totalDocs);
+        boolean doPreconditionResult = preconditionTrueDocs > preconditionFalseDocs;
+
+        logger.info(
+            "Merge calibration: reusing encoding [{}] (oversample={}, precondition={}) from [{}] input segments",
+            bestEncoding,
+            avgOversample,
+            doPreconditionResult,
+            calibratedSegments
+        );
+        return new CalibrationResult(bestEncoding, avgOversample, doPreconditionResult);
     }
 
     CalibrationResult calibrate(FloatVectorValues floatVectorValues, int dim, VectorSimilarityFunction similarityFunction, int N)
@@ -131,7 +280,7 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
 
         // When doPrecondition is enabled, create preconditioned copies of the queries
         // and a preconditioned FloatVectorValues wrapper for the corpus.
-        // Per the Python reference, the error scaling model uses preconditioned data,
+        // the error scaling model uses preconditioned data,
         // while the magnitude model uses preconditioned or original depending on the sweep flag.
         float[][] queriesP = null;
         FloatVectorValues fvvP = null;
@@ -219,6 +368,128 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
 
         logger.info(
             "Calibration: no encoding met target recall [{}], selecting best [{}] with oversample [{}] precondition [{}] and recall [{}]",
+            targetRecall,
+            bestEncoding,
+            bestOversample,
+            bestPrecondition,
+            maxRecall
+        );
+        return new CalibrationResult(bestEncoding, bestOversample, bestPrecondition);
+    }
+
+    /**
+     * Runs calibration with reduced sample sizes, fewer sweep iterations, and fewer
+     * manifold model data points for faster execution during merge re-calibration.
+     */
+    CalibrationResult calibrateFast(FloatVectorValues floatVectorValues, int dim, VectorSimilarityFunction similarityFunction, int N)
+        throws IOException {
+        CalibrationUtils.SampledData sampled = CalibrationUtils.sampleDataFast(floatVectorValues, dim);
+        float[][] queries = sampled.queries();
+        int[] corpusOrdinals = sampled.corpusOrdinals();
+
+        boolean cosine = similarityFunction == VectorSimilarityFunction.COSINE;
+        if (cosine) {
+            CalibrationUtils.normalize(queries);
+        }
+
+        double[] manifold = ManifoldModel.estimateManifoldParametersFast(
+            similarityFunction,
+            dim,
+            queries,
+            floatVectorValues,
+            corpusOrdinals,
+            cosine,
+            k
+        );
+        double alpha = manifold[0];
+        double invDim = manifold[1];
+
+        float[][] queriesP = null;
+        FloatVectorValues fvvP = null;
+        if (doPrecondition) {
+            Preconditioner preconditioner = Preconditioner.createPreconditioner(dim, blockDimension);
+            queriesP = preconditionQueries(queries, preconditioner);
+            fvvP = preconditionFvv(floatVectorValues, preconditioner);
+        }
+
+        float[][] scalingQueries = doPrecondition ? queriesP : queries;
+        FloatVectorValues scalingFvv = doPrecondition ? fvvP : floatVectorValues;
+
+        RepErrorStdModel errorScalingModel = ErrorModel.estimateRepErrorStdScalingParameterFast(
+            similarityFunction,
+            dim,
+            scalingQueries,
+            scalingFvv,
+            corpusOrdinals,
+            cosine,
+            k
+        );
+
+        double maxRecall = -1;
+        ESNextDiskBBQVectorsFormat.QuantEncoding bestEncoding = ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY;
+        float bestOversample = AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
+        boolean bestPrecondition = false;
+
+        boolean[] preconditionValues = doPrecondition ? new boolean[] { false, true } : new boolean[] { false };
+
+        for (CandidateEncoding candidate : CANDIDATES) {
+            for (boolean precondition : preconditionValues) {
+                float[][] magnitudeQueries = precondition ? queriesP : queries;
+                FloatVectorValues magnitudeFvv = precondition ? fvvP : floatVectorValues;
+
+                RepErrorStdModel errorModel = ErrorModel.estimateRepErrorStdMagnitudeParameterFast(
+                    errorScalingModel,
+                    similarityFunction,
+                    dim,
+                    magnitudeQueries,
+                    magnitudeFvv,
+                    corpusOrdinals,
+                    cosine,
+                    k,
+                    candidate.qbits(),
+                    candidate.dbits()
+                );
+
+                for (int[] rerankRatio : RERANK_RATIOS) {
+                    int rerankVal = ExpectedRecall.rerankN(k, rerankRatio[0], rerankRatio[1]);
+                    float oversample = (float) rerankRatio[0] / rerankRatio[1];
+                    double errorStd = errorModel.quantizeRepErrorStd(vectorsPerCluster, N);
+                    double expected = ExpectedRecall.expectedRecallAtK(similarityFunction, N, alpha, invDim, errorStd, k, rerankVal);
+
+                    if (logger.isDebugEnabled()) {
+                        logger.debug(
+                            "Fast calibration: encoding [{}] precondition [{}] rerank [{}] oversample [{}] -> expected recall [{}]",
+                            candidate.encoding(),
+                            precondition,
+                            rerankVal,
+                            oversample,
+                            expected
+                        );
+                    }
+
+                    if (expected >= targetRecall) {
+                        logger.info(
+                            "Fast calibration selected encoding [{}] (precondition={}, rerank={}, oversample={}) with expected recall [{}]",
+                            candidate.encoding(),
+                            precondition,
+                            rerankVal,
+                            oversample,
+                            expected
+                        );
+                        return new CalibrationResult(candidate.encoding(), oversample, precondition);
+                    }
+                    if (expected > maxRecall) {
+                        maxRecall = expected;
+                        bestEncoding = candidate.encoding();
+                        bestOversample = oversample;
+                        bestPrecondition = precondition;
+                    }
+                }
+            }
+        }
+
+        logger.info(
+            "Fast calibration: no encoding met target recall [{}], selecting best [{}] oversample [{}] precondition [{}] recall [{}]",
             targetRecall,
             bestEncoding,
             bestOversample,

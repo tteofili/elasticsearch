@@ -75,17 +75,14 @@ public final class ManifoldModel {
         15872,
         16384 };
 
+    static final int[] RANKS_FOR_K_FAST = { 29, 25, 21, 17, 13, 9, 7, 5 };
+
+    static final int[] SAMPLE_SIZES_FAST = { 4096, 5632, 7168, 8704, 10240, 11776, 13312, 16384 };
+
     private ManifoldModel() {}
 
     /**
-     * Estimate manifold parameters (alpha, invDim) from query-corpus distances at various
-     * ranks and sample sizes. Corpus vectors are accessed lazily via {@code fvv} and
-     * {@code corpusOrdinals} rather than materializing a {@code float[][]}.
-     *
-     * @param fvv the underlying vector values source
-     * @param corpusOrdinals ordinal indices into {@code fvv} for the corpus subset
-     * @param cosine if true, corpus vectors are L2-normalized into a scratch buffer before distance computation
-     * @return double[2] containing {alpha, invDim}
+     * Estimate manifold parameters (alpha, invDim) using default (full) sample sizes.
      */
     public static double[] estimateManifoldParameters(
         VectorSimilarityFunction similarityFunction,
@@ -96,9 +93,60 @@ public final class ManifoldModel {
         boolean cosine,
         int k
     ) throws IOException {
+        return estimateManifoldParameters(similarityFunction, dim, queries, fvv, corpusOrdinals, cosine, k, RANKS_FOR_K, SAMPLE_SIZES);
+    }
+
+    /**
+     * Estimate manifold parameters (alpha, invDim) using reduced sample sizes for faster execution.
+     */
+    public static double[] estimateManifoldParametersFast(
+        VectorSimilarityFunction similarityFunction,
+        int dim,
+        float[][] queries,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
+        int k
+    ) throws IOException {
+        return estimateManifoldParameters(
+            similarityFunction,
+            dim,
+            queries,
+            fvv,
+            corpusOrdinals,
+            cosine,
+            k,
+            RANKS_FOR_K_FAST,
+            SAMPLE_SIZES_FAST
+        );
+    }
+
+    /**
+     * Estimate manifold parameters (alpha, invDim) from query-corpus distances at various
+     * ranks and sample sizes. Corpus vectors are accessed lazily via {@code fvv} and
+     * {@code corpusOrdinals} rather than materializing a {@code float[][]}.
+     *
+     * @param fvv the underlying vector values source
+     * @param corpusOrdinals ordinal indices into {@code fvv} for the corpus subset
+     * @param cosine if true, corpus vectors are L2-normalized into a scratch buffer before distance computation
+     * @param ranksForK the rank values to sweep
+     * @param sampleSizes the corpus sample sizes to sweep (must be same length as ranksForK)
+     * @return double[2] containing {alpha, invDim}
+     */
+    static double[] estimateManifoldParameters(
+        VectorSimilarityFunction similarityFunction,
+        int dim,
+        float[][] queries,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
+        int k,
+        int[] ranksForK,
+        int[] sampleSizes
+    ) throws IOException {
         int nQueries = queries.length;
         int nDocsTotal = corpusOrdinals.length;
-        int m = Math.min(RANKS_FOR_K.length, SAMPLE_SIZES.length);
+        int m = Math.min(ranksForK.length, sampleSizes.length);
 
         int logCount = 0;
         double[] logRanks = new double[m];
@@ -108,8 +156,8 @@ public final class ManifoldModel {
         float[] scratch = cosine ? new float[dim] : null;
         int sampleStart = 0;
         for (int i = 0; i < m; i++) {
-            int rank = RANKS_FOR_K[i];
-            int sampleEnd = SAMPLE_SIZES[i];
+            int rank = ranksForK[i];
+            int sampleEnd = sampleSizes[i];
             if (sampleEnd > nDocsTotal) break;
             double avgDist = 0;
             for (int q = 0; q < nQueries; q++) {
@@ -129,7 +177,7 @@ public final class ManifoldModel {
             }
             avgDist /= nQueries;
             logRanks[logCount] = Math.log(rank);
-            logSampleSizes[logCount] = Math.log(SAMPLE_SIZES[i]);
+            logSampleSizes[logCount] = Math.log(sampleSizes[i]);
             logDistances[logCount] = Math.log(Math.max(avgDist, 1e-38));
             logCount++;
             sampleStart = sampleEnd;

@@ -22,6 +22,8 @@ public final class CalibrationUtils {
 
     static final int MAX_QUERY_SAMPLE = 128;
     static final int MAX_CORPUS_SAMPLE = 16384;
+    static final int MAX_QUERY_SAMPLE_FAST = 48;
+    static final int MAX_CORPUS_SAMPLE_FAST = 8192;
     static final long CALIBRATION_SEED = 215873873L;
 
     private CalibrationUtils() {}
@@ -90,15 +92,31 @@ public final class CalibrationUtils {
     }
 
     /**
+     * Sample random, disjoint query and corpus subsets from {@link FloatVectorValues}
+     * using default (full) sample sizes.
+     */
+    public static SampledData sampleData(FloatVectorValues vectorValues, int dim) throws IOException {
+        return sampleData(vectorValues, dim, MAX_QUERY_SAMPLE, MAX_CORPUS_SAMPLE);
+    }
+
+    /**
+     * Sample random, disjoint query and corpus subsets using reduced sample sizes
+     * for faster calibration (e.g., during merge re-calibration).
+     */
+    public static SampledData sampleDataFast(FloatVectorValues vectorValues, int dim) throws IOException {
+        return sampleData(vectorValues, dim, MAX_QUERY_SAMPLE_FAST, MAX_CORPUS_SAMPLE_FAST);
+    }
+
+    /**
      * Sample random, disjoint query and corpus subsets from {@link FloatVectorValues}.
      * Queries are materialized (cloned); corpus vectors are represented as ordinal indices
      * into the original {@code vectorValues}, avoiding bulk materialization.
      */
-    public static SampledData sampleData(FloatVectorValues vectorValues, int dim) throws IOException {
+    static SampledData sampleData(FloatVectorValues vectorValues, int dim, int maxQuerySample, int maxCorpusSample) throws IOException {
         int n = vectorValues.size();
         Random rng = new Random(CALIBRATION_SEED);
-        int nQueries = Math.min(MAX_QUERY_SAMPLE, n / 2);
-        int nDocs = Math.min(MAX_CORPUS_SAMPLE, n - nQueries);
+        int nQueries = Math.min(maxQuerySample, n / 2);
+        int nDocs = Math.min(maxCorpusSample, n - nQueries);
 
         int[] indices = new int[n];
         for (int i = 0; i < n; i++) {

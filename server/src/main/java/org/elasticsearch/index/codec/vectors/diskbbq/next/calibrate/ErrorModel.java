@@ -65,7 +65,11 @@ public final class ErrorModel {
         15672,
         16352 };
 
+    static final int[] N_DOCS_PER_CLUSTER_SCALING_FAST = { 256, 216, 176, 136, 104, 80, 64 };
+    static final int[] SAMPLE_SIZES_SCALING_FAST = { 8192, 9892, 11592, 13292, 14652, 15672, 16352 };
+
     static final int[] N_DOCS_PER_CLUSTER_MAGNITUDE = { 64, 72, 80, 88, 96, 104, 112, 120, 128 };
+    static final int[] N_DOCS_PER_CLUSTER_MAGNITUDE_FAST = { 64, 80, 96, 112, 128 };
     static final int SAMPLE_SIZE_MAGNITUDE = 4096;
 
     private ErrorModel() {}
@@ -378,13 +382,7 @@ public final class ErrorModel {
     }
 
     /**
-     * Estimate the scaling of representation error by sweeping 15 (nDocsPerCluster, sampleSize) pairs,
-     * clustering the corpus at each, measuring centroid and quantized error, and fitting OLS on
-     * {@code log(error_std) ~ beta0 + beta1 * (log(L) - log(N))}.
-     *
-     * @param fvv the vector values source for lazy access
-     * @param corpusOrdinals ordinal indices into {@code fvv}
-     * @param cosine if true, normalize corpus vectors on-the-fly
+     * Estimate the scaling of representation error using default (full) sweep parameters.
      */
     public static RepErrorStdModel estimateRepErrorStdScalingParameter(
         VectorSimilarityFunction similarityFunction,
@@ -395,14 +393,68 @@ public final class ErrorModel {
         boolean cosine,
         int k
     ) {
-        int m = N_DOCS_PER_CLUSTER_SCALING.length;
+        return estimateRepErrorStdScalingParameter(
+            similarityFunction,
+            dim,
+            queries,
+            fvv,
+            corpusOrdinals,
+            cosine,
+            k,
+            N_DOCS_PER_CLUSTER_SCALING,
+            SAMPLE_SIZES_SCALING
+        );
+    }
+
+    /**
+     * Estimate the scaling of representation error using reduced sweep parameters for faster execution.
+     */
+    public static RepErrorStdModel estimateRepErrorStdScalingParameterFast(
+        VectorSimilarityFunction similarityFunction,
+        int dim,
+        float[][] queries,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
+        int k
+    ) {
+        return estimateRepErrorStdScalingParameter(
+            similarityFunction,
+            dim,
+            queries,
+            fvv,
+            corpusOrdinals,
+            cosine,
+            k,
+            N_DOCS_PER_CLUSTER_SCALING_FAST,
+            SAMPLE_SIZES_SCALING_FAST
+        );
+    }
+
+    /**
+     * Estimate the scaling of representation error by sweeping (nDocsPerCluster, sampleSize) pairs,
+     * clustering the corpus at each, measuring centroid and quantized error, and fitting OLS on
+     * {@code log(error_std) ~ beta0 + beta1 * (log(L) - log(N))}.
+     */
+    static RepErrorStdModel estimateRepErrorStdScalingParameter(
+        VectorSimilarityFunction similarityFunction,
+        int dim,
+        float[][] queries,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
+        int k,
+        int[] nDocsPerClusterArray,
+        int[] sampleSizesArray
+    ) {
+        int m = nDocsPerClusterArray.length;
         int nDocsTotal = corpusOrdinals.length;
 
         List<Double> logCentroidStds = new ArrayList<>();
         List<Double> logQuantizedStds = new ArrayList<>();
 
         for (int i = 0; i < m; i++) {
-            int ss = SAMPLE_SIZES_SCALING[i];
+            int ss = sampleSizesArray[i];
             if (ss > nDocsTotal) {
                 break;
             }
@@ -419,7 +471,7 @@ public final class ErrorModel {
                     subOrdinals,
                     cosine,
                     N_QUERY_CLUSTERS,
-                    N_DOCS_PER_CLUSTER_SCALING[i],
+                    nDocsPerClusterArray[i],
                     4,
                     1,
                     k
@@ -440,7 +492,7 @@ public final class ErrorModel {
         double[] logCStd = new double[mActual];
         double[] logQStd = new double[mActual];
         for (int i = 0; i < mActual; i++) {
-            x[i] = Math.log(N_DOCS_PER_CLUSTER_SCALING[i]) - Math.log(SAMPLE_SIZES_SCALING[i]);
+            x[i] = Math.log(nDocsPerClusterArray[i]) - Math.log(sampleSizesArray[i]);
             logCStd[i] = logCentroidStds.get(i);
             logQStd[i] = logQuantizedStds.get(i);
         }
@@ -461,13 +513,7 @@ public final class ErrorModel {
     }
 
     /**
-     * Estimate the magnitude of representation error for a specific (qbits, dbits) pair.
-     * Sweeps 9 cluster sizes at a fixed sample size and fits a plug-in regression that
-     * reuses the slope from the scaling model.
-     *
-     * @param fvv the vector values source for lazy access
-     * @param corpusOrdinals ordinal indices into {@code fvv}
-     * @param cosine if true, normalize corpus vectors on-the-fly
+     * Estimate the magnitude of representation error using default (full) sweep parameters.
      */
     public static RepErrorStdModel estimateRepErrorStdMagnitudeParameter(
         RepErrorStdModel scalingModel,
@@ -481,7 +527,70 @@ public final class ErrorModel {
         int qbits,
         int dbits
     ) {
-        int m = N_DOCS_PER_CLUSTER_MAGNITUDE.length;
+        return estimateRepErrorStdMagnitudeParameter(
+            scalingModel,
+            similarityFunction,
+            dim,
+            queries,
+            fvv,
+            corpusOrdinals,
+            cosine,
+            k,
+            qbits,
+            dbits,
+            N_DOCS_PER_CLUSTER_MAGNITUDE
+        );
+    }
+
+    /**
+     * Estimate the magnitude of representation error using reduced sweep parameters for faster execution.
+     */
+    public static RepErrorStdModel estimateRepErrorStdMagnitudeParameterFast(
+        RepErrorStdModel scalingModel,
+        VectorSimilarityFunction similarityFunction,
+        int dim,
+        float[][] queries,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
+        int k,
+        int qbits,
+        int dbits
+    ) {
+        return estimateRepErrorStdMagnitudeParameter(
+            scalingModel,
+            similarityFunction,
+            dim,
+            queries,
+            fvv,
+            corpusOrdinals,
+            cosine,
+            k,
+            qbits,
+            dbits,
+            N_DOCS_PER_CLUSTER_MAGNITUDE_FAST
+        );
+    }
+
+    /**
+     * Estimate the magnitude of representation error for a specific (qbits, dbits) pair.
+     * Sweeps cluster sizes at a fixed sample size and fits a plug-in regression that
+     * reuses the slope from the scaling model.
+     */
+    static RepErrorStdModel estimateRepErrorStdMagnitudeParameter(
+        RepErrorStdModel scalingModel,
+        VectorSimilarityFunction similarityFunction,
+        int dim,
+        float[][] queries,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        boolean cosine,
+        int k,
+        int qbits,
+        int dbits,
+        int[] nDocsPerClusterArray
+    ) {
+        int m = nDocsPerClusterArray.length;
         int sampleSize = Math.min(SAMPLE_SIZE_MAGNITUDE, corpusOrdinals.length);
         int[] subOrdinals = Arrays.copyOf(corpusOrdinals, sampleSize);
 
@@ -496,7 +605,7 @@ public final class ErrorModel {
                     subOrdinals,
                     cosine,
                     N_QUERY_CLUSTERS,
-                    N_DOCS_PER_CLUSTER_MAGNITUDE[i],
+                    nDocsPerClusterArray[i],
                     qbits,
                     dbits,
                     k
@@ -516,7 +625,7 @@ public final class ErrorModel {
         double[] logSizes = new double[mActual];
         double[] logQStd = new double[mActual];
         for (int i = 0; i < mActual; i++) {
-            logNDocs[i] = Math.log(N_DOCS_PER_CLUSTER_MAGNITUDE[i]);
+            logNDocs[i] = Math.log(nDocsPerClusterArray[i]);
             logSizes[i] = Math.log(SAMPLE_SIZE_MAGNITUDE);
             logQStd[i] = logQuantizedStds.get(i);
         }
