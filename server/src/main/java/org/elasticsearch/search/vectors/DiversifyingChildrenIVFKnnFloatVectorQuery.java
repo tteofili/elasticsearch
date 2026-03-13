@@ -44,6 +44,21 @@ public class DiversifyingChildrenIVFKnnFloatVectorQuery extends IVFKnnFloatVecto
         this.parentsFilter = parentsFilter;
     }
 
+    public DiversifyingChildrenIVFKnnFloatVectorQuery(
+        String field,
+        float[] query,
+        int k,
+        int numCands,
+        Query childFilter,
+        BitSetProducer parentsFilter,
+        float visitRatio,
+        boolean doPrecondition,
+        boolean useCalibrationOversample
+    ) {
+        super(field, query, k, numCands, childFilter, visitRatio, doPrecondition, useCalibrationOversample);
+        this.parentsFilter = parentsFilter;
+    }
+
     @Override
     protected IVFCollectorManager getKnnCollectorManager(int k, IndexSearcher searcher) {
         return new DiversifiedIVFKnnCollectorManager(k, searcher, parentsFilter);

@@ -330,7 +330,7 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             quantizationAuto,
             autoQuantizationSelector != null
                 ? autoQuantizationSelector
-                : new CalibratingAutoQuantizationSelector(vectorPerCluster, doPrecondition),
+                : new CalibratingAutoQuantizationSelector(vectorPerCluster, doPrecondition, preconditioningBlockDimension),
             vectorPerCluster,
             centroidsPerParentCluster,
             elementType,

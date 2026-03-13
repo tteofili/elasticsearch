@@ -23,7 +23,28 @@ import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
 public interface AutoQuantizationSelector {
 
     /**
-     * Choose the quantization encoding to use for the current segment.
+     * Default oversample used when the segment is too small for calibration.
+     */
+    float DEFAULT_CALIBRATED_OVERSAMPLE = 3f;
+
+    /**
+     * No calibrated oversample; indicates the segment has no calibration-derived oversample.
+     */
+    float NO_CALIBRATED_OVERSAMPLE = 1.5f;
+
+    /**
+     * Bundles the quantization encoding with the calibration-derived oversample ratio and
+     * preconditioning decision.
+     *
+     * @param encoding  the quantization encoding to use
+     * @param oversample the calibrated oversample ratio ({@code num/den} from the rerank ratio),
+     *                   or {@link #NO_CALIBRATED_OVERSAMPLE} if not calibrated
+     * @param doPrecondition whether the calibration determined that preconditioning improves recall
+     */
+    record CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding encoding, float oversample, boolean doPrecondition) {}
+
+    /**
+     * Choose the quantization encoding and oversample to use for the current segment.
      *
      * @param fieldInfo          field metadata (dimension, similarity)
      * @param floatVectorValues merged or flush vectors
@@ -31,9 +52,9 @@ public interface AutoQuantizationSelector {
      * @param assignments       centroid assignment per vector
      * @param overspillAssignments overspill assignments, or empty if none
      * @param mergeState        non-null when merging, null on flush
-     * @return a concrete encoding to use for this segment (never null)
+     * @return calibration result containing the encoding and oversample (never null)
      */
-    ESNextDiskBBQVectorsFormat.QuantEncoding select(
+    CalibrationResult select(
         FieldInfo fieldInfo,
         FloatVectorValues floatVectorValues,
         CentroidSupplier centroidSupplier,

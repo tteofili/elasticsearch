@@ -25,7 +25,7 @@ public final class NoOpAutomaticQuantizationSelector implements AutoQuantization
     private NoOpAutomaticQuantizationSelector() {}
 
     @Override
-    public ESNextDiskBBQVectorsFormat.QuantEncoding select(
+    public CalibrationResult select(
         FieldInfo fieldInfo,
         FloatVectorValues floatVectorValues,
         CentroidSupplier centroidSupplier,
@@ -33,6 +33,6 @@ public final class NoOpAutomaticQuantizationSelector implements AutoQuantization
         int[] overspillAssignments,
         MergeState mergeState
     ) {
-        return ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY;
+        return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, NO_CALIBRATED_OVERSAMPLE, false);
     }
 }

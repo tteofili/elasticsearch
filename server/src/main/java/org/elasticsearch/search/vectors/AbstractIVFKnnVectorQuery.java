@@ -11,10 +11,14 @@ package org.elasticsearch.search.vectors;
 
 import com.carrotsearch.hppc.IntHashSet;
 
+import org.apache.lucene.codecs.KnnVectorsReader;
+import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
+import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.search.AcceptDocs;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
@@ -33,7 +37,10 @@ import org.apache.lucene.search.Weight;
 import org.apache.lucene.search.knn.KnnCollectorManager;
 import org.apache.lucene.search.knn.KnnSearchStrategy;
 import org.apache.lucene.util.Bits;
+import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.common.lucene.search.Queries;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.AutoQuantizationSelector;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.CalibrationAwareReader;
 import org.elasticsearch.search.profile.query.QueryProfiler;
 
 import java.io.IOException;
@@ -49,6 +56,8 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
 
     static final TopDocs NO_RESULTS = TopDocsCollector.EMPTY_TOPDOCS;
 
+    static final int OVERSAMPLE_LIMIT = 10_000;
+
     protected final String field;
     protected final float providedVisitRatio;
     protected final int k;
@@ -56,8 +65,21 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
     protected final Query filter;
     protected int vectorOpsCount;
     protected boolean doPrecondition;
+    protected final boolean useCalibrationOversample;
 
     protected AbstractIVFKnnVectorQuery(String field, float visitRatio, int k, int numCands, Query filter, boolean doPrecondition) {
+        this(field, visitRatio, k, numCands, filter, doPrecondition, false);
+    }
+
+    protected AbstractIVFKnnVectorQuery(
+        String field,
+        float visitRatio,
+        int k,
+        int numCands,
+        Query filter,
+        boolean doPrecondition,
+        boolean useCalibrationOversample
+    ) {
         if (k < 1) {
             throw new IllegalArgumentException("k must be at least 1, got: " + k);
         }
@@ -73,6 +95,7 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
         this.filter = filter;
         this.numCands = numCands;
         this.doPrecondition = doPrecondition;
+        this.useCalibrationOversample = useCalibrationOversample;
     }
 
     @Override
@@ -90,12 +113,13 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
         return k == that.k
             && Objects.equals(field, that.field)
             && Objects.equals(filter, that.filter)
-            && Objects.equals(providedVisitRatio, that.providedVisitRatio);
+            && Objects.equals(providedVisitRatio, that.providedVisitRatio)
+            && useCalibrationOversample == that.useCalibrationOversample;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(field, k, filter, providedVisitRatio);
+        return Objects.hash(field, k, filter, providedVisitRatio, useCalibrationOversample);
     }
 
     @Override
@@ -117,13 +141,23 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
             filterWeight = null;
         }
 
-        // we request numCands as we are using it as an approximation measure
-        // we need to ensure we are getting at least 2*k results to ensure we cover overspill duplicates
-        // TODO move the logic for automatically adjusting percentages to the query, so we can only pass
-        // 2k to the collector.
-        IVFCollectorManager knnCollectorManager = getKnnCollectorManager(Math.round(2f * k), indexSearcher);
-        TaskExecutor taskExecutor = indexSearcher.getTaskExecutor();
         List<LeafReaderContext> leafReaderContexts = reader.leaves();
+
+        int effectiveK = k;
+        if (useCalibrationOversample) {
+            float maxOversample = resolveCalibratedOversample(leafReaderContexts);
+            if (maxOversample > AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE) {
+                effectiveK = Math.min((int) Math.ceil(k * maxOversample), OVERSAMPLE_LIMIT);
+            }
+            if (doPrecondition == false) {
+                doPrecondition = resolveCalibratedDoPrecondition(leafReaderContexts);
+            }
+        }
+
+        // we request numCands as we are using it as an approximation measure
+        // we need to ensure we are getting at least 2*effectiveK results to ensure we cover overspill duplicates
+        IVFCollectorManager knnCollectorManager = getKnnCollectorManager(Math.round(2f * effectiveK), indexSearcher);
+        TaskExecutor taskExecutor = indexSearcher.getTaskExecutor();
 
         assert this instanceof IVFKnnFloatVectorQuery;
         int totalVectors = 0;
@@ -139,7 +173,7 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
         if (providedVisitRatio == 0.0f) {
             // dynamically set the percentage
             float expected = (float) Math.round(
-                Math.log10(totalVectors) * Math.log10(totalVectors) * (Math.min(10_000, Math.max(numCands, 5 * k)))
+                Math.log10(totalVectors) * Math.log10(totalVectors) * (Math.min(10_000, Math.max(numCands, 5 * effectiveK)))
             );
             visitRatio = expected / totalVectors;
         } else {
@@ -155,13 +189,65 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
         }
         TopDocs[] perLeafResults = taskExecutor.invokeAll(tasks).toArray(TopDocs[]::new);
 
-        // Merge sort the results
+        // Merge sort the results, truncating to the original k
         TopDocs topK = TopDocs.merge(k, perLeafResults);
         vectorOpsCount = (int) topK.totalHits.value();
         if (topK.scoreDocs.length == 0) {
             return Queries.NO_DOCS_INSTANCE;
         }
         return new KnnScoreDocQuery(topK.scoreDocs, reader);
+    }
+
+    /**
+     * Iterates segment readers and returns true if any segment has calibration-determined
+     * preconditioning for this field.
+     */
+    private boolean resolveCalibratedDoPrecondition(List<LeafReaderContext> leafReaderContexts) {
+        for (LeafReaderContext ctx : leafReaderContexts) {
+            SegmentReader segmentReader = Lucene.tryUnwrapSegmentReader(ctx.reader());
+            if (segmentReader == null) {
+                continue;
+            }
+            KnnVectorsReader fieldsReader = segmentReader.getVectorReader();
+            if (fieldsReader instanceof PerFieldKnnVectorsFormat.FieldsReader perFieldReader) {
+                KnnVectorsReader fieldReader = perFieldReader.getFieldReader(field);
+                if (fieldReader instanceof CalibrationAwareReader calibrationReader) {
+                    FieldInfo fieldInfo = segmentReader.getFieldInfos().fieldInfo(field);
+                    if (fieldInfo != null && calibrationReader.shouldPrecondition(fieldInfo)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Iterates segment readers and returns the maximum calibrated oversample across all segments
+     * that have calibration data for this field.
+     */
+    private float resolveCalibratedOversample(List<LeafReaderContext> leafReaderContexts) {
+        float maxOversample = AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
+        for (LeafReaderContext ctx : leafReaderContexts) {
+            SegmentReader segmentReader = Lucene.tryUnwrapSegmentReader(ctx.reader());
+            if (segmentReader == null) {
+                continue;
+            }
+            KnnVectorsReader fieldsReader = segmentReader.getVectorReader();
+            if (fieldsReader instanceof PerFieldKnnVectorsFormat.FieldsReader perFieldReader) {
+                KnnVectorsReader fieldReader = perFieldReader.getFieldReader(field);
+                if (fieldReader instanceof CalibrationAwareReader calibrationReader) {
+                    FieldInfo fieldInfo = segmentReader.getFieldInfos().fieldInfo(field);
+                    if (fieldInfo != null) {
+                        float segmentOversample = calibrationReader.getOversampleFactor(fieldInfo);
+                        if (segmentOversample > maxOversample) {
+                            maxOversample = segmentOversample;
+                        }
+                    }
+                }
+            }
+        }
+        return maxOversample;
     }
 
     private TopDocs searchLeaf(LeafReaderContext ctx, Weight filterWeight, IVFCollectorManager knnCollectorManager, float visitRatio)

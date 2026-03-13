@@ -53,6 +53,20 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
         this.query = query;
     }
 
+    public IVFKnnFloatVectorQuery(
+        String field,
+        float[] query,
+        int k,
+        int numCands,
+        Query filter,
+        float visitRatio,
+        boolean doPrecondition,
+        boolean useCalibrationOversample
+    ) {
+        super(field, visitRatio, k, numCands, filter, doPrecondition, useCalibrationOversample);
+        this.query = query;
+    }
+
     public float[] getQuery() {
         return query;
     }

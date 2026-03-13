@@ -59,7 +59,7 @@ public class AutoQuantizationSelectorTests extends ESTestCase {
 
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension);
 
-        ESNextDiskBBQVectorsFormat.QuantEncoding chosen = NoOpAutomaticQuantizationSelector.INSTANCE.select(
+        AutoQuantizationSelector.CalibrationResult result = NoOpAutomaticQuantizationSelector.INSTANCE.select(
             fieldInfo,
             fvv,
             supplier,
@@ -67,8 +67,9 @@ public class AutoQuantizationSelectorTests extends ESTestCase {
             assignments.overspillAssignments(),
             null
         );
-        assertNotNull(chosen);
-        assertSame(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, chosen);
+        assertNotNull(result);
+        assertSame(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, result.encoding());
+        assertEquals(AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE, result.oversample(), 0.0f);
     }
 
     private static FieldInfo getFieldInfoFromIndex(int dimension) throws IOException {

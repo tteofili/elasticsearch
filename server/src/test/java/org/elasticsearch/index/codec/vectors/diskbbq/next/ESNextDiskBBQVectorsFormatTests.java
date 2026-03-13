@@ -245,6 +245,40 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         }
     }
 
+    public void testCalibratedOversampleRoundTrip() throws IOException {
+        assumeTrue("Automatic Quantization is not enabled", automaticQuantizationEnabled);
+        int dimensions = random().nextInt(16, 128);
+        int numDocs = random().nextInt(1000, 3000);
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader r = getOnlyLeafReader(reader);
+                if (r instanceof CodecReader codecReader) {
+                    KnnVectorsReader knnVectorsReader = codecReader.getVectorReader();
+                    if (knnVectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader fieldsReader) {
+                        knnVectorsReader = fieldsReader.getFieldReader("f");
+                    }
+                    if (knnVectorsReader instanceof CalibrationAwareReader calibrationReader) {
+                        var fieldInfo = r.getFieldInfos().fieldInfo("f");
+                        float oversample = calibrationReader.getOversampleFactor(fieldInfo);
+                        assertTrue(
+                            "calibrated oversample should be non-negative, got " + oversample,
+                            oversample >= AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE
+                        );
+                        // doPrecondition round-trips with calibration metadata
+                        calibrationReader.shouldPrecondition(fieldInfo);
+                    }
+                }
+            }
+        }
+    }
+
     public void testSimpleOffHeapSize() throws IOException {
         float[] vector = randomVector(random().nextInt(12, 500));
         try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {

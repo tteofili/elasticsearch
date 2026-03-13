@@ -54,7 +54,7 @@ import static org.elasticsearch.simdvec.ESNextOSQVectorsScorer.BULK_SIZE;
  * Default implementation of {@link IVFVectorsReader}. It scores the posting lists centroids using
  * brute force and then scores the top ones using the posting list.
  */
-public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements VectorPreconditioner {
+public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements VectorPreconditioner, CalibrationAwareReader {
 
     public ESNextDiskBBQVectorsReader(SegmentReadState state, GenericFlatVectorReaders.LoadFlatVectorsReader getFormatReader)
         throws IOException {
@@ -199,6 +199,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
     ) throws IOException {
         int bulkSize = input.readInt();
         ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding = ESNextDiskBBQVectorsFormat.QuantEncoding.fromId(input.readInt());
+        float calibratedOversample = Float.intBitsToFloat(input.readInt());
+        boolean calibratedDoPrecondition = input.readByte() == 1;
         long preconditionerLength = input.readLong();
         long preconditionerOffset = -1;
         if (preconditionerLength > 0) {
@@ -217,6 +219,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
             globalCentroid,
             globalCentroidDp,
             quantEncoding,
+            calibratedOversample,
+            calibratedDoPrecondition,
             bulkSize,
             preconditionerOffset,
             preconditionerLength
@@ -242,8 +246,28 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
         return null;
     }
 
+    @Override
+    public float getOversampleFactor(FieldInfo fieldInfo) {
+        final FieldEntry fieldEntry = fields.get(fieldInfo.number);
+        if (fieldEntry == null) {
+            return AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
+        }
+        return ((NextFieldEntry) fieldEntry).calibratedOversample();
+    }
+
+    @Override
+    public boolean shouldPrecondition(FieldInfo fieldInfo) {
+        final FieldEntry fieldEntry = fields.get(fieldInfo.number);
+        if (fieldEntry == null) {
+            return false;
+        }
+        return ((NextFieldEntry) fieldEntry).calibratedDoPrecondition();
+    }
+
     static class NextFieldEntry extends FieldEntry {
         private final ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding;
+        private final float calibratedOversample;
+        private final boolean calibratedDoPrecondition;
         protected final long preconditionerOffset;
         protected final long preconditionerLength;
 
@@ -260,6 +284,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
             float[] globalCentroid,
             float globalCentroidDp,
             ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding,
+            float calibratedOversample,
+            boolean calibratedDoPrecondition,
             int bulkSize,
             long preconditionerOffset,
             long preconditionerLength
@@ -279,12 +305,22 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader implements Vect
                 bulkSize
             );
             this.quantEncoding = quantEncoding;
+            this.calibratedOversample = calibratedOversample;
+            this.calibratedDoPrecondition = calibratedDoPrecondition;
             this.preconditionerOffset = preconditionerOffset;
             this.preconditionerLength = preconditionerLength;
         }
 
         public ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding() {
             return quantEncoding;
+        }
+
+        public float calibratedOversample() {
+            return calibratedOversample;
+        }
+
+        public boolean calibratedDoPrecondition() {
+            return calibratedDoPrecondition;
         }
 
         public long preconditionerOffset() {
