@@ -21,11 +21,14 @@ import org.apache.lucene.document.KeywordField;
 import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.index.CodecReader;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -39,6 +42,7 @@ import org.apache.lucene.tests.index.BaseKnnVectorsFormatTestCase;
 import org.apache.lucene.tests.util.TestUtil;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.logging.LogConfigurator;
+import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
 import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
 import org.elasticsearch.search.vectors.IVFKnnSearchStrategy;
 import org.junit.Before;
@@ -49,6 +53,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static java.lang.String.format;
 import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER;
@@ -508,6 +513,109 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
                     new TopKnnCollector(2, Integer.MAX_VALUE),
                     AcceptDocs.fromIteratorSupplier(DocIdSetIterator::empty, leafReader.getLiveDocs(), leafReader.maxDoc())
                 );
+            }
+        }
+    }
+
+    /**
+     * Verifies that when different segments use different QuantEncodings, the query is correctly
+     * quantized per-segment at search time (all encodings except SEVEN_BIT_SYMMETRIC use 4-bit
+     * query quantization).
+     */
+    public void testSearchAcrossSegmentsWithDifferentQuantEncodings() throws IOException {
+        int dimensions = 32;
+        int numDocsPerSegment = 1500;
+
+        ESNextDiskBBQVectorsFormat.QuantEncoding[] encodingSequence = new ESNextDiskBBQVectorsFormat.QuantEncoding[] {
+            ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+            ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC, };
+
+        AtomicInteger callCount = new AtomicInteger();
+        AutoQuantizationSelector alternatingSelector = new AutoQuantizationSelector() {
+            @Override
+            public CalibrationResult select(
+                FieldInfo fieldInfo,
+                FloatVectorValues floatVectorValues,
+                CentroidSupplier centroidSupplier,
+                int[] assignments,
+                int[] overspillAssignments,
+                MergeState mergeState
+            ) {
+                int idx = callCount.getAndIncrement() % encodingSequence.length;
+                return new CalibrationResult(encodingSequence[idx], NO_CALIBRATED_OVERSAMPLE, false);
+            }
+        };
+
+        KnnVectorsFormat testFormat = new ESNextDiskBBQVectorsFormat(
+            true,
+            alternatingSelector,
+            MIN_VECTORS_PER_CLUSTER,
+            DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
+            DenseVectorFieldMapper.ElementType.FLOAT,
+            false,
+            null,
+            1,
+            false,
+            DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
+            0
+        );
+
+        Codec testCodec = TestUtil.alwaysKnnVectorsFormat(testFormat);
+        IndexWriterConfig iwc = newIndexWriterConfig().setCodec(testCodec);
+
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, iwc)) {
+            for (int i = 0; i < numDocsPerSegment; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+
+            for (int i = 0; i < numDocsPerSegment; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                assertTrue("expected at least two segments", reader.leaves().size() >= 2);
+
+                boolean foundFourBitQuery = false;
+                boolean foundSevenBitQuery = false;
+                for (LeafReaderContext ctx : reader.leaves()) {
+                    LeafReader leafReader = ctx.reader();
+                    if (leafReader instanceof CodecReader codecReader) {
+                        KnnVectorsReader kvr = codecReader.getVectorReader();
+                        if (kvr instanceof PerFieldKnnVectorsFormat.FieldsReader fr) {
+                            kvr = fr.getFieldReader("f");
+                        }
+                        if (kvr instanceof CalibrationAwareReader cr) {
+                            FieldInfo fi = leafReader.getFieldInfos().fieldInfo("f");
+                            var encoding = cr.getQuantEncoding(fi);
+                            if (encoding.queryBits() == 4) {
+                                foundFourBitQuery = true;
+                            } else if (encoding.queryBits() == 7) {
+                                foundSevenBitQuery = true;
+                            }
+                        }
+                    }
+                }
+                assertTrue("expected a segment with 4-bit query quantization", foundFourBitQuery);
+                assertTrue("expected a segment with 7-bit query quantization", foundSevenBitQuery);
+
+                float[] query = randomVector(dimensions);
+                for (LeafReaderContext ctx : reader.leaves()) {
+                    LeafReader leafReader = ctx.reader();
+                    TopDocs topDocs = leafReader.searchNearestVectors(
+                        "f",
+                        query,
+                        10,
+                        AcceptDocs.fromLiveDocs(leafReader.getLiveDocs(), leafReader.maxDoc()),
+                        Integer.MAX_VALUE
+                    );
+                    assertTrue("each segment should return search results", topDocs.scoreDocs.length > 0);
+                }
             }
         }
     }
