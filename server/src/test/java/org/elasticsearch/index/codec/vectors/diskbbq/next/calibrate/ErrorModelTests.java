@@ -19,6 +19,16 @@ import java.util.List;
 
 public class ErrorModelTests extends ESTestCase {
 
+    public void testCxxParityConstants() {
+        assertEquals(32, ErrorModel.N_QUERY_CLUSTERS);
+        assertArrayEquals(
+            new int[] { 256, 240, 224, 216, 200, 184, 176, 160, 144, 136, 120, 104, 96, 80, 64 },
+            ErrorModel.N_DOCS_PER_CLUSTER_SCALING
+        );
+        assertArrayEquals(new int[] { 64, 72, 80, 88, 96, 104, 112, 120, 128 }, ErrorModel.N_DOCS_PER_CLUSTER_MAGNITUDE);
+        assertEquals(4096, ErrorModel.SAMPLE_SIZE_MAGNITUDE);
+    }
+
     public void testOnlineMeanAndVariance() {
         OnlineMeanAndVariance mv = new OnlineMeanAndVariance();
         assertEquals(0.0, mv.mean(), 1e-15);

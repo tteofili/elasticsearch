@@ -52,6 +52,9 @@ public class ExpectedRecallTests extends ESTestCase {
         assertEquals(15, ExpectedRecall.rerankN(10, 15, 10));
         assertEquals(20, ExpectedRecall.rerankN(10, 2, 1));
         assertEquals(30, ExpectedRecall.rerankN(10, 3, 1));
+        assertEquals(150, ExpectedRecall.rerankN(100, 15, 10));
+        assertEquals(200, ExpectedRecall.rerankN(100, 2, 1));
+        assertEquals(300, ExpectedRecall.rerankN(100, 3, 1));
     }
 
     public void testNormalPdf() {

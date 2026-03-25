@@ -21,7 +21,11 @@ import java.io.IOException;
  */
 public final class ManifoldModel {
 
-    private static final int[] RANKS_FOR_K = {
+    /**
+     * multipliers for the manifold rank sweep:
+     * rank = floor(multiplier * k / 5), multipliers descending 29..5.
+     */
+    private static final int[] RANK_MULTIPLIERS = {
         29,
         28,
         27,
@@ -75,7 +79,7 @@ public final class ManifoldModel {
         15872,
         16384 };
 
-    static final int[] RANKS_FOR_K_FAST = { 29, 25, 21, 17, 13, 9, 7, 5 };
+    static final int[] RANKS_FOR_K = { 29, 25, 21, 17, 13, 9, 7, 5 };
 
     static final int[] SAMPLE_SIZES_FAST = { 4096, 5632, 7168, 8704, 10240, 11776, 13312, 16384 };
 
@@ -93,7 +97,7 @@ public final class ManifoldModel {
         boolean cosine,
         int k
     ) throws IOException {
-        return estimateManifoldParameters(similarityFunction, dim, queries, fvv, corpusOrdinals, cosine, k, RANKS_FOR_K, SAMPLE_SIZES);
+        return estimateManifoldParameters(similarityFunction, dim, queries, fvv, corpusOrdinals, cosine, k, ranksForK(k), SAMPLE_SIZES);
     }
 
     /**
@@ -116,9 +120,25 @@ public final class ManifoldModel {
             corpusOrdinals,
             cosine,
             k,
-            RANKS_FOR_K_FAST,
+            ranksForKFast(k),
             SAMPLE_SIZES_FAST
         );
+    }
+
+    static int[] ranksForK(int k) {
+        return ranksFromMultipliers(RANK_MULTIPLIERS, k);
+    }
+
+    static int[] ranksForKFast(int k) {
+        return ranksFromMultipliers(RANKS_FOR_K, k);
+    }
+
+    private static int[] ranksFromMultipliers(int[] multipliers, int k) {
+        int[] ranks = new int[multipliers.length];
+        for (int i = 0; i < multipliers.length; i++) {
+            ranks[i] = Math.max(1, (multipliers[i] * k) / 5);
+        }
+        return ranks;
     }
 
     /**
@@ -160,19 +180,8 @@ public final class ManifoldModel {
             int sampleEnd = sampleSizes[i];
             if (sampleEnd > nDocsTotal) break;
             double avgDist = 0;
-            for (int q = 0; q < nQueries; q++) {
-                double d = ithDistance(
-                    similarityFunction,
-                    dim,
-                    rank,
-                    queries[q],
-                    fvv,
-                    corpusOrdinals,
-                    sampleStart,
-                    sampleEnd,
-                    cosine,
-                    scratch
-                );
+            for (float[] query : queries) {
+                double d = ithDistance(similarityFunction, dim, rank, query, fvv, corpusOrdinals, sampleStart, sampleEnd, cosine, scratch);
                 avgDist += d;
             }
             avgDist /= nQueries;
@@ -189,9 +198,9 @@ public final class ManifoldModel {
         for (int i = 0; i < logCount; i++) {
             x[i] = logRanks[i] - logSampleSizes[i];
         }
-        double[] yTrimmed = new double[logCount];
-        System.arraycopy(logDistances, 0, yTrimmed, 0, logCount);
-        Regression.OLSResult res = Regression.fitOls(x, yTrimmed);
+        double[] y = new double[logCount];
+        System.arraycopy(logDistances, 0, y, 0, logCount);
+        Regression.OLSResult res = Regression.fitOls(x, y);
         return new double[] { res.beta0(), res.beta1() };
     }
 

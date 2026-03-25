@@ -82,4 +82,18 @@ public class CalibrationUtilsTests extends ESTestCase {
         assertTrue(sampled.corpusOrdinals().length > 0);
         assertEquals(n, sampled.queries().length + sampled.corpusOrdinals().length);
     }
+
+    public void testSampleDataUsesCxxQueryCap() throws IOException {
+        int dim = 3;
+        int n = 4000;
+        List<float[]> vectors = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            vectors.add(new float[] { randomFloat(), randomFloat(), randomFloat() });
+        }
+        KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(vectors, null, dim);
+
+        CalibrationUtils.SampledData sampled = CalibrationUtils.sampleData(fvv, dim);
+        assertEquals(1024, sampled.queries().length);
+        assertEquals(n - 1024, sampled.corpusOrdinals().length);
+    }
 }

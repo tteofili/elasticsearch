@@ -39,8 +39,8 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
 
     private static final Logger logger = LogManager.getLogger(CalibratingAutoQuantizationSelector.class);
 
-    static final double DEFAULT_TARGET_RECALL = 0.9;
-    static final int DEFAULT_K = 10;
+    static final double DEFAULT_TARGET_RECALL = 0.97;
+    static final int DEFAULT_K = 100;
     static final int MIN_VECTORS_FOR_CALIBRATION = 4096;
 
     /**

@@ -146,7 +146,8 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
         int effectiveK = k;
         if (useCalibrationOversample) {
             float maxOversample = resolveCalibratedOversample(leafReaderContexts);
-            if (maxOversample > AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE) {
+            // Values > 1 scale k; 1f means no segment exposed calibration (see resolveCalibratedOversample).
+            if (maxOversample > 1f) {
                 effectiveK = Math.min((int) Math.ceil(k * maxOversample), OVERSAMPLE_LIMIT);
             }
             if (doPrecondition == false) {
@@ -223,11 +224,13 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
     }
 
     /**
-     * Iterates segment readers and returns the maximum calibrated oversample across all segments
-     * that have calibration data for this field.
+     * Iterates segment readers and returns the maximum calibrated oversample across segments that
+     * use {@link CalibrationAwareReader}. If no such segment exists, returns {@code 1f} so
+     * {@code k} is unchanged (avoids conflating the {@link AutoQuantizationSelector#NO_CALIBRATED_OVERSAMPLE}
+     * sentinel with a real calibrated value of {@code 1.5f}).
      */
     private float resolveCalibratedOversample(List<LeafReaderContext> leafReaderContexts) {
-        float maxOversample = AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
+        float maxOversample = Float.NaN;
         for (LeafReaderContext ctx : leafReaderContexts) {
             SegmentReader segmentReader = Lucene.tryUnwrapSegmentReader(ctx.reader());
             if (segmentReader == null) {
@@ -240,14 +243,14 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
                     FieldInfo fieldInfo = segmentReader.getFieldInfos().fieldInfo(field);
                     if (fieldInfo != null) {
                         float segmentOversample = calibrationReader.getOversampleFactor(fieldInfo);
-                        if (segmentOversample > maxOversample) {
+                        if (Float.isNaN(maxOversample) || segmentOversample > maxOversample) {
                             maxOversample = segmentOversample;
                         }
                     }
                 }
             }
         }
-        return maxOversample;
+        return Float.isNaN(maxOversample) ? 1f : maxOversample;
     }
 
     private TopDocs searchLeaf(LeafReaderContext ctx, Weight filterWeight, IVFCollectorManager knnCollectorManager, float visitRatio)

@@ -19,9 +19,7 @@ import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 
 /**
  * Error model for representation (quantization) error in scalar quantization.
@@ -313,17 +311,18 @@ public final class ErrorModel {
         }
 
         int nClusters = centroids.length;
-        List<List<Integer>> perClusterLists = new ArrayList<>(nClusters);
-        for (int i = 0; i < nClusters; i++) {
-            perClusterLists.add(new ArrayList<>());
-        }
-        for (int i = 0; i < flatAssignments.length; i++) {
-            perClusterLists.get(flatAssignments[i]).add(i);
+        int[] clusterSizes = new int[nClusters];
+        for (int flatAssignment : flatAssignments) {
+            clusterSizes[flatAssignment]++;
         }
         int[][] perClusterAssignments = new int[nClusters][];
         for (int i = 0; i < nClusters; i++) {
-            List<Integer> list = perClusterLists.get(i);
-            perClusterAssignments[i] = list.stream().mapToInt(Integer::intValue).toArray();
+            perClusterAssignments[i] = new int[clusterSizes[i]];
+        }
+        int[] clusterOffsets = new int[nClusters];
+        for (int i = 0; i < flatAssignments.length; i++) {
+            int cluster = flatAssignments[i];
+            perClusterAssignments[cluster][clusterOffsets[cluster]++] = i;
         }
 
         double cStd = centroidRepErrorStd(sim, dim, queries, fvv, corpusOrdinals, cosine, perClusterAssignments, centroids);
@@ -450,8 +449,10 @@ public final class ErrorModel {
         int m = nDocsPerClusterArray.length;
         int nDocsTotal = corpusOrdinals.length;
 
-        List<Double> logCentroidStds = new ArrayList<>();
-        List<Double> logQuantizedStds = new ArrayList<>();
+        double[] x = new double[m];
+        double[] logCStd = new double[m];
+        double[] logQStd = new double[m];
+        int mActual = 0;
 
         for (int i = 0; i < m; i++) {
             int ss = sampleSizesArray[i];
@@ -476,29 +477,20 @@ public final class ErrorModel {
                     1,
                     k
                 );
-                logCentroidStds.add(Math.log(Math.max(stds[0], 1e-38)));
-                logQuantizedStds.add(Math.log(Math.max(stds[1], 1e-38)));
+                x[mActual] = Math.log(nDocsPerClusterArray[i]) - Math.log(sampleSizesArray[i]);
+                logCStd[mActual] = Math.log(Math.max(stds[0], 1e-38));
+                logQStd[mActual] = Math.log(Math.max(stds[1], 1e-38));
+                mActual++;
             } catch (IOException e) {
                 logger.warn("failed to compute rep error stds for sample size [{}]", ss, e);
             }
         }
 
-        int mActual = logCentroidStds.size();
         if (mActual < 2) {
             return new RepErrorStdModel(Regression.OLSResult.ZERO, Regression.OLSResult.ZERO);
         }
-
-        double[] x = new double[mActual];
-        double[] logCStd = new double[mActual];
-        double[] logQStd = new double[mActual];
-        for (int i = 0; i < mActual; i++) {
-            x[i] = Math.log(nDocsPerClusterArray[i]) - Math.log(sampleSizesArray[i]);
-            logCStd[i] = logCentroidStds.get(i);
-            logQStd[i] = logQuantizedStds.get(i);
-        }
-
-        Regression.OLSResult cparams = Regression.fitOls(x, logCStd);
-        Regression.OLSResult qparams = Regression.fitOls(x, logQStd);
+        Regression.OLSResult cparams = Regression.fitOls(Arrays.copyOf(x, mActual), Arrays.copyOf(logCStd, mActual));
+        Regression.OLSResult qparams = Regression.fitOls(Arrays.copyOf(x, mActual), Arrays.copyOf(logQStd, mActual));
 
         if (logger.isDebugEnabled()) {
             logger.debug(
@@ -594,7 +586,10 @@ public final class ErrorModel {
         int sampleSize = Math.min(SAMPLE_SIZE_MAGNITUDE, corpusOrdinals.length);
         int[] subOrdinals = Arrays.copyOf(corpusOrdinals, sampleSize);
 
-        List<Double> logQuantizedStds = new ArrayList<>();
+        double[] logNDocs = new double[m];
+        double[] logSizes = new double[m];
+        double[] logQStd = new double[m];
+        int mActual = 0;
         for (int i = 0; i < m; i++) {
             try {
                 double[] stds = repErrorStds(
@@ -610,27 +605,24 @@ public final class ErrorModel {
                     dbits,
                     k
                 );
-                logQuantizedStds.add(Math.log(Math.max(stds[1], 1e-38)));
+                logNDocs[mActual] = Math.log(nDocsPerClusterArray[i]);
+                logSizes[mActual] = Math.log(sampleSize);
+                logQStd[mActual] = Math.log(Math.max(stds[1], 1e-38));
+                mActual++;
             } catch (IOException e) {
                 logger.warn("failed to compute rep error stds for magnitude iteration [{}]", i, e);
             }
         }
 
-        int mActual = logQuantizedStds.size();
         if (mActual < 2) {
             return scalingModel;
         }
-
-        double[] logNDocs = new double[mActual];
-        double[] logSizes = new double[mActual];
-        double[] logQStd = new double[mActual];
-        for (int i = 0; i < mActual; i++) {
-            logNDocs[i] = Math.log(nDocsPerClusterArray[i]);
-            logSizes[i] = Math.log(SAMPLE_SIZE_MAGNITUDE);
-            logQStd[i] = logQuantizedStds.get(i);
-        }
-
-        Regression.OLSResult qparams = fitRepErrorStdPlugin(scalingModel, logNDocs, logSizes, logQStd);
+        Regression.OLSResult qparams = fitRepErrorStdPlugin(
+            scalingModel,
+            Arrays.copyOf(logNDocs, mActual),
+            Arrays.copyOf(logSizes, mActual),
+            Arrays.copyOf(logQStd, mActual)
+        );
 
         if (logger.isDebugEnabled()) {
             logger.debug("Fit error magnitude model: quantization error {} (L/N)^{}", Math.exp(qparams.beta0()), qparams.beta1());

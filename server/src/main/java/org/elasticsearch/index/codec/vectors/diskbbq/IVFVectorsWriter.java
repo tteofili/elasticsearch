@@ -360,6 +360,28 @@ public abstract class IVFVectorsWriter extends KnnVectorsWriter {
 
     @SuppressForbidden(reason = "require usage of Lucene's IOUtils#deleteFilesIgnoringExceptions(...)")
     private void mergeOneFieldIVF(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
+        mergeIvfStarted(mergeState);
+        final long mergeStartNanos = System.nanoTime();
+        try {
+            mergeOneFieldIVFInner(fieldInfo, mergeState);
+        } finally {
+            mergeIvfCompleted(mergeState, fieldInfo, System.nanoTime() - mergeStartNanos);
+        }
+    }
+
+    /**
+     * Called at the start of IVF merge for one field. Subclasses may reset per-merge timing state.
+     */
+    protected void mergeIvfStarted(MergeState mergeState) {}
+
+    /**
+     * Called after IVF merge for one field completes (success or failure). {@code totalMergeNanos}
+     * covers the full IVF merge work for this field (excluding the subsequent raw-vector delegate merge).
+     */
+    protected void mergeIvfCompleted(MergeState mergeState, FieldInfo fieldInfo, long totalMergeNanos) {}
+
+    @SuppressForbidden(reason = "require usage of Lucene's IOUtils#deleteFilesIgnoringExceptions(...)")
+    private void mergeOneFieldIVFInner(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
         final int numVectors;
         String tempRawVectorsFileName = null;
         String docsFileName = null;

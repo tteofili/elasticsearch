@@ -12,6 +12,7 @@ package org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate;
 import org.apache.lucene.index.FloatVectorValues;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Random;
 
 /**
@@ -20,7 +21,7 @@ import java.util.Random;
  */
 public final class CalibrationUtils {
 
-    static final int MAX_QUERY_SAMPLE = 128;
+    static final int MAX_QUERY_SAMPLE = 1024;
     static final int MAX_CORPUS_SAMPLE = 16384;
     static final int MAX_QUERY_SAMPLE_FAST = 48;
     static final int MAX_CORPUS_SAMPLE_FAST = 8192;
@@ -124,12 +125,15 @@ public final class CalibrationUtils {
         }
         fisherYatesShuffle(indices, rng);
 
+        int[] queryOrdinals = Arrays.copyOfRange(indices, 0, nQueries);
+        Arrays.sort(queryOrdinals);
         float[][] queries = new float[nQueries][];
         for (int i = 0; i < nQueries; i++) {
-            queries[i] = vectorValues.vectorValue(indices[i]).clone();
+            queries[i] = vectorValues.vectorValue(queryOrdinals[i]).clone();
         }
         int[] corpusOrdinals = new int[nDocs];
         System.arraycopy(indices, nQueries, corpusOrdinals, 0, nDocs);
+        Arrays.sort(corpusOrdinals);
         return new SampledData(queries, corpusOrdinals);
     }
 

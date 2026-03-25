@@ -20,6 +20,18 @@ import java.util.Random;
 
 public class ManifoldModelTests extends ESTestCase {
 
+    public void testRanksForKFollowCxxRule() {
+        int[] ranks = ManifoldModel.ranksForK(100);
+        assertEquals(25, ranks.length);
+        assertEquals(580, ranks[0]);
+        assertEquals(100, ranks[24]);
+    }
+
+    public void testRanksForKFastFollowCxxRule() {
+        int[] ranks = ManifoldModel.ranksForKFast(100);
+        assertArrayEquals(new int[] { 580, 500, 420, 340, 260, 180, 140, 100 }, ranks);
+    }
+
     public void testExpectedRankDistanceEuclidean() {
         double alpha = 2.0;
         double invDim = 0.5;

@@ -44,7 +44,7 @@ public interface AutoQuantizationSelector {
     record CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding encoding, float oversample, boolean doPrecondition) {}
 
     /**
-     * Choose the quantization encoding and oversample to use for the current segment.
+     * Choose the quantization encoding, oversample, and whether to precondtion for the current segment.
      *
      * @param fieldInfo          field metadata (dimension, similarity)
      * @param floatVectorValues merged or flush vectors

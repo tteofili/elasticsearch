@@ -41,6 +41,11 @@ import static org.mockito.Mockito.when;
 
 public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
 
+    public void testParityDefaultsMatchCxxCalibration() {
+        assertEquals(0.97, CalibratingAutoQuantizationSelector.DEFAULT_TARGET_RECALL, 0.0d);
+        assertEquals(100, CalibratingAutoQuantizationSelector.DEFAULT_K);
+    }
+
     public void testSelectReturnsValidEncoding() throws IOException {
         int dimension = 16;
         int numVectors = 200;

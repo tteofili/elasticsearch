@@ -3197,7 +3197,8 @@ public class DenseVectorFieldMapper extends FieldMapper {
             } else if (indexOptions instanceof BBQIVFIndexOptions bbqIndexOptions) {
                 float defaultVisitRatio = (float) (bbqIndexOptions.defaultVisitPercentage / 100d);
                 float visitRatio = visitPercentage == null ? defaultVisitRatio : (float) (visitPercentage / 100d);
-                boolean useCalibrationOversample = rescore == false;
+                // Use segment calibration oversample only for bits:auto when the user did not set rescore/oversample
+                boolean useCalibrationOversample = rescore == false && bbqIndexOptions.quantizationAuto;
                 knnQuery = parentFilter != null
                     ? new DiversifyingChildrenIVFKnnFloatVectorQuery(
                         name(),
