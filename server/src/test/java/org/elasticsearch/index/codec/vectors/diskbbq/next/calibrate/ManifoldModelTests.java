@@ -76,10 +76,11 @@ public class ManifoldModelTests extends ESTestCase {
         for (int i = 0; i < nCorpus; i++) {
             corpusOrdinals[i] = i;
         }
+        CalibrationQueries calibrationQueries = CalibrationQueries.fromMaterializedRows(queries, dim, false, false, null, dim);
         double[] result = ManifoldModel.estimateManifoldParameters(
             VectorSimilarityFunction.EUCLIDEAN,
             dim,
-            queries,
+            calibrationQueries,
             fvv,
             corpusOrdinals,
             false,
@@ -102,10 +103,11 @@ public class ManifoldModelTests extends ESTestCase {
         for (int i = 0; i < 100; i++) {
             corpusOrdinals[i] = i;
         }
+        CalibrationQueries calibrationQueries = CalibrationQueries.fromMaterializedRows(queries, dim, false, false, null, dim);
         double[] result = ManifoldModel.estimateManifoldParameters(
             VectorSimilarityFunction.EUCLIDEAN,
             dim,
-            queries,
+            calibrationQueries,
             fvv,
             corpusOrdinals,
             false,

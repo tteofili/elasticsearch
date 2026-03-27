@@ -15,6 +15,7 @@ import org.apache.lucene.index.VectorSimilarityFunction;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Random;
 
 /**
@@ -32,10 +33,10 @@ public final class CalibrationUtils {
     private CalibrationUtils() {}
 
     /**
-     * Sampled data from a {@link FloatVectorValues}: materialized query vectors and
-     * ordinal indices into the original {@code floatVectorValues} for the corpus.
+     * Sampled data from a {@link FloatVectorValues}: query ordinals into the segment and
+     * corpus ordinals; queries are not materialized (see {@link CalibrationQueries}).
      */
-    public record SampledData(float[][] queries, int[] corpusOrdinals) {}
+    public record SampledData(int[] queryOrdinals, int[] corpusOrdinals) {}
 
     /**
      * Dot product of two float arrays of length {@code dim}.
@@ -73,13 +74,20 @@ public final class CalibrationUtils {
      * L2-normalize a single vector in place.
      */
     public static void normalizeVector(float[] v) {
+        normalizeInPlace(v, v.length);
+    }
+
+    /**
+     * L2-normalize the first {@code len} components of {@code v} in place.
+     */
+    public static void normalizeInPlace(float[] v, int len) {
         double norm = 0;
-        for (float f : v) {
-            norm += (double) f * f;
+        for (int j = 0; j < len; j++) {
+            norm += (double) v[j] * v[j];
         }
         norm = Math.sqrt(norm);
         if (norm == 0) norm = 1;
-        for (int j = 0; j < v.length; j++) {
+        for (int j = 0; j < len; j++) {
             v[j] = (float) (v[j] / norm);
         }
     }
@@ -117,18 +125,6 @@ public final class CalibrationUtils {
             }
         }
         return maxNormSq;
-    }
-
-    /**
-     * Lift query rows to {@code dim+1}: {@code [q, 0]} (reference: queries get a zero last coordinate).
-     */
-    public static float[][] liftQueriesForDotProduct(float[][] queries, int dim) {
-        float[][] lifted = new float[queries.length][dim + 1];
-        for (int i = 0; i < queries.length; i++) {
-            System.arraycopy(queries[i], 0, lifted[i], 0, dim);
-            lifted[i][dim] = 0f;
-        }
-        return lifted;
     }
 
     /**
@@ -200,8 +196,7 @@ public final class CalibrationUtils {
 
     /**
      * Sample random, disjoint query and corpus subsets from {@link FloatVectorValues}.
-     * Queries are materialized (cloned); corpus vectors are represented as ordinal indices
-     * into the original {@code vectorValues}, avoiding bulk materialization.
+     * Uses bounded memory (no {@code O(n)} permutation array): two small sets of ordinals.
      */
     static SampledData sampleData(FloatVectorValues vectorValues, int dim, int maxQuerySample, int maxCorpusSample) throws IOException {
         int n = vectorValues.size();
@@ -209,30 +204,32 @@ public final class CalibrationUtils {
         int nQueries = Math.min(maxQuerySample, n / 2);
         int nDocs = Math.min(maxCorpusSample, n - nQueries);
 
-        int[] indices = new int[n];
-        for (int i = 0; i < n; i++) {
-            indices[i] = i;
+        HashSet<Integer> querySet = new HashSet<>(Math.max(16, nQueries * 2));
+        while (querySet.size() < nQueries) {
+            querySet.add(rng.nextInt(n));
         }
-        fisherYatesShuffle(indices, rng);
+        HashSet<Integer> corpusSet = new HashSet<>(Math.max(16, nDocs * 2));
+        while (corpusSet.size() < nDocs) {
+            int c = rng.nextInt(n);
+            if (querySet.contains(c)) {
+                continue;
+            }
+            corpusSet.add(c);
+        }
 
-        int[] queryOrdinals = Arrays.copyOfRange(indices, 0, nQueries);
+        int[] queryOrdinals = new int[nQueries];
+        int qi = 0;
+        for (Integer o : querySet) {
+            queryOrdinals[qi++] = o;
+        }
         Arrays.sort(queryOrdinals);
-        float[][] queries = new float[nQueries][];
-        for (int i = 0; i < nQueries; i++) {
-            queries[i] = vectorValues.vectorValue(queryOrdinals[i]).clone();
-        }
-        int[] corpusOrdinals = new int[nDocs];
-        System.arraycopy(indices, nQueries, corpusOrdinals, 0, nDocs);
-        Arrays.sort(corpusOrdinals);
-        return new SampledData(queries, corpusOrdinals);
-    }
 
-    private static void fisherYatesShuffle(int[] a, Random rng) {
-        for (int i = a.length - 1; i > 0; i--) {
-            int j = rng.nextInt(i + 1);
-            int t = a[i];
-            a[i] = a[j];
-            a[j] = t;
+        int[] corpusOrdinals = new int[nDocs];
+        int ci = 0;
+        for (Integer o : corpusSet) {
+            corpusOrdinals[ci++] = o;
         }
+        Arrays.sort(corpusOrdinals);
+        return new SampledData(queryOrdinals, corpusOrdinals);
     }
 }

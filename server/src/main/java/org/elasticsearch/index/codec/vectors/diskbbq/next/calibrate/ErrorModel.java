@@ -27,8 +27,8 @@ import java.util.Arrays;
  * queries and documents. Used by calibration to predict recall.
  * <p>
  * Corpus vectors are accessed lazily via {@link FloatVectorValues} and ordinal arrays
- * to avoid materializing a large {@code float[][]}. Queries are kept materialized as
- * they are small (~128 vectors).
+ * to avoid materializing a large {@code float[][]}. Queries are provided via
+ * {@link CalibrationQueries} (late materialization, ~1024 vectors max).
  * <p>
  * Fits two OLS regressions:
  * <ul>
@@ -103,7 +103,8 @@ public final class ErrorModel {
     static double centroidRepErrorStd(
         VectorSimilarityFunction sim,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
+        boolean usePreconditioned,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -117,10 +118,12 @@ public final class ErrorModel {
         int[] order = new int[k];
         double[] simToCentroid = new double[k];
         float[] scratch = cosine ? new float[dim] : null;
+        float[] queryScratch = new float[dim];
 
-        for (float[] query : queries) {
+        for (int qi = 0; qi < queries.size(); qi++) {
+            queries.copyQuery(qi, usePreconditioned, queryScratch);
             for (int i = 0; i < k; i++) {
-                simToCentroid[i] = simExact(sim, dim, query, centroids[i]);
+                simToCentroid[i] = simExact(sim, dim, queryScratch, centroids[i]);
             }
             mergeSortIndicesByKeysDescending(simToCentroid, order, k);
             for (int idx = 0; idx < Math.min(visit, k); idx++) {
@@ -131,7 +134,7 @@ public final class ErrorModel {
                     if (cosine) {
                         doc = CalibrationUtils.copyAndNormalize(doc, scratch);
                     }
-                    double err = simExact(sim, dim, query, doc) - simExact(sim, dim, query, cent);
+                    double err = simExact(sim, dim, queryScratch, doc) - simExact(sim, dim, queryScratch, cent);
                     moments.add(err);
                 }
             }
@@ -151,7 +154,8 @@ public final class ErrorModel {
     static double quantizedRepErrorStd(
         VectorSimilarityFunction sim,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
+        boolean usePreconditioned,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -225,9 +229,11 @@ public final class ErrorModel {
         int[] queryL1 = new int[actualQueryClusters];
         int[][] queryQuantized = new int[actualQueryClusters][dim];
 
-        for (float[] query : queries) {
+        float[] queryScratch = new float[dim];
+        for (int qi = 0; qi < queries.size(); qi++) {
+            queries.copyQuery(qi, usePreconditioned, queryScratch);
             for (int qc = 0; qc < actualQueryClusters; qc++) {
-                var qr = quantizer.scalarQuantize(query, residualScratch, queryQuantized[qc], (byte) qbits, queryCentroids[qc]);
+                var qr = quantizer.scalarQuantize(queryScratch, residualScratch, queryQuantized[qc], (byte) qbits, queryCentroids[qc]);
                 queryLower[qc] = qr.lowerInterval();
                 queryUpper[qc] = qr.upperInterval();
                 queryL1[qc] = qr.quantizedComponentSum();
@@ -235,7 +241,7 @@ public final class ErrorModel {
 
             double[] queryDotCentroid = new double[nDocClusters];
             for (int i = 0; i < nDocClusters; i++) {
-                queryDotCentroid[i] = CalibrationUtils.dot(dim, query, docCentroids[i]);
+                queryDotCentroid[i] = CalibrationUtils.dot(dim, queryScratch, docCentroids[i]);
             }
 
             double[] simOsq = new double[nDocs];
@@ -269,7 +275,7 @@ public final class ErrorModel {
                 if (cosine) {
                     doc = CalibrationUtils.copyAndNormalize(doc, normScratch);
                 }
-                double exact = simExact(sim, dim, query, doc);
+                double exact = simExact(sim, dim, queryScratch, doc);
                 moments.add(exact - simOsq[docIdx]);
             }
         }
@@ -292,7 +298,8 @@ public final class ErrorModel {
     static double[] repErrorStds(
         VectorSimilarityFunction sim,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
+        boolean usePreconditioned,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         int corpusLength,
@@ -327,11 +334,22 @@ public final class ErrorModel {
             perClusterAssignments[cluster][clusterOffsets[cluster]++] = i;
         }
 
-        double cStd = centroidRepErrorStd(sim, dim, queries, fvv, corpusOrdinals, cosine, perClusterAssignments, centroids);
+        double cStd = centroidRepErrorStd(
+            sim,
+            dim,
+            queries,
+            usePreconditioned,
+            fvv,
+            corpusOrdinals,
+            cosine,
+            perClusterAssignments,
+            centroids
+        );
         double qStd = quantizedRepErrorStd(
             sim,
             dim,
             queries,
+            usePreconditioned,
             fvv,
             corpusOrdinals,
             cosine,
@@ -388,7 +406,7 @@ public final class ErrorModel {
     public static RepErrorStdModel estimateRepErrorStdScalingParameter(
         VectorSimilarityFunction similarityFunction,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -413,7 +431,7 @@ public final class ErrorModel {
     public static RepErrorStdModel estimateRepErrorStdScalingParameterFast(
         VectorSimilarityFunction similarityFunction,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -440,7 +458,7 @@ public final class ErrorModel {
     static RepErrorStdModel estimateRepErrorStdScalingParameter(
         VectorSimilarityFunction similarityFunction,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -469,6 +487,7 @@ public final class ErrorModel {
                     similarityFunction,
                     dim,
                     queries,
+                    true,
                     fvv,
                     corpusOrdinals,
                     ss,
@@ -513,7 +532,8 @@ public final class ErrorModel {
         RepErrorStdModel scalingModel,
         VectorSimilarityFunction similarityFunction,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
+        boolean usePreconditionedQueries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -526,6 +546,7 @@ public final class ErrorModel {
             similarityFunction,
             dim,
             queries,
+            usePreconditionedQueries,
             fvv,
             corpusOrdinals,
             cosine,
@@ -543,7 +564,8 @@ public final class ErrorModel {
         RepErrorStdModel scalingModel,
         VectorSimilarityFunction similarityFunction,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
+        boolean usePreconditionedQueries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -556,6 +578,7 @@ public final class ErrorModel {
             similarityFunction,
             dim,
             queries,
+            usePreconditionedQueries,
             fvv,
             corpusOrdinals,
             cosine,
@@ -575,7 +598,8 @@ public final class ErrorModel {
         RepErrorStdModel scalingModel,
         VectorSimilarityFunction similarityFunction,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
+        boolean usePreconditionedQueries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -597,6 +621,7 @@ public final class ErrorModel {
                     similarityFunction,
                     dim,
                     queries,
+                    usePreconditionedQueries,
                     fvv,
                     corpusOrdinals,
                     sampleSize,

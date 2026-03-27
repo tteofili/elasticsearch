@@ -16,7 +16,9 @@ import org.elasticsearch.test.ESTestCase;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class CalibrationUtilsTests extends ESTestCase {
 
@@ -78,11 +80,18 @@ public class CalibrationUtilsTests extends ESTestCase {
         KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(vectors, null, dim);
 
         CalibrationUtils.SampledData sampled = CalibrationUtils.sampleData(fvv, dim);
-        assertNotNull(sampled.queries());
+        assertNotNull(sampled.queryOrdinals());
         assertNotNull(sampled.corpusOrdinals());
-        assertTrue(sampled.queries().length > 0);
+        assertTrue(sampled.queryOrdinals().length > 0);
         assertTrue(sampled.corpusOrdinals().length > 0);
-        assertEquals(n, sampled.queries().length + sampled.corpusOrdinals().length);
+        assertEquals(n, sampled.queryOrdinals().length + sampled.corpusOrdinals().length);
+        Set<Integer> querySet = new HashSet<>();
+        for (int o : sampled.queryOrdinals()) {
+            querySet.add(o);
+        }
+        for (int o : sampled.corpusOrdinals()) {
+            assertFalse("query and corpus ordinals must be disjoint", querySet.contains(o));
+        }
     }
 
     public void testSampleDataUsesCxxQueryCap() throws IOException {
@@ -95,7 +104,7 @@ public class CalibrationUtilsTests extends ESTestCase {
         KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(vectors, null, dim);
 
         CalibrationUtils.SampledData sampled = CalibrationUtils.sampleData(fvv, dim);
-        assertEquals(1024, sampled.queries().length);
+        assertEquals(1024, sampled.queryOrdinals().length);
         assertEquals(n - 1024, sampled.corpusOrdinals().length);
     }
 
@@ -106,13 +115,23 @@ public class CalibrationUtilsTests extends ESTestCase {
         assertFalse(CalibrationUtils.needsNeyshaburSrebroLift(VectorSimilarityFunction.EUCLIDEAN));
     }
 
-    public void testLiftQueriesForDotProductAppendsZero() {
+    public void testCalibrationQueriesNeyshaburAppendsZero() throws IOException {
         float[][] q = { { 1, 2, 3 }, { 0, 0, 0 } };
-        float[][] lifted = CalibrationUtils.liftQueriesForDotProduct(q, 3);
-        assertEquals(2, lifted.length);
-        assertEquals(4, lifted[0].length);
-        assertEquals(0f, lifted[0][3], 0f);
-        assertEquals(0f, lifted[1][3], 0f);
+        CalibrationQueries c = CalibrationQueries.fromMaterializedRows(q, 3, false, true, null, 4);
+        float[] dst = new float[4];
+        c.copyQuery(0, false, dst);
+        assertEquals(0f, dst[3], 0f);
+        c.copyQuery(1, false, dst);
+        assertEquals(0f, dst[3], 0f);
+    }
+
+    public void testCalibrationQueriesCosineNormalizes() throws IOException {
+        float[][] rows = { { 3f, 4f } };
+        CalibrationQueries c = CalibrationQueries.fromMaterializedRows(rows, 2, true, false, null, 2);
+        float[] dst = new float[2];
+        c.copyQuery(0, false, dst);
+        assertEquals(0.6f, dst[0], 1e-5f);
+        assertEquals(0.8f, dst[1], 1e-5f);
     }
 
     public void testNeyshaburCorpusLiftMatchesMaxNorm() throws IOException {

@@ -104,10 +104,12 @@ public class ErrorModelTests extends ESTestCase {
         float[][] centroids = { { 1f, 0.05f } };
         int[][] perCluster = { { 0, 1 } };
 
+        CalibrationQueries calibrationQueries = CalibrationQueries.fromMaterializedRows(queries, dim, false, false, null, dim);
         double std = ErrorModel.centroidRepErrorStd(
             VectorSimilarityFunction.DOT_PRODUCT,
             dim,
-            queries,
+            calibrationQueries,
+            false,
             fvv,
             corpusOrdinals,
             false,
@@ -128,10 +130,12 @@ public class ErrorModelTests extends ESTestCase {
         float[][] centroids = { { 1f, 0f }, { 0f, 1f } };
         int[][] perCluster = { { 0 }, { 1 } };
 
+        CalibrationQueries calibrationQueries = CalibrationQueries.fromMaterializedRows(queries, dim, false, false, null, dim);
         double std = ErrorModel.centroidRepErrorStd(
             VectorSimilarityFunction.DOT_PRODUCT,
             dim,
-            queries,
+            calibrationQueries,
+            false,
             fvv,
             corpusOrdinals,
             false,
@@ -163,10 +167,12 @@ public class ErrorModelTests extends ESTestCase {
             assignments[i] = i < 16 ? 0 : 1;
         }
 
+        CalibrationQueries calibrationQueries = CalibrationQueries.fromMaterializedRows(queries, dim, false, false, null, dim);
         double std = ErrorModel.quantizedRepErrorStd(
             VectorSimilarityFunction.DOT_PRODUCT,
             dim,
-            queries,
+            calibrationQueries,
+            false,
             fvv,
             corpusOrdinals,
             false,
@@ -198,10 +204,12 @@ public class ErrorModelTests extends ESTestCase {
             corpusOrdinals[i] = i;
         }
 
+        CalibrationQueries calibrationQueries = CalibrationQueries.fromMaterializedRows(queries, dim, false, false, null, dim);
         double[] stds = ErrorModel.repErrorStds(
             VectorSimilarityFunction.DOT_PRODUCT,
             dim,
-            queries,
+            calibrationQueries,
+            false,
             fvv,
             corpusOrdinals,
             corpusOrdinals.length,
@@ -248,10 +256,11 @@ public class ErrorModelTests extends ESTestCase {
             corpusOrdinals[i] = i;
         }
 
+        CalibrationQueries calibrationQueries = CalibrationQueries.fromMaterializedRows(queries, 2, false, false, null, 2);
         RepErrorStdModel model = ErrorModel.estimateRepErrorStdScalingParameter(
             VectorSimilarityFunction.DOT_PRODUCT,
             2,
-            queries,
+            calibrationQueries,
             fvv,
             corpusOrdinals,
             false,
@@ -282,11 +291,13 @@ public class ErrorModelTests extends ESTestCase {
             corpusOrdinals[i] = i;
         }
 
+        CalibrationQueries calibrationQueries = CalibrationQueries.fromMaterializedRows(queries, dim, false, false, null, dim);
         RepErrorStdModel result = ErrorModel.estimateRepErrorStdMagnitudeParameter(
             scalingModel,
             VectorSimilarityFunction.DOT_PRODUCT,
             dim,
-            queries,
+            calibrationQueries,
+            false,
             fvv,
             corpusOrdinals,
             false,
@@ -309,11 +320,13 @@ public class ErrorModelTests extends ESTestCase {
         KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(corpusList, null, 1);
         int[] corpusOrdinals = { 0 };
 
+        CalibrationQueries calibrationQueries = CalibrationQueries.fromMaterializedRows(queries, 1, false, false, null, 1);
         RepErrorStdModel result = ErrorModel.estimateRepErrorStdMagnitudeParameter(
             scalingModel,
             VectorSimilarityFunction.DOT_PRODUCT,
             1,
-            queries,
+            calibrationQueries,
+            false,
             fvv,
             corpusOrdinals,
             false,

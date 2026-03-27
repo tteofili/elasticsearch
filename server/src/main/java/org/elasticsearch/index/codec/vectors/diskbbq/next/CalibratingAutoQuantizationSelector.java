@@ -16,6 +16,7 @@ import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
 import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate.CalibrationQueries;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate.CalibrationUtils;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate.ErrorModel;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate.ExpectedRecall;
@@ -87,12 +88,7 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
         this(vectorsPerCluster, blockDimension, DEFAULT_TARGET_RECALL, DEFAULT_K);
     }
 
-    public CalibratingAutoQuantizationSelector(
-        int vectorsPerCluster,
-        int blockDimension,
-        double targetRecall,
-        int k
-    ) {
+    public CalibratingAutoQuantizationSelector(int vectorsPerCluster, int blockDimension, double targetRecall, int k) {
         this.vectorsPerCluster = vectorsPerCluster;
         this.blockDimension = blockDimension;
         this.targetRecall = targetRecall;
@@ -317,28 +313,36 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
     CalibrationResult calibrate(FloatVectorValues floatVectorValues, int dim, VectorSimilarityFunction similarityFunction, int N)
         throws IOException {
         CalibrationUtils.SampledData sampled = CalibrationUtils.sampleData(floatVectorValues, dim);
-        float[][] queries = sampled.queries();
+        int[] queryOrdinals = sampled.queryOrdinals();
         int[] corpusOrdinals = sampled.corpusOrdinals();
 
         boolean cosine = similarityFunction == VectorSimilarityFunction.COSINE;
-        if (cosine) {
-            CalibrationUtils.normalize(queries);
-        }
+        boolean neyshabur = CalibrationUtils.needsNeyshaburSrebroLift(similarityFunction);
 
         int dimWork = dim;
         FloatVectorValues fvvForCalibration = floatVectorValues;
-        if (CalibrationUtils.needsNeyshaburSrebroLift(similarityFunction)) {
+        if (neyshabur) {
             double maxNormSq = CalibrationUtils.maxSquaredNormOverCorpusSample(floatVectorValues, corpusOrdinals, dim);
-            queries = CalibrationUtils.liftQueriesForDotProduct(queries, dim);
             fvvForCalibration = new CalibrationUtils.NeyshaburCorpusFloatVectorValues(floatVectorValues, dim, maxNormSq);
             dimWork = dim + 1;
         }
+
+        Preconditioner calibrationPreconditioner = Preconditioner.createPreconditioner(dimWork, blockDimension);
+        CalibrationQueries calibrationQueries = new CalibrationQueries(
+            floatVectorValues,
+            queryOrdinals,
+            dim,
+            cosine,
+            neyshabur,
+            calibrationPreconditioner,
+            dimWork
+        );
 
         // Manifold model uses original (un-preconditioned) data; after optional Neyshabur lift for dot/MIP.
         double[] manifold = ManifoldModel.estimateManifoldParameters(
             similarityFunction,
             dimWork,
-            queries,
+            calibrationQueries,
             fvvForCalibration,
             corpusOrdinals,
             cosine,
@@ -349,14 +353,12 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
 
         // Reference auto_osq: always fit the error scaling model on random orthogonal transforms,
         // independent of whether the field enables preconditioning at index time.
-        Preconditioner calibrationPreconditioner = Preconditioner.createPreconditioner(dimWork, blockDimension);
-        float[][] queriesOrth = preconditionQueries(queries, calibrationPreconditioner);
         FloatVectorValues fvvOrth = preconditionFvv(fvvForCalibration, calibrationPreconditioner);
 
         RepErrorStdModel errorScalingModel = ErrorModel.estimateRepErrorStdScalingParameter(
             similarityFunction,
             dimWork,
-            queriesOrth,
+            calibrationQueries,
             fvvOrth,
             corpusOrdinals,
             cosine,
@@ -372,14 +374,14 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
 
         for (CandidateEncoding candidate : CANDIDATES) {
             for (boolean precondition : preconditionValues) {
-                float[][] magnitudeQueries = precondition ? queriesOrth : queries;
                 FloatVectorValues magnitudeFvv = precondition ? fvvOrth : fvvForCalibration;
 
                 RepErrorStdModel errorModel = ErrorModel.estimateRepErrorStdMagnitudeParameter(
                     errorScalingModel,
                     similarityFunction,
                     dimWork,
-                    magnitudeQueries,
+                    calibrationQueries,
+                    precondition,
                     magnitudeFvv,
                     corpusOrdinals,
                     cosine,
@@ -468,27 +470,35 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
         MergeCalibrationContext mergeCtx
     ) throws IOException {
         CalibrationUtils.SampledData sampled = CalibrationUtils.sampleDataFast(floatVectorValues, dim);
-        float[][] queries = sampled.queries();
+        int[] queryOrdinals = sampled.queryOrdinals();
         int[] corpusOrdinals = sampled.corpusOrdinals();
 
         boolean cosine = similarityFunction == VectorSimilarityFunction.COSINE;
-        if (cosine) {
-            CalibrationUtils.normalize(queries);
-        }
+        boolean neyshabur = CalibrationUtils.needsNeyshaburSrebroLift(similarityFunction);
 
         int dimWork = dim;
         FloatVectorValues fvvForCalibration = floatVectorValues;
-        if (CalibrationUtils.needsNeyshaburSrebroLift(similarityFunction)) {
+        if (neyshabur) {
             double maxNormSq = CalibrationUtils.maxSquaredNormOverCorpusSample(floatVectorValues, corpusOrdinals, dim);
-            queries = CalibrationUtils.liftQueriesForDotProduct(queries, dim);
             fvvForCalibration = new CalibrationUtils.NeyshaburCorpusFloatVectorValues(floatVectorValues, dim, maxNormSq);
             dimWork = dim + 1;
         }
 
+        Preconditioner calibrationPreconditioner = Preconditioner.createPreconditioner(dimWork, blockDimension);
+        CalibrationQueries calibrationQueries = new CalibrationQueries(
+            floatVectorValues,
+            queryOrdinals,
+            dim,
+            cosine,
+            neyshabur,
+            calibrationPreconditioner,
+            dimWork
+        );
+
         double[] manifold = ManifoldModel.estimateManifoldParametersFast(
             similarityFunction,
             dimWork,
-            queries,
+            calibrationQueries,
             fvvForCalibration,
             corpusOrdinals,
             cosine,
@@ -497,14 +507,12 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
         double alpha = manifold[0];
         double invDim = manifold[1];
 
-        Preconditioner calibrationPreconditioner = Preconditioner.createPreconditioner(dimWork, blockDimension);
-        float[][] queriesOrth = preconditionQueries(queries, calibrationPreconditioner);
         FloatVectorValues fvvOrth = preconditionFvv(fvvForCalibration, calibrationPreconditioner);
 
         RepErrorStdModel errorScalingModel = ErrorModel.estimateRepErrorStdScalingParameterFast(
             similarityFunction,
             dimWork,
-            queriesOrth,
+            calibrationQueries,
             fvvOrth,
             corpusOrdinals,
             cosine,
@@ -520,14 +528,14 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
 
         for (CandidateEncoding candidate : CANDIDATES) {
             for (boolean precondition : preconditionValues) {
-                float[][] magnitudeQueries = precondition ? queriesOrth : queries;
                 FloatVectorValues magnitudeFvv = precondition ? fvvOrth : fvvForCalibration;
 
                 RepErrorStdModel errorModel = ErrorModel.estimateRepErrorStdMagnitudeParameterFast(
                     errorScalingModel,
                     similarityFunction,
                     dimWork,
-                    magnitudeQueries,
+                    calibrationQueries,
+                    precondition,
                     magnitudeFvv,
                     corpusOrdinals,
                     cosine,
@@ -611,15 +619,6 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
             );
         }
         return new FastCalibrationOutcome(new CalibrationResult(bestEncoding, bestOversample, bestPrecondition), false);
-    }
-
-    private static float[][] preconditionQueries(float[][] queries, Preconditioner preconditioner) {
-        float[][] result = new float[queries.length][];
-        for (int i = 0; i < queries.length; i++) {
-            result[i] = new float[queries[i].length];
-            preconditioner.applyTransform(queries[i], result[i]);
-        }
-        return result;
     }
 
     private static FloatVectorValues preconditionFvv(FloatVectorValues fvv, Preconditioner preconditioner) {

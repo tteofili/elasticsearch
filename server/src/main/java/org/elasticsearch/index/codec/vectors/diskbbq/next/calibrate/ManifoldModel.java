@@ -107,7 +107,7 @@ public final class ManifoldModel {
     public static double[] estimateManifoldParameters(
         VectorSimilarityFunction similarityFunction,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -122,7 +122,7 @@ public final class ManifoldModel {
     public static double[] estimateManifoldParametersFast(
         VectorSimilarityFunction similarityFunction,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -172,7 +172,7 @@ public final class ManifoldModel {
     static double[] estimateManifoldParameters(
         VectorSimilarityFunction similarityFunction,
         int dim,
-        float[][] queries,
+        CalibrationQueries queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         boolean cosine,
@@ -180,7 +180,7 @@ public final class ManifoldModel {
         int[] ranksForK,
         int[] sampleSizes
     ) throws IOException {
-        int nQueries = queries.length;
+        int nQueries = queries.size();
         int nDocsTotal = corpusOrdinals.length;
         int m = Math.min(ranksForK.length, sampleSizes.length);
 
@@ -190,6 +190,7 @@ public final class ManifoldModel {
         double[] logDistances = new double[m];
 
         float[] scratch = cosine ? new float[dim] : null;
+        float[] queryScratch = new float[dim];
         double[] distScratch = new double[MAX_MANIFOLD_CHUNK];
         int sampleStart = 0;
         for (int i = 0; i < m; i++) {
@@ -214,12 +215,13 @@ public final class ManifoldModel {
                 );
             } else {
                 double sum = 0;
-                for (float[] query : queries) {
+                for (int qi = 0; qi < nQueries; qi++) {
+                    queries.copyQuery(qi, false, queryScratch);
                     double d = ithDistance(
                         similarityFunction,
                         dim,
                         rank,
-                        query,
+                        queryScratch,
                         fvv,
                         corpusOrdinals,
                         sampleStart,
@@ -256,7 +258,7 @@ public final class ManifoldModel {
         VectorSimilarityFunction similarityFunction,
         int dim,
         int rank,
-        float[][] queries,
+        CalibrationQueries queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
         int start,
@@ -284,13 +286,15 @@ public final class ManifoldModel {
                 futures.add(pool.submit(() -> {
                     double[] localDists = new double[MAX_MANIFOLD_CHUNK];
                     float[] localScratch = cosine ? new float[dim] : null;
+                    float[] localQueryScratch = new float[dim];
                     for (int qi = queryStarts[w0]; qi < queryStarts[w0 + 1]; qi++) {
                         try {
+                            queries.copyQuery(qi, false, localQueryScratch);
                             partialSums[qi] = ithDistance(
                                 similarityFunction,
                                 dim,
                                 rank,
-                                queries[qi],
+                                localQueryScratch,
                                 fvvCopy,
                                 corpusOrdinals,
                                 start,
