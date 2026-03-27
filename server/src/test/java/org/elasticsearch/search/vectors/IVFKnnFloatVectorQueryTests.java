@@ -8,16 +8,29 @@
  */
 package org.elasticsearch.search.vectors;
 
+import org.apache.lucene.codecs.KnnVectorsFormat;
+import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.FieldInfo;
+import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
+import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.tests.util.TestUtil;
 import org.apache.lucene.util.VectorUtil;
+import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.AutoQuantizationSelector;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
+import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
 
 import java.io.IOException;
 
@@ -64,6 +77,124 @@ public class IVFKnnFloatVectorQueryTests extends AbstractIVFKnnVectorQueryTestCa
             Query filter = new TermQuery(new Term("id", "text"));
             query = getKnnVectorQuery("field", new float[] { 0.0f, 1.0f }, 10, filter);
             assertEquals("IVFKnnFloatVectorQuery:field[0.0,...][10][id:text]", query.toString("ignored"));
+        }
+    }
+
+    public void testRewriteWithCalibrationSentinelDoesNotAutoRescore() throws IOException {
+        int dimensions = 16;
+        int numDocs = 800;
+        AutoQuantizationSelector fixedSelector = new AutoQuantizationSelector() {
+            @Override
+            public CalibrationResult select(
+                FieldInfo fieldInfo,
+                FloatVectorValues floatVectorValues,
+                CentroidSupplier centroidSupplier,
+                int[] assignments,
+                int[] overspillAssignments,
+                MergeState mergeState
+            ) {
+                return new CalibrationResult(
+                    ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC,
+                    AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE,
+                    false
+                );
+            }
+        };
+        KnnVectorsFormat testFormat = new ESNextDiskBBQVectorsFormat(
+            true,
+            fixedSelector,
+            ESNextDiskBBQVectorsFormat.MIN_VECTORS_PER_CLUSTER,
+            ESNextDiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
+            DenseVectorFieldMapper.ElementType.FLOAT,
+            false,
+            null,
+            1,
+            false,
+            ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
+            0
+        );
+        IndexWriterConfig iwc = newIndexWriterConfig().setCodec(TestUtil.alwaysKnnVectorsFormat(testFormat));
+        try (Directory dir = newDirectoryForTest(); IndexWriter w = new IndexWriter(dir, iwc)) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                IndexSearcher searcher = newSearcher(reader);
+                Query rewritten = new IVFKnnFloatVectorQuery(
+                    "f",
+                    randomVector(dimensions),
+                    10,
+                    100,
+                    null,
+                    0.1f,
+                    false,
+                    true,
+                    VectorSimilarityFunction.DOT_PRODUCT
+                ).rewrite(searcher);
+                assertFalse(rewritten instanceof RescoreKnnVectorQuery);
+            }
+        }
+    }
+
+    public void testRewriteWithCalibrationOversampleTriggersAutoRescore() throws IOException {
+        int dimensions = 16;
+        int numDocs = 800;
+        float calibratedOversample = 2.0f;
+
+        AutoQuantizationSelector fixedSelector = new AutoQuantizationSelector() {
+            @Override
+            public CalibrationResult select(
+                FieldInfo fieldInfo,
+                FloatVectorValues floatVectorValues,
+                CentroidSupplier centroidSupplier,
+                int[] assignments,
+                int[] overspillAssignments,
+                MergeState mergeState
+            ) {
+                return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC, calibratedOversample, false);
+            }
+        };
+        KnnVectorsFormat testFormat = new ESNextDiskBBQVectorsFormat(
+            true,
+            fixedSelector,
+            ESNextDiskBBQVectorsFormat.MIN_VECTORS_PER_CLUSTER,
+            ESNextDiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
+            DenseVectorFieldMapper.ElementType.FLOAT,
+            false,
+            null,
+            1,
+            false,
+            ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
+            0
+        );
+        IndexWriterConfig iwc = newIndexWriterConfig().setCodec(TestUtil.alwaysKnnVectorsFormat(testFormat));
+        try (Directory dir = newDirectoryForTest(); IndexWriter w = new IndexWriter(dir, iwc)) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                IndexSearcher searcher = newSearcher(reader);
+                Query rewritten = new IVFKnnFloatVectorQuery(
+                    "f",
+                    randomVector(dimensions),
+                    10,
+                    100,
+                    null,
+                    0.1f,
+                    false,
+                    true,
+                    VectorSimilarityFunction.DOT_PRODUCT
+                ).rewrite(searcher);
+                assertTrue(rewritten instanceof KnnScoreDocQuery);
+            }
         }
     }
 }

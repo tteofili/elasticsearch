@@ -825,6 +825,77 @@ public class DenseVectorFieldTypeTests extends FieldTypeTestCase {
         }
     }
 
+    public void testAutoQuantizationUsesCalibrationOversampleAtQueryTime() {
+        float[] queryVector = new float[384];
+        for (int i = 0; i < queryVector.length; i++) {
+            queryVector[i] = randomFloat();
+        }
+        DenseVectorFieldType fieldType = new DenseVectorFieldType(
+            "f",
+            IndexVersion.current(),
+            FLOAT,
+            384,
+            true,
+            VectorSimilarity.COSINE,
+            new DenseVectorFieldMapper.BBQIVFIndexOptions(
+                randomIntBetween(MIN_VECTORS_PER_CLUSTER, MAX_VECTORS_PER_CLUSTER),
+                randomFrom(-1, randomIntBetween(0, MAX_VECTORS_PER_CLUSTER * 3)),
+                randomFloatBetween(0.0f, 100.0f, true),
+                false,
+                new DenseVectorFieldMapper.RescoreVector(2f),
+                IndexVersion.current(),
+                false,
+                4,
+                true,
+                false
+            ),
+            Collections.emptyMap(),
+            false
+        );
+
+        Query queryWithoutExplicitOversample = fieldType.createKnnQuery(
+            VectorData.fromFloats(queryVector),
+            10,
+            100,
+            10f,
+            null,
+            null,
+            null,
+            null,
+            DenseVectorFieldMapper.FilterHeuristic.FANOUT,
+            false
+        );
+        assertThat(queryWithoutExplicitOversample, instanceOf(IVFKnnFloatVectorQuery.class));
+
+        Query queryWithExplicitOversample = fieldType.createKnnQuery(
+            VectorData.fromFloats(queryVector),
+            10,
+            100,
+            10f,
+            2f,
+            null,
+            null,
+            null,
+            DenseVectorFieldMapper.FilterHeuristic.FANOUT,
+            false
+        );
+        assertThat(queryWithExplicitOversample, instanceOf(RescoreKnnVectorQuery.class));
+
+        Query queryWithExplicitZeroOversample = fieldType.createKnnQuery(
+            VectorData.fromFloats(queryVector),
+            10,
+            100,
+            10f,
+            0f,
+            null,
+            null,
+            null,
+            DenseVectorFieldMapper.FilterHeuristic.FANOUT,
+            false
+        );
+        assertThat(queryWithExplicitZeroOversample, instanceOf(IVFKnnFloatVectorQuery.class));
+    }
+
     public void testFilterSearchThreshold() {
         List<Tuple<DenseVectorFieldMapper.ElementType, Function<Query, KnnSearchStrategy>>> cases = List.of(
             Tuple.tuple(FLOAT, q -> ((ESKnnFloatVectorQuery) q).getStrategy()),

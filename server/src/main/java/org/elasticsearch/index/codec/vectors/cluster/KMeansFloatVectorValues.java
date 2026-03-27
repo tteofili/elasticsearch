@@ -53,6 +53,19 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
     }
 
     /**
+     * Like {@link #wrap(FloatVectorValues, int[])} but only the first {@code length} ordinals are used
+     * (local ordinals {@code 0 .. length-1} map to {@code fvv.vectorValue(ordinals[i])}).
+     * Reuses the backing {@code ordinals} array without copying when a prefix of the full corpus is needed.
+     */
+    public static KMeansFloatVectorValues wrap(FloatVectorValues fvv, int[] ordinals, int length) {
+        if (length < 0 || length > ordinals.length) {
+            throw new IllegalArgumentException("length must be in [0, ordinals.length]");
+        }
+        VectorSupplier supplier = new FloatVectorValuesSupplier(fvv, ordinals);
+        return new KMeansFloatVectorValues(supplier, null, length);
+    }
+
+    /**
      * Builds an instance from off-heap data structures. Vectors are expected to be written as
      * little endian floats one after the other. Docs are expected to be written as little endian ints
      * one after the other.

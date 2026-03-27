@@ -13,6 +13,27 @@ import org.elasticsearch.test.ESTestCase;
 
 public class QuantEncodingTests extends ESTestCase {
 
+    public void testFromBitsMapping() {
+        assertEquals(
+            ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+            ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) 1)
+        );
+        assertEquals(
+            ESNextDiskBBQVectorsFormat.QuantEncoding.TWO_BIT_4BIT_QUERY,
+            ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) 2)
+        );
+        assertEquals(
+            ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC,
+            ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) 4)
+        );
+        assertEquals(
+            ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC,
+            ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) 7)
+        );
+        expectThrows(IllegalArgumentException.class, () -> ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) 3));
+        expectThrows(IllegalArgumentException.class, () -> ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) 0));
+    }
+
     public void testSingleBitNibbles() {
         ESNextDiskBBQVectorsFormat.QuantEncoding encoding = ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY;
         int discretized = encoding.discretizedDimensions(randomIntBetween(1, 1024));
@@ -78,6 +99,33 @@ public class QuantEncodingTests extends ESTestCase {
         assertEquals(3, encoding.getQueryPackedLength(3));
         assertEquals(8, encoding.getDocPackedLength(8));
         assertEquals(8, encoding.getQueryPackedLength(8));
+    }
+
+    public void testPackedLengthFormulaLowerBoundAcrossEncodings() {
+        for (ESNextDiskBBQVectorsFormat.QuantEncoding encoding : ESNextDiskBBQVectorsFormat.QuantEncoding.values()) {
+            for (int dimensions = 1; dimensions <= 256; dimensions++) {
+                int discretized = encoding.discretizedDimensions(dimensions);
+                int expectedDocLen = (discretized * encoding.bits() + 7) / 8;
+                int expectedQueryLen = (discretized * encoding.queryBits() + 7) / 8;
+                assertTrue(encoding.getDocPackedLength(dimensions) >= expectedDocLen);
+                assertTrue(encoding.getQueryPackedLength(dimensions) >= expectedQueryLen);
+            }
+        }
+    }
+
+    public void testPackedLengthsMonotonicWithDimensions() {
+        for (ESNextDiskBBQVectorsFormat.QuantEncoding encoding : ESNextDiskBBQVectorsFormat.QuantEncoding.values()) {
+            int prevDocLen = 0;
+            int prevQueryLen = 0;
+            for (int dimensions = 1; dimensions <= 512; dimensions++) {
+                int docLen = encoding.getDocPackedLength(dimensions);
+                int queryLen = encoding.getQueryPackedLength(dimensions);
+                assertTrue(docLen >= prevDocLen);
+                assertTrue(queryLen >= prevQueryLen);
+                prevDocLen = docLen;
+                prevQueryLen = queryLen;
+            }
+        }
     }
 
 }

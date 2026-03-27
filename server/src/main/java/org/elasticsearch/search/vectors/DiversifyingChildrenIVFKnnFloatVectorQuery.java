@@ -9,6 +9,7 @@
 
 package org.elasticsearch.search.vectors;
 
+import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.join.BitSetProducer;
@@ -56,6 +57,22 @@ public class DiversifyingChildrenIVFKnnFloatVectorQuery extends IVFKnnFloatVecto
         boolean useCalibrationOversample
     ) {
         super(field, query, k, numCands, childFilter, visitRatio, doPrecondition, useCalibrationOversample);
+        this.parentsFilter = parentsFilter;
+    }
+
+    public DiversifyingChildrenIVFKnnFloatVectorQuery(
+        String field,
+        float[] query,
+        int k,
+        int numCands,
+        Query childFilter,
+        BitSetProducer parentsFilter,
+        float visitRatio,
+        boolean doPrecondition,
+        boolean useCalibrationOversample,
+        VectorSimilarityFunction vectorSimilarityFunction
+    ) {
+        super(field, query, k, numCands, childFilter, visitRatio, doPrecondition, useCalibrationOversample, vectorSimilarityFunction);
         this.parentsFilter = parentsFilter;
     }
 

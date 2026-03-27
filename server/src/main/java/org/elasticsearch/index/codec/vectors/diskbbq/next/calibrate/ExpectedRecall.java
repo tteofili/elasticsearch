@@ -19,6 +19,12 @@ import java.util.function.DoubleUnaryOperator;
  */
 public final class ExpectedRecall {
 
+    /**
+     * Reused across calls on the same thread to avoid allocating {@code 20 * n} doubles per
+     * {@link #expectedRecallAtK} invocation; grows if a larger calibration asks for bigger {@code n}.
+     */
+    private static final ThreadLocal<double[]> RANK_DISTANCE_SCRATCH = new ThreadLocal<>();
+
     private static final double SQRT_2_PI = Math.sqrt(2.0 * Math.PI);
 
     private static final double[] QUADRATURE_NODES = {
@@ -59,7 +65,7 @@ public final class ExpectedRecall {
         int n
     ) {
         int maxRank = 20 * n;
-        double[] rankDistances = new double[maxRank];
+        double[] rankDistances = borrowRankDistancesScratch(maxRank);
         for (int i = 0; i < maxRank; i++) {
             rankDistances[i] = ManifoldModel.expectedRankDistance(similarityFunction, alpha, invDim, N, i + 1);
         }
@@ -69,6 +75,15 @@ public final class ExpectedRecall {
             total += expectedRecallOfK(rankDistances, errorStd, n, i);
         }
         return total / k;
+    }
+
+    private static double[] borrowRankDistancesScratch(int minLength) {
+        double[] buf = RANK_DISTANCE_SCRATCH.get();
+        if (buf == null || buf.length < minLength) {
+            buf = new double[minLength];
+            RANK_DISTANCE_SCRATCH.set(buf);
+        }
+        return buf;
     }
 
     /**

@@ -24,8 +24,23 @@ public class DiskBBQBulkWriterTests extends ESTestCase {
     private static final Integer[] VALID_BIT_SIZES = { 1, 2, 4, 7 };
     private static final Integer[] INVALID_BIT_SIZES = { 0, 3, 5, 6, 8, 16 };
 
-    public void testLargeBitEncodingWritesIntComponentSum() throws Exception {
-        assertLargeBitEncoding(7);
+    public void testBulkWriterLayoutMatrix() throws Exception {
+        for (int bits : VALID_BIT_SIZES) {
+            int dimensions = randomIntBetween(2, 64);
+            int bulkSize = randomIntBetween(2, 16);
+            int[] counts = new int[] { randomIntBetween(1, bulkSize - 1), bulkSize, bulkSize + randomIntBetween(1, bulkSize - 1) };
+            for (int numVectors : counts) {
+                for (boolean blockEncodeTailVectors : new boolean[] { false, true }) {
+                    for (boolean writeComponentSumAsInt : new boolean[] { false, true }) {
+                        if (bits == 7 && writeComponentSumAsInt == false) {
+                            // 7-bit writer always stores component sum as int.
+                            continue;
+                        }
+                        assertEncodingLayout(bits, dimensions, bulkSize, numVectors, blockEncodeTailVectors, writeComponentSumAsInt);
+                    }
+                }
+            }
+        }
     }
 
     public void testFromBitSizeValidValues() throws IOException {
@@ -43,10 +58,14 @@ public class DiskBBQBulkWriterTests extends ESTestCase {
         }
     }
 
-    private void assertLargeBitEncoding(int bits) throws IOException {
-        int dimensions = randomIntBetween(2, 64);
-        int bulkSize = randomIntBetween(2, 16);
-        int numVectors = bulkSize + randomIntBetween(1, bulkSize - 1); // guarantees a bulk block + tail
+    private void assertEncodingLayout(
+        int bits,
+        int dimensions,
+        int bulkSize,
+        int numVectors,
+        boolean blockEncodeTailVectors,
+        boolean writeComponentSumAsInt
+    ) throws IOException {
         byte[][] vectors = new byte[numVectors][dimensions];
         OptimizedScalarQuantizer.QuantizationResult[] corrections = new OptimizedScalarQuantizer.QuantizationResult[numVectors];
         for (int i = 0; i < numVectors; i++) {
@@ -55,41 +74,93 @@ public class DiskBBQBulkWriterTests extends ESTestCase {
                 randomFloat(),
                 randomFloat(),
                 randomFloat(),
-                randomIntBetween(0, 200_000)
+                randomIntBetween(0, 60_000)
             );
         }
 
         ByteBuffersDataOutput buffer = new ByteBuffersDataOutput();
         try (IndexOutput out = new ByteBuffersIndexOutput(buffer, "diskbbq", "diskbbq")) {
-            DiskBBQBulkWriter writer = DiskBBQBulkWriter.fromBitSize(bits, bulkSize, out);
+            DiskBBQBulkWriter writer = DiskBBQBulkWriter.fromBitSize(bits, bulkSize, out, blockEncodeTailVectors, writeComponentSumAsInt);
             writer.writeVectors(new TestQuantizedVectorValues(vectors, corrections), null);
         }
 
         try (IndexInput in = new ByteArrayIndexInput("diskbbq", buffer.toArrayCopy())) {
-            // bulk block: vectors then corrections (lower[], upper[], componentSum[], additional[])
-            for (int i = 0; i < bulkSize; i++) {
-                assertVectorEquals(in, vectors[i], dimensions);
+            int fullBlocks = numVectors / bulkSize;
+            int tailSize = numVectors % bulkSize;
+            for (int block = 0; block < fullBlocks; block++) {
+                int base = block * bulkSize;
+                assertBlockLayout(in, vectors, corrections, dimensions, base, bulkSize, bits, writeComponentSumAsInt);
             }
-            for (int i = 0; i < bulkSize; i++) {
-                assertEquals(corrections[i].lowerInterval(), readFloat(in), 0.0f);
+            if (tailSize == 0) {
+                assertEquals(in.length(), in.getFilePointer());
+                return;
             }
-            for (int i = 0; i < bulkSize; i++) {
-                assertEquals(corrections[i].upperInterval(), readFloat(in), 0.0f);
+            int tailStart = fullBlocks * bulkSize;
+            if (blockEncodeTailVectors) {
+                assertBlockLayout(in, vectors, corrections, dimensions, tailStart, tailSize, bits, writeComponentSumAsInt);
+            } else {
+                assertTailInterleavedLayout(in, vectors, corrections, dimensions, tailStart, numVectors, bits, writeComponentSumAsInt);
             }
-            for (int i = 0; i < bulkSize; i++) {
-                assertEquals(corrections[i].quantizedComponentSum(), in.readInt());
-            }
-            for (int i = 0; i < bulkSize; i++) {
-                assertEquals(corrections[i].additionalCorrection(), readFloat(in), 0.0f);
-            }
-            // tail: each vector followed by its own correction (lower, upper, additional, componentSum)
-            for (int i = bulkSize; i < numVectors; i++) {
-                assertVectorEquals(in, vectors[i], dimensions);
-                assertEquals(corrections[i].lowerInterval(), readFloat(in), 0.0f);
-                assertEquals(corrections[i].upperInterval(), readFloat(in), 0.0f);
-                assertEquals(corrections[i].additionalCorrection(), readFloat(in), 0.0f);
-                assertEquals(corrections[i].quantizedComponentSum(), in.readInt());
-            }
+            assertEquals(in.length(), in.getFilePointer());
+        }
+    }
+
+    private static void assertBlockLayout(
+        IndexInput in,
+        byte[][] vectors,
+        OptimizedScalarQuantizer.QuantizationResult[] corrections,
+        int dimensions,
+        int start,
+        int count,
+        int bits,
+        boolean writeComponentSumAsInt
+    ) throws IOException {
+        for (int i = start; i < start + count; i++) {
+            assertVectorEquals(in, vectors[i], dimensions);
+        }
+        for (int i = start; i < start + count; i++) {
+            assertEquals(corrections[i].lowerInterval(), readFloat(in), 0.0f);
+        }
+        for (int i = start; i < start + count; i++) {
+            assertEquals(corrections[i].upperInterval(), readFloat(in), 0.0f);
+        }
+        for (int i = start; i < start + count; i++) {
+            assertComponentSum(in, corrections[i], bits, writeComponentSumAsInt);
+        }
+        for (int i = start; i < start + count; i++) {
+            assertEquals(corrections[i].additionalCorrection(), readFloat(in), 0.0f);
+        }
+    }
+
+    private static void assertTailInterleavedLayout(
+        IndexInput in,
+        byte[][] vectors,
+        OptimizedScalarQuantizer.QuantizationResult[] corrections,
+        int dimensions,
+        int start,
+        int end,
+        int bits,
+        boolean writeComponentSumAsInt
+    ) throws IOException {
+        for (int i = start; i < end; i++) {
+            assertVectorEquals(in, vectors[i], dimensions);
+            assertEquals(corrections[i].lowerInterval(), readFloat(in), 0.0f);
+            assertEquals(corrections[i].upperInterval(), readFloat(in), 0.0f);
+            assertEquals(corrections[i].additionalCorrection(), readFloat(in), 0.0f);
+            assertComponentSum(in, corrections[i], bits, writeComponentSumAsInt);
+        }
+    }
+
+    private static void assertComponentSum(
+        IndexInput in,
+        OptimizedScalarQuantizer.QuantizationResult correction,
+        int bits,
+        boolean writeComponentSumAsInt
+    ) throws IOException {
+        if (bits == 7 || writeComponentSumAsInt) {
+            assertEquals(correction.quantizedComponentSum(), in.readInt());
+        } else {
+            assertEquals(correction.quantizedComponentSum(), in.readShort() & 0xffff);
         }
     }
 

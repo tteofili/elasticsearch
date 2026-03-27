@@ -114,14 +114,15 @@ public final class ErrorModel {
         int visit = Math.max(1, (5 * k + 99) / 100);
         OnlineMeanAndVariance moments = new OnlineMeanAndVariance();
 
-        Integer[] order = new Integer[k];
-        for (int i = 0; i < k; i++) {
-            order[i] = i;
-        }
+        int[] order = new int[k];
+        double[] simToCentroid = new double[k];
         float[] scratch = cosine ? new float[dim] : null;
 
         for (float[] query : queries) {
-            Arrays.sort(order, (a, b) -> Double.compare(simExact(sim, dim, query, centroids[b]), simExact(sim, dim, query, centroids[a])));
+            for (int i = 0; i < k; i++) {
+                simToCentroid[i] = simExact(sim, dim, query, centroids[i]);
+            }
+            mergeSortIndicesByKeysDescending(simToCentroid, order, k);
             for (int idx = 0; idx < Math.min(visit, k); idx++) {
                 int ci = order[idx];
                 float[] cent = centroids[ci];
@@ -258,11 +259,8 @@ public final class ErrorModel {
                 simOsq[i] = dotEst;
             }
 
-            Integer[] order = new Integer[nDocs];
-            for (int i = 0; i < nDocs; i++) {
-                order[i] = i;
-            }
-            Arrays.sort(order, (a, b) -> Double.compare(simOsq[b], simOsq[a]));
+            int[] order = new int[nDocs];
+            mergeSortIndicesByKeysDescending(simOsq, order, nDocs);
 
             int topN = Math.min(5 * k, nDocs);
             for (int i = 0; i < topN; i++) {
@@ -288,12 +286,16 @@ public final class ErrorModel {
      * @param cosine if true, normalize corpus vectors on-the-fly
      * @return {@code double[]{centroidStd, quantizedStd}}
      */
+    /**
+     * @param corpusLength number of corpus vectors to use (prefix of {@code corpusOrdinals}).
+     */
     static double[] repErrorStds(
         VectorSimilarityFunction sim,
         int dim,
         float[][] queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
+        int corpusLength,
         boolean cosine,
         int nQueryClusters,
         int nDocsPerCluster,
@@ -301,7 +303,7 @@ public final class ErrorModel {
         int dbits,
         int k
     ) throws IOException {
-        KMeansFloatVectorValues corpusVectors = KMeansFloatVectorValues.wrap(fvv, corpusOrdinals);
+        KMeansFloatVectorValues corpusVectors = KMeansFloatVectorValues.wrap(fvv, corpusOrdinals, corpusLength);
         KMeansResult docClusters = HierarchicalKMeans.ofSerial(dim).cluster(corpusVectors, nDocsPerCluster);
 
         float[][] centroids = docClusters.centroids();
@@ -462,14 +464,14 @@ public final class ErrorModel {
             if (ss < 2) {
                 continue;
             }
-            int[] subOrdinals = Arrays.copyOf(corpusOrdinals, ss);
             try {
                 double[] stds = repErrorStds(
                     similarityFunction,
                     dim,
                     queries,
                     fvv,
-                    subOrdinals,
+                    corpusOrdinals,
+                    ss,
                     cosine,
                     N_QUERY_CLUSTERS,
                     nDocsPerClusterArray[i],
@@ -584,7 +586,6 @@ public final class ErrorModel {
     ) {
         int m = nDocsPerClusterArray.length;
         int sampleSize = Math.min(SAMPLE_SIZE_MAGNITUDE, corpusOrdinals.length);
-        int[] subOrdinals = Arrays.copyOf(corpusOrdinals, sampleSize);
 
         double[] logNDocs = new double[m];
         double[] logSizes = new double[m];
@@ -597,7 +598,8 @@ public final class ErrorModel {
                     dim,
                     queries,
                     fvv,
-                    subOrdinals,
+                    corpusOrdinals,
+                    sampleSize,
                     cosine,
                     N_QUERY_CLUSTERS,
                     nDocsPerClusterArray[i],
@@ -629,5 +631,53 @@ public final class ErrorModel {
         }
 
         return new RepErrorStdModel(scalingModel.cparams(), qparams);
+    }
+
+    /**
+     * Sorts {@code idx[0..len)} into a permutation of {@code 0..len-1} such that
+     * {@code keys[idx[i]]} is non-increasing (descending).
+     */
+    private static void mergeSortIndicesByKeysDescending(double[] keys, int[] idx, int len) {
+        if (len < 2) {
+            if (len == 1) {
+                idx[0] = 0;
+            }
+            return;
+        }
+        for (int i = 0; i < len; i++) {
+            idx[i] = i;
+        }
+        int[] aux = new int[len];
+        mergeSortDescending(keys, idx, aux, 0, len - 1);
+    }
+
+    private static void mergeSortDescending(double[] keys, int[] idx, int[] aux, int lo, int hi) {
+        if (lo >= hi) {
+            return;
+        }
+        int mid = (lo + hi) >>> 1;
+        mergeSortDescending(keys, idx, aux, lo, mid);
+        mergeSortDescending(keys, idx, aux, mid + 1, hi);
+        mergeDescending(keys, idx, aux, lo, mid, hi);
+    }
+
+    private static void mergeDescending(double[] keys, int[] idx, int[] aux, int lo, int mid, int hi) {
+        System.arraycopy(idx, lo, aux, lo, hi - lo + 1);
+        int i = lo;
+        int j = mid + 1;
+        int k = lo;
+        while (i <= mid && j <= hi) {
+            if (keys[aux[i]] >= keys[aux[j]]) {
+                idx[k++] = aux[i++];
+            } else {
+                idx[k++] = aux[j++];
+            }
+        }
+        while (i <= mid) {
+            idx[k++] = aux[i++];
+        }
+        while (j <= hi) {
+            idx[k++] = aux[j++];
+        }
     }
 }

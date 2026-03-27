@@ -209,4 +209,66 @@ public class DocIdsWriterTests extends LuceneTestCase {
             }
         }
     }
+
+    public void testBoundaryEncodingsRoundTrip() throws Exception {
+        try (Directory dir = newDirectory()) {
+            // Continuous ids path
+            testSingleBlock(dir, new int[] { 100, 101, 102, 103, 104 });
+
+            // DELTA_BPV_16 path (span <= 65535 but non-continuous)
+            testSingleBlock(dir, new int[] { 10, 12, 18, 25, 40, 1000 });
+
+            // BPV_21 path (max <= 0x1FFFFF, non-delta16 span)
+            testSingleBlock(dir, new int[] { 0x100000, 0x180000, 0x1FFFFF });
+
+            // BPV_24 path (max <= 0xFFFFFF, non-bpv21)
+            testSingleBlock(dir, new int[] { 0x200000, 0x800000, 0xFFFFFF });
+
+            // BPV_32 path (max > 0xFFFFFF)
+            testSingleBlock(dir, new int[] { 0x1000000, Integer.MAX_VALUE - 3, Integer.MAX_VALUE - 1 });
+        }
+    }
+
+    public void testReadTruncatedPayloadFails() throws Exception {
+        try (Directory dir = newDirectory()) {
+            DocIdsWriter docIdsWriter = new DocIdsWriter();
+            int[] ints = new int[] { 100, 105, 111, 2048, 4096 };
+            long len;
+            try (IndexOutput out = dir.createOutput("tmp", IOContext.DEFAULT)) {
+                docIdsWriter.writeDocIds(i -> ints[i], ints.length, out);
+                len = out.getFilePointer();
+            }
+            // Truncate one byte from tail.
+            try (
+                IndexInput in = dir.openInput("tmp", IOContext.READONCE);
+                IndexOutput out = dir.createOutput("tmp_truncated", IOContext.DEFAULT)
+            ) {
+                long truncatedLen = len - 1;
+                byte[] bytes = new byte[(int) truncatedLen];
+                in.readBytes(bytes, 0, bytes.length);
+                out.writeBytes(bytes, bytes.length);
+            }
+            try (IndexInput in = dir.openInput("tmp_truncated", IOContext.READONCE)) {
+                int[] read = new int[ints.length];
+                expectThrows(IOException.class, () -> docIdsWriter.readInts(in, ints.length, read));
+            }
+            dir.deleteFile("tmp");
+            dir.deleteFile("tmp_truncated");
+        }
+    }
+
+    public void testInvalidEncodingFailsOnRead() throws Exception {
+        try (Directory dir = newDirectory()) {
+            DocIdsWriter docIdsWriter = new DocIdsWriter();
+            try (IndexOutput out = dir.createOutput("tmp", IOContext.DEFAULT)) {
+                out.writeByte((byte) 13); // unsupported encoding marker
+                out.writeInt(123456); // garbage payload
+            }
+            try (IndexInput in = dir.openInput("tmp", IOContext.READONCE)) {
+                int[] read = new int[4];
+                expectThrows(IOException.class, () -> docIdsWriter.readInts(in, 4, read));
+            }
+            dir.deleteFile("tmp");
+        }
+    }
 }

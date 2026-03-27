@@ -11,6 +11,7 @@ package org.elasticsearch.index.codec.vectors.diskbbq.next;
 import com.carrotsearch.randomizedtesting.generators.RandomPicks;
 
 import org.apache.lucene.codecs.Codec;
+import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.FilterCodec;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.codecs.KnnVectorsReader;
@@ -29,6 +30,7 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.MergeState;
+import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -38,7 +40,9 @@ import org.apache.lucene.search.KnnCollector;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TopKnnCollector;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.tests.index.BaseKnnVectorsFormatTestCase;
+import org.apache.lucene.tests.store.BaseDirectoryWrapper;
 import org.apache.lucene.tests.util.TestUtil;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.logging.LogConfigurator;
@@ -48,9 +52,11 @@ import org.elasticsearch.search.vectors.IVFKnnSearchStrategy;
 import org.junit.Before;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -284,6 +290,132 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         }
     }
 
+    public void testCalibratedOversampleAndPreconditionRoundTripExactValues() throws IOException {
+        int dimensions = random().nextInt(16, 64);
+        int numDocs = random().nextInt(600, 1200);
+        float expectedOversample = 3.0f;
+        boolean expectedDoPrecondition = true;
+        ESNextDiskBBQVectorsFormat.QuantEncoding expectedEncoding = ESNextDiskBBQVectorsFormat.QuantEncoding.TWO_BIT_4BIT_QUERY;
+
+        AutoQuantizationSelector fixedSelector = new AutoQuantizationSelector() {
+            @Override
+            public CalibrationResult select(
+                FieldInfo fieldInfo,
+                FloatVectorValues floatVectorValues,
+                CentroidSupplier centroidSupplier,
+                int[] assignments,
+                int[] overspillAssignments,
+                MergeState mergeState
+            ) {
+                return new CalibrationResult(expectedEncoding, expectedOversample, expectedDoPrecondition);
+            }
+        };
+
+        KnnVectorsFormat testFormat = new ESNextDiskBBQVectorsFormat(
+            true,
+            fixedSelector,
+            MIN_VECTORS_PER_CLUSTER,
+            DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
+            DenseVectorFieldMapper.ElementType.FLOAT,
+            false,
+            null,
+            1,
+            false,
+            DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
+            0
+        );
+
+        IndexWriterConfig iwc = newIndexWriterConfig().setCodec(TestUtil.alwaysKnnVectorsFormat(testFormat));
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, iwc)) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader leafReader = getOnlyLeafReader(reader);
+                assertTrue(leafReader instanceof CodecReader);
+                KnnVectorsReader knnVectorsReader = ((CodecReader) leafReader).getVectorReader();
+                if (knnVectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader fieldsReader) {
+                    knnVectorsReader = fieldsReader.getFieldReader("f");
+                }
+                assertTrue(knnVectorsReader instanceof CalibrationAwareReader);
+                CalibrationAwareReader calibrationReader = (CalibrationAwareReader) knnVectorsReader;
+                FieldInfo fieldInfo = leafReader.getFieldInfos().fieldInfo("f");
+                assertNotNull(fieldInfo);
+                assertEquals(expectedOversample, calibrationReader.getOversampleFactor(fieldInfo), 0.0f);
+                assertEquals(expectedDoPrecondition, calibrationReader.shouldPrecondition(fieldInfo));
+                assertEquals(expectedEncoding, calibrationReader.getQuantEncoding(fieldInfo));
+            }
+        }
+    }
+
+    public void testCalibratedOversampleSentinelRoundTrip() throws IOException {
+        int dimensions = random().nextInt(16, 64);
+        int numDocs = random().nextInt(600, 1200);
+        float expectedOversample = AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
+        boolean expectedDoPrecondition = false;
+        ESNextDiskBBQVectorsFormat.QuantEncoding expectedEncoding = ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC;
+
+        AutoQuantizationSelector fixedSelector = new AutoQuantizationSelector() {
+            @Override
+            public CalibrationResult select(
+                FieldInfo fieldInfo,
+                FloatVectorValues floatVectorValues,
+                CentroidSupplier centroidSupplier,
+                int[] assignments,
+                int[] overspillAssignments,
+                MergeState mergeState
+            ) {
+                return new CalibrationResult(expectedEncoding, expectedOversample, expectedDoPrecondition);
+            }
+        };
+
+        KnnVectorsFormat testFormat = new ESNextDiskBBQVectorsFormat(
+            true,
+            fixedSelector,
+            MIN_VECTORS_PER_CLUSTER,
+            DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
+            DenseVectorFieldMapper.ElementType.FLOAT,
+            false,
+            null,
+            1,
+            false,
+            DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
+            0
+        );
+
+        IndexWriterConfig iwc = newIndexWriterConfig().setCodec(TestUtil.alwaysKnnVectorsFormat(testFormat));
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, iwc)) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader leafReader = getOnlyLeafReader(reader);
+                assertTrue(leafReader instanceof CodecReader);
+                KnnVectorsReader knnVectorsReader = ((CodecReader) leafReader).getVectorReader();
+                if (knnVectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader fieldsReader) {
+                    knnVectorsReader = fieldsReader.getFieldReader("f");
+                }
+                assertTrue(knnVectorsReader instanceof CalibrationAwareReader);
+                CalibrationAwareReader calibrationReader = (CalibrationAwareReader) knnVectorsReader;
+                FieldInfo fieldInfo = leafReader.getFieldInfos().fieldInfo("f");
+                assertNotNull(fieldInfo);
+                assertEquals(expectedOversample, calibrationReader.getOversampleFactor(fieldInfo), 0.0f);
+                assertEquals(expectedDoPrecondition, calibrationReader.shouldPrecondition(fieldInfo));
+                assertEquals(expectedEncoding, calibrationReader.getQuantEncoding(fieldInfo));
+            }
+        }
+    }
+
     public void testSimpleOffHeapSize() throws IOException {
         float[] vector = randomVector(random().nextInt(12, 500));
         try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
@@ -304,6 +436,181 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
                 }
             }
         }
+    }
+
+    public void testIVFSidecarLengthsConsistentWithOffHeapStats() throws IOException {
+        int dimensions = 32;
+        int numDocs = 1500;
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader leafReader = getOnlyLeafReader(reader);
+                assertTrue(leafReader instanceof CodecReader);
+                CodecReader codecReader = (CodecReader) leafReader;
+                KnnVectorsReader knnVectorsReader = codecReader.getVectorReader();
+                if (knnVectorsReader instanceof PerFieldKnnVectorsFormat.FieldsReader fieldsReader) {
+                    knnVectorsReader = fieldsReader.getFieldReader("f");
+                }
+                FieldInfo fieldInfo = leafReader.getFieldInfos().fieldInfo("f");
+                assertNotNull(fieldInfo);
+
+                Map<String, Long> offHeap = knnVectorsReader.getOffHeapByteSize(fieldInfo);
+                assertTrue(
+                    "expected centroid sidecar entry in off-heap stats",
+                    offHeap.containsKey(ESNextDiskBBQVectorsFormat.CENTROID_EXTENSION)
+                );
+                assertTrue(
+                    "expected cluster sidecar entry in off-heap stats",
+                    offHeap.containsKey(ESNextDiskBBQVectorsFormat.CLUSTER_EXTENSION)
+                );
+
+                long centroidLengthFromStats = offHeap.get(ESNextDiskBBQVectorsFormat.CENTROID_EXTENSION);
+                long clusterLengthFromStats = offHeap.get(ESNextDiskBBQVectorsFormat.CLUSTER_EXTENSION);
+                assertTrue("centroid sidecar length must be > 0", centroidLengthFromStats > 0);
+                assertTrue("cluster sidecar length must be > 0", clusterLengthFromStats > 0);
+
+                long centroidFileLength = maxFileLengthForExtension(dir, ESNextDiskBBQVectorsFormat.CENTROID_EXTENSION);
+                long clusterFileLength = maxFileLengthForExtension(dir, ESNextDiskBBQVectorsFormat.CLUSTER_EXTENSION);
+                long metaFileLength = maxFileLengthForExtension(dir, ESNextDiskBBQVectorsFormat.IVF_META_EXTENSION);
+                assertTrue("ivf meta sidecar length must be > 0", metaFileLength > 0);
+
+                assertTrue("centroid sidecar stats length must be <= centroid file length", centroidLengthFromStats <= centroidFileLength);
+                assertTrue("cluster sidecar stats length must be <= cluster file length", clusterLengthFromStats <= clusterFileLength);
+            }
+        }
+    }
+
+    public void testIVFSidecarChecksumsValidate() throws IOException {
+        int dimensions = 32;
+        int numDocs = 1200;
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+
+            assertChecksumValidForExtension(dir, ESNextDiskBBQVectorsFormat.IVF_META_EXTENSION);
+            assertChecksumValidForExtension(dir, ESNextDiskBBQVectorsFormat.CENTROID_EXTENSION);
+            assertChecksumValidForExtension(dir, ESNextDiskBBQVectorsFormat.CLUSTER_EXTENSION);
+        }
+    }
+
+    public void testCorruptedIVFSidecarChecksumIsRejected() throws IOException {
+        int dimensions = 32;
+        int numDocs = 1200;
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+
+            // Validate baseline checksums, then corrupt a single sidecar byte and re-check.
+            assertChecksumValidForExtension(dir, ESNextDiskBBQVectorsFormat.CLUSTER_EXTENSION);
+            String fileToCorrupt = firstFileForExtension(dir, ESNextDiskBBQVectorsFormat.CLUSTER_EXTENSION);
+            assertNotNull(fileToCorrupt);
+            byte[] bytes;
+            try (IndexInput in = dir.openInput(fileToCorrupt, org.apache.lucene.store.IOContext.DEFAULT)) {
+                bytes = new byte[Math.toIntExact(in.length())];
+                in.readBytes(bytes, 0, bytes.length);
+            }
+            bytes[bytes.length / 2] ^= 0x01;
+            dir.deleteFile(fileToCorrupt);
+            try (var out = dir.createOutput(fileToCorrupt, org.apache.lucene.store.IOContext.DEFAULT)) {
+                out.writeBytes(bytes, bytes.length);
+            }
+
+            expectThrows(IOException.class, () -> assertChecksumValidForExtension(dir, ESNextDiskBBQVectorsFormat.CLUSTER_EXTENSION));
+            if (dir instanceof BaseDirectoryWrapper baseDirectoryWrapper) {
+                baseDirectoryWrapper.setCheckIndexOnClose(false);
+            }
+        }
+    }
+
+    public void testMalformedIVFMetaPayloadIsRejectedOnReaderOpen() throws IOException {
+        int dimensions = 32;
+        int numDocs = 1200;
+        try (Directory dir = newDirectory()) {
+            try (IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+                for (int i = 0; i < numDocs; i++) {
+                    Document doc = new Document();
+                    doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
+                    w.addDocument(doc);
+                }
+                w.commit();
+                w.forceMerge(1);
+            }
+
+            String metaFile = firstFileForExtension(dir, ESNextDiskBBQVectorsFormat.IVF_META_EXTENSION);
+            assumeTrue("expected at least one *.mivf file", metaFile != null);
+
+            byte[] bytes;
+            try (IndexInput in = dir.openInput(metaFile, org.apache.lucene.store.IOContext.DEFAULT)) {
+                bytes = new byte[Math.toIntExact(in.length())];
+                in.readBytes(bytes, 0, bytes.length);
+            }
+            // Corrupt the codec header so the reader rejects malformed metadata deterministically.
+            bytes[0] ^= 0x01;
+            bytes[1] ^= 0x01;
+            if (dir instanceof BaseDirectoryWrapper baseDirectoryWrapper) {
+                baseDirectoryWrapper.setCheckIndexOnClose(false);
+            }
+            dir.deleteFile(metaFile);
+            try (var out = dir.createOutput(metaFile, org.apache.lucene.store.IOContext.DEFAULT)) {
+                out.writeBytes(bytes, bytes.length);
+            }
+
+            expectThrows(IOException.class, () -> {
+                try (DirectoryReader ignored = DirectoryReader.open(dir)) {
+                    fail("expected malformed IVF metadata to be rejected");
+                }
+            });
+        }
+    }
+
+    private static void assertChecksumValidForExtension(Directory dir, String extension) throws IOException {
+        boolean found = false;
+        for (String file : dir.listAll()) {
+            if (file.endsWith("." + extension)) {
+                found = true;
+                try (IndexInput in = dir.openInput(file, org.apache.lucene.store.IOContext.DEFAULT)) {
+                    CodecUtil.checksumEntireFile(in);
+                }
+            }
+        }
+        assertTrue("expected at least one *." + extension + " file", found);
+    }
+
+    private static String firstFileForExtension(Directory dir, String extension) throws IOException {
+        for (String file : dir.listAll()) {
+            if (file.endsWith("." + extension)) {
+                return file;
+            }
+        }
+        return null;
+    }
+
+    private static long maxFileLengthForExtension(Directory dir, String extension) throws IOException {
+        long maxLength = -1L;
+        for (String file : dir.listAll()) {
+            if (file.endsWith("." + extension)) {
+                try (IndexInput in = dir.openInput(file, org.apache.lucene.store.IOContext.DEFAULT)) {
+                    maxLength = Math.max(maxLength, in.length());
+                }
+            }
+        }
+        return maxLength;
     }
 
     public void testFewVectorManyTimes() throws IOException {
@@ -435,6 +742,319 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
 
     public void testRestrictiveFilterSparse() throws IOException {
         doRestrictiveFilter(false);
+    }
+
+    public void testRestrictiveFilterOnePerBlockAndTail() throws IOException {
+        int dimensions = 16;
+        int numDocs = 65; // two full 32-sized blocks + one tail doc
+        Set<Integer> expectedMatches = Set.of(0, 32, 64);
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                float[] vector = randomVector(dimensions);
+                if (expectedMatches.contains(i)) {
+                    // Keep matched vectors close to the query to make expected hits stable.
+                    vector = new float[dimensions];
+                    vector[0] = 1.0f;
+                }
+                doc.add(new KnnFloatVectorField("f", vector, VectorSimilarityFunction.DOT_PRODUCT));
+                doc.add(new KeywordField("k", new BytesRef(expectedMatches.contains(i) ? "A" : "B"), Field.Store.NO));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader leafReader = getOnlyLeafReader(reader);
+                float[] query = new float[dimensions];
+                query[0] = 1.0f;
+                TopDocs topDocs = leafReader.searchNearestVectors(
+                    "f",
+                    query,
+                    10,
+                    AcceptDocs.fromIteratorSupplier(
+                        () -> leafReader.postings(new Term("k", new BytesRef("A"))),
+                        leafReader.getLiveDocs(),
+                        leafReader.maxDoc()
+                    ),
+                    Integer.MAX_VALUE
+                );
+                Set<Integer> uniqueDocIds = new HashSet<>();
+                for (var sd : topDocs.scoreDocs) {
+                    uniqueDocIds.add(sd.doc);
+                }
+                assertEquals(expectedMatches, uniqueDocIds);
+            }
+        }
+    }
+
+    public void testRestrictiveFilterSparseOffsetsWithTail() throws IOException {
+        int dimensions = 16;
+        int numDocs = 37; // one full 32-sized block + tail of 5
+        Set<Integer> expectedMatches = Set.of(1, 17, 33, 35);
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                float[] vector = randomVector(dimensions);
+                if (expectedMatches.contains(i)) {
+                    vector = new float[dimensions];
+                    vector[0] = 1.0f;
+                }
+                doc.add(new KnnFloatVectorField("f", vector, VectorSimilarityFunction.DOT_PRODUCT));
+                doc.add(new KeywordField("k", new BytesRef(expectedMatches.contains(i) ? "A" : "B"), Field.Store.NO));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader leafReader = getOnlyLeafReader(reader);
+                float[] query = new float[dimensions];
+                query[0] = 1.0f;
+                TopDocs topDocs = leafReader.searchNearestVectors(
+                    "f",
+                    query,
+                    10,
+                    AcceptDocs.fromIteratorSupplier(
+                        () -> leafReader.postings(new Term("k", new BytesRef("A"))),
+                        leafReader.getLiveDocs(),
+                        leafReader.maxDoc()
+                    ),
+                    Integer.MAX_VALUE
+                );
+                Set<Integer> uniqueDocIds = new HashSet<>();
+                for (var sd : topDocs.scoreDocs) {
+                    uniqueDocIds.add(sd.doc);
+                }
+                assertEquals(expectedMatches, uniqueDocIds);
+            }
+        }
+    }
+
+    public void testRestrictiveFilterTailMatchesBruteForceOrder() throws IOException {
+        int dimensions = 16;
+        int numDocs = 37; // one full 32-sized block + tail of 5
+        List<Integer> expectedMatches = List.of(1, 17, 33, 35);
+        float[] firstComponentByDoc = new float[numDocs];
+        // Descending expected similarity for query[0]=1 over A docs:
+        // doc 17 > doc 35 > doc 1 > doc 33
+        firstComponentByDoc[17] = 0.95f;
+        firstComponentByDoc[35] = 0.85f;
+        firstComponentByDoc[1] = 0.75f;
+        firstComponentByDoc[33] = 0.65f;
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                float[] vector = new float[dimensions];
+                vector[0] = expectedMatches.contains(i) ? firstComponentByDoc[i] : (random().nextFloat() * 0.2f - 0.1f);
+                doc.add(new KnnFloatVectorField("f", vector, VectorSimilarityFunction.DOT_PRODUCT));
+                doc.add(new KeywordField("k", new BytesRef(expectedMatches.contains(i) ? "A" : "B"), Field.Store.NO));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader leafReader = getOnlyLeafReader(reader);
+                float[] query = new float[dimensions];
+                query[0] = 1.0f;
+
+                TopDocs topDocs = leafReader.searchNearestVectors(
+                    "f",
+                    query,
+                    expectedMatches.size(),
+                    AcceptDocs.fromIteratorSupplier(
+                        () -> leafReader.postings(new Term("k", new BytesRef("A"))),
+                        leafReader.getLiveDocs(),
+                        leafReader.maxDoc()
+                    ),
+                    Integer.MAX_VALUE
+                );
+
+                assertEquals(expectedMatches.size(), topDocs.scoreDocs.length);
+
+                List<Integer> bruteForceOrder = new ArrayList<>(expectedMatches);
+                bruteForceOrder.sort((a, b) -> Float.compare(firstComponentByDoc[b], firstComponentByDoc[a]));
+                for (int i = 0; i < bruteForceOrder.size(); i++) {
+                    assertEquals(bruteForceOrder.get(i).intValue(), topDocs.scoreDocs[i].doc);
+                }
+            }
+        }
+    }
+
+    public void testRestrictiveFilterAlignedMatchesBruteForceOrder() throws IOException {
+        int dimensions = 16;
+        int numDocs = 64; // exactly two full 32-sized blocks
+        List<Integer> expectedMatches = List.of(1, 17, 32, 45);
+        float[] firstComponentByDoc = new float[numDocs];
+        // Descending expected similarity for query[0]=1 over A docs:
+        // doc 32 > doc 45 > doc 17 > doc 1
+        firstComponentByDoc[32] = 0.92f;
+        firstComponentByDoc[45] = 0.82f;
+        firstComponentByDoc[17] = 0.72f;
+        firstComponentByDoc[1] = 0.62f;
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                float[] vector = new float[dimensions];
+                vector[0] = expectedMatches.contains(i) ? firstComponentByDoc[i] : (random().nextFloat() * 0.2f - 0.1f);
+                doc.add(new KnnFloatVectorField("f", vector, VectorSimilarityFunction.DOT_PRODUCT));
+                doc.add(new KeywordField("k", new BytesRef(expectedMatches.contains(i) ? "A" : "B"), Field.Store.NO));
+                w.addDocument(doc);
+            }
+            w.commit();
+            w.forceMerge(1);
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader leafReader = getOnlyLeafReader(reader);
+                float[] query = new float[dimensions];
+                query[0] = 1.0f;
+
+                TopDocs topDocs = leafReader.searchNearestVectors(
+                    "f",
+                    query,
+                    expectedMatches.size(),
+                    AcceptDocs.fromIteratorSupplier(
+                        () -> leafReader.postings(new Term("k", new BytesRef("A"))),
+                        leafReader.getLiveDocs(),
+                        leafReader.maxDoc()
+                    ),
+                    Integer.MAX_VALUE
+                );
+
+                assertEquals(expectedMatches.size(), topDocs.scoreDocs.length);
+
+                List<Integer> bruteForceOrder = new ArrayList<>(expectedMatches);
+                bruteForceOrder.sort((a, b) -> Float.compare(firstComponentByDoc[b], firstComponentByDoc[a]));
+                for (int i = 0; i < bruteForceOrder.size(); i++) {
+                    assertEquals(bruteForceOrder.get(i).intValue(), topDocs.scoreDocs[i].doc);
+                }
+            }
+        }
+    }
+
+    public void testFilteredRankingWithNonContiguousDocIds() throws IOException {
+        int dimensions = 16;
+        int numDocs = 80;
+        List<Integer> expectedMatches = List.of(3, 21, 47, 68);
+        float[] firstComponentByDoc = new float[numDocs];
+        // Brute-force expected order for query[0] = 1:
+        // doc 47 > doc 21 > doc 68 > doc 3
+        firstComponentByDoc[47] = 0.97f;
+        firstComponentByDoc[21] = 0.87f;
+        firstComponentByDoc[68] = 0.77f;
+        firstComponentByDoc[3] = 0.67f;
+
+        IndexWriterConfig iwc = newIndexWriterConfig().setMergePolicy(NoMergePolicy.INSTANCE);
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, iwc)) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                float[] vector = new float[dimensions];
+                vector[0] = expectedMatches.contains(i) ? firstComponentByDoc[i] : (random().nextFloat() * 0.2f - 0.1f);
+                doc.add(new KnnFloatVectorField("f", vector, VectorSimilarityFunction.DOT_PRODUCT));
+                doc.add(new KeywordField("k", new BytesRef(expectedMatches.contains(i) ? "A" : "B"), Field.Store.NO));
+                doc.add(new KeywordField("id", Integer.toString(i), Field.Store.NO));
+                w.addDocument(doc);
+            }
+            // Create non-contiguous live doc IDs.
+            w.deleteDocuments(new Term("id", "5"));
+            w.deleteDocuments(new Term("id", "6"));
+            w.deleteDocuments(new Term("id", "7"));
+            w.deleteDocuments(new Term("id", "29"));
+            w.deleteDocuments(new Term("id", "30"));
+            w.deleteDocuments(new Term("id", "31"));
+            w.commit();
+
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader leafReader = getOnlyLeafReader(reader);
+                float[] query = new float[dimensions];
+                query[0] = 1.0f;
+
+                TopDocs topDocs = leafReader.searchNearestVectors(
+                    "f",
+                    query,
+                    expectedMatches.size(),
+                    AcceptDocs.fromIteratorSupplier(
+                        () -> leafReader.postings(new Term("k", new BytesRef("A"))),
+                        leafReader.getLiveDocs(),
+                        leafReader.maxDoc()
+                    ),
+                    Integer.MAX_VALUE
+                );
+
+                assertEquals(expectedMatches.size(), topDocs.scoreDocs.length);
+
+                List<Integer> bruteForceOrder = new ArrayList<>(expectedMatches);
+                bruteForceOrder.sort((a, b) -> Float.compare(firstComponentByDoc[b], firstComponentByDoc[a]));
+                for (int i = 0; i < bruteForceOrder.size(); i++) {
+                    assertEquals(bruteForceOrder.get(i).intValue(), topDocs.scoreDocs[i].doc);
+                }
+            }
+        }
+    }
+
+    public void testFilteredRankingWithNonContiguousDocIdsEuclidean() throws IOException {
+        doTestFilteredRankingWithNonContiguousDocIds(VectorSimilarityFunction.EUCLIDEAN);
+    }
+
+    public void testFilteredRankingWithNonContiguousDocIdsMaxInnerProduct() throws IOException {
+        doTestFilteredRankingWithNonContiguousDocIds(VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT);
+    }
+
+    private void doTestFilteredRankingWithNonContiguousDocIds(VectorSimilarityFunction similarityFunction) throws IOException {
+        int dimensions = 16;
+        int numDocs = 80;
+        List<Integer> expectedMatches = List.of(3, 21, 47, 68);
+        float[] firstComponentByDoc = new float[numDocs];
+        // For query[0] = 1 and all expected values <= 1, both EUCLIDEAN and MIP should rank by descending value.
+        // expected order: doc 47 > doc 21 > doc 68 > doc 3
+        firstComponentByDoc[47] = 0.91f;
+        firstComponentByDoc[21] = 0.81f;
+        firstComponentByDoc[68] = 0.71f;
+        firstComponentByDoc[3] = 0.61f;
+
+        IndexWriterConfig iwc = newIndexWriterConfig().setMergePolicy(NoMergePolicy.INSTANCE);
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, iwc)) {
+            for (int i = 0; i < numDocs; i++) {
+                Document doc = new Document();
+                float[] vector = new float[dimensions];
+                vector[0] = expectedMatches.contains(i) ? firstComponentByDoc[i] : -1.0f;
+                doc.add(new KnnFloatVectorField("f", vector, similarityFunction));
+                doc.add(new KeywordField("k", new BytesRef(expectedMatches.contains(i) ? "A" : "B"), Field.Store.NO));
+                doc.add(new KeywordField("id", Integer.toString(i), Field.Store.NO));
+                w.addDocument(doc);
+            }
+            // Create non-contiguous live doc IDs.
+            w.deleteDocuments(new Term("id", "5"));
+            w.deleteDocuments(new Term("id", "6"));
+            w.deleteDocuments(new Term("id", "7"));
+            w.deleteDocuments(new Term("id", "29"));
+            w.deleteDocuments(new Term("id", "30"));
+            w.deleteDocuments(new Term("id", "31"));
+            w.commit();
+
+            try (IndexReader reader = DirectoryReader.open(w)) {
+                LeafReader leafReader = getOnlyLeafReader(reader);
+                float[] query = new float[dimensions];
+                query[0] = 1.0f;
+
+                TopDocs topDocs = leafReader.searchNearestVectors(
+                    "f",
+                    query,
+                    expectedMatches.size(),
+                    AcceptDocs.fromIteratorSupplier(
+                        () -> leafReader.postings(new Term("k", new BytesRef("A"))),
+                        leafReader.getLiveDocs(),
+                        leafReader.maxDoc()
+                    ),
+                    Integer.MAX_VALUE
+                );
+
+                assertEquals(expectedMatches.size(), topDocs.scoreDocs.length);
+
+                List<Integer> bruteForceOrder = new ArrayList<>(expectedMatches);
+                bruteForceOrder.sort((a, b) -> Float.compare(firstComponentByDoc[b], firstComponentByDoc[a]));
+                for (int i = 0; i < bruteForceOrder.size(); i++) {
+                    assertEquals(bruteForceOrder.get(i).intValue(), topDocs.scoreDocs[i].doc);
+                }
+            }
+        }
     }
 
     private void doRestrictiveFilter(boolean dense) throws IOException {

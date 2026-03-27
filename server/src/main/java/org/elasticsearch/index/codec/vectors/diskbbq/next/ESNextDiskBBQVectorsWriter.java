@@ -299,6 +299,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                 fieldInfo,
                 floatVectorValues,
                 null,
+                null,
                 System.nanoTime() - calibrationStartNanos,
                 calibrationResult
             );
@@ -400,6 +401,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] assignments,
         int[] overspillAssignments
     ) throws IOException {
+        final long calibrationStartNanos = System.nanoTime();
+        final MergeCalibrationContext mergeCalibrationContext = MergeCalibrationContext.from(mergeState);
         final AutoQuantizationSelector.CalibrationResult calibrationResult = resolveCalibrationResult(
             fieldInfo,
             floatVectorValues,
@@ -408,6 +411,18 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             overspillAssignments,
             mergeState
         );
+        if (quantizationAuto) {
+            final long calibrationNanos = System.nanoTime() - calibrationStartNanos;
+            autoQuantizationCalibrationNanosThisMergeField += calibrationNanos;
+            logAutoQuantizationCalibration(
+                fieldInfo,
+                floatVectorValues,
+                mergeState,
+                mergeCalibrationContext,
+                calibrationNanos,
+                calibrationResult
+            );
+        }
         calibrationResultForCurrentField = calibrationResult;
         final ESNextDiskBBQVectorsFormat.QuantEncoding effectiveEncoding = calibrationResult.encoding();
 
@@ -677,23 +692,27 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         FieldInfo fieldInfo,
         FloatVectorValues floatVectorValues,
         MergeState mergeState,
+        MergeCalibrationContext mergeCalibrationContext,
         long calibrationNanos,
         AutoQuantizationSelector.CalibrationResult result
     ) {
         int vectorCount = floatVectorValues.size();
-        if (mergeState != null) {
+        if (mergeState != null && mergeCalibrationContext != null) {
             logger.info(
-                "diskbbq auto-quantization calibration field=[{}] segment=[{}] maxDoc={} vectorCount={} took=[{}] result={}",
+                "diskbbq auto-quantization calibration field=[{}] segment=[{}] maxDoc={} vectorCount={} mergeKind={} inputSegments={} mergeMaxNumSegments={} took=[{}] result={}",
                 fieldInfo.name,
                 mergeState.segmentInfo.name,
                 mergeState.segmentInfo.maxDoc(),
                 vectorCount,
+                mergeCalibrationContext.mergeKind(),
+                mergeCalibrationContext.inputSegments(),
+                mergeCalibrationContext.mergeMaxNumSegmentsForLog(),
                 TimeValue.timeValueNanos(calibrationNanos),
                 result
             );
         } else {
             logger.info(
-                "diskbbq auto-quantization calibration field=[{}] vectorCount={} took=[{}] result={}",
+                "diskbbq auto-quantization calibration field=[{}] vectorCount={} mergeKind=[flush] took=[{}] result={}",
                 fieldInfo.name,
                 vectorCount,
                 TimeValue.timeValueNanos(calibrationNanos),

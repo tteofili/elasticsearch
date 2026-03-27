@@ -189,14 +189,27 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
             tasks.add(() -> searchLeaf(context, filterWeight, knnCollectorManager, visitRatio));
         }
         TopDocs[] perLeafResults = taskExecutor.invokeAll(tasks).toArray(TopDocs[]::new);
-
-        // Merge sort the results, truncating to the original k
-        TopDocs topK = TopDocs.merge(k, perLeafResults);
-        vectorOpsCount = (int) topK.totalHits.value();
-        if (topK.scoreDocs.length == 0) {
+        TopDocs topOversampled = TopDocs.merge(effectiveK, perLeafResults);
+        vectorOpsCount = (int) topOversampled.totalHits.value();
+        if (topOversampled.scoreDocs.length == 0) {
             return Queries.NO_DOCS_INSTANCE;
         }
+        if (useCalibrationOversample && effectiveK > k) {
+            Query autoRescoreQuery = getAutoRescoreQuery(indexSearcher, topOversampled, effectiveK);
+            if (autoRescoreQuery != null) {
+                return autoRescoreQuery.rewrite(indexSearcher);
+            }
+        }
+        TopDocs topK = effectiveK == k ? topOversampled : TopDocs.merge(k, perLeafResults);
         return new KnnScoreDocQuery(topK.scoreDocs, reader);
+    }
+
+    /**
+     * Returns a query that performs exact rescoring of oversampled candidates.
+     * Implementations can return {@code null} when rescoring is unavailable.
+     */
+    protected Query getAutoRescoreQuery(IndexSearcher indexSearcher, TopDocs topOversampled, int effectiveK) {
+        return null;
     }
 
     /**

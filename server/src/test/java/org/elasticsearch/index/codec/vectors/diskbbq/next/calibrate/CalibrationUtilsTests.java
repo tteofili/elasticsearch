@@ -9,6 +9,8 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate;
 
+import org.apache.lucene.index.FloatVectorValues;
+import org.apache.lucene.index.VectorSimilarityFunction;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.test.ESTestCase;
 
@@ -95,5 +97,44 @@ public class CalibrationUtilsTests extends ESTestCase {
         CalibrationUtils.SampledData sampled = CalibrationUtils.sampleData(fvv, dim);
         assertEquals(1024, sampled.queries().length);
         assertEquals(n - 1024, sampled.corpusOrdinals().length);
+    }
+
+    public void testNeedsNeyshaburSrebroLift() {
+        assertTrue(CalibrationUtils.needsNeyshaburSrebroLift(VectorSimilarityFunction.DOT_PRODUCT));
+        assertTrue(CalibrationUtils.needsNeyshaburSrebroLift(VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT));
+        assertFalse(CalibrationUtils.needsNeyshaburSrebroLift(VectorSimilarityFunction.COSINE));
+        assertFalse(CalibrationUtils.needsNeyshaburSrebroLift(VectorSimilarityFunction.EUCLIDEAN));
+    }
+
+    public void testLiftQueriesForDotProductAppendsZero() {
+        float[][] q = { { 1, 2, 3 }, { 0, 0, 0 } };
+        float[][] lifted = CalibrationUtils.liftQueriesForDotProduct(q, 3);
+        assertEquals(2, lifted.length);
+        assertEquals(4, lifted[0].length);
+        assertEquals(0f, lifted[0][3], 0f);
+        assertEquals(0f, lifted[1][3], 0f);
+    }
+
+    public void testNeyshaburCorpusLiftMatchesMaxNorm() throws IOException {
+        int dim = 2;
+        List<float[]> vectors = List.of(new float[] { 3, 4 }, new float[] { 0, 1 });
+        FloatVectorValues fvv = KMeansFloatVectorValues.build(vectors, null, dim);
+        int[] corpusOrdinals = { 0, 1 };
+        double maxNormSq = CalibrationUtils.maxSquaredNormOverCorpusSample(fvv, corpusOrdinals, dim);
+        assertEquals(25.0, maxNormSq, 1e-10);
+        CalibrationUtils.NeyshaburCorpusFloatVectorValues lifted = new CalibrationUtils.NeyshaburCorpusFloatVectorValues(
+            fvv,
+            dim,
+            maxNormSq
+        );
+        assertEquals(3, lifted.dimension());
+        float[] v0 = lifted.vectorValue(0);
+        assertEquals(3f, v0[0], 0f);
+        assertEquals(4f, v0[1], 0f);
+        assertEquals(0f, v0[2], 0f);
+        float[] v1 = lifted.vectorValue(1);
+        assertEquals(0f, v1[0], 0f);
+        assertEquals(1f, v1[1], 0f);
+        assertEquals((float) Math.sqrt(25.0 - 1.0), v1[2], 1e-5f);
     }
 }

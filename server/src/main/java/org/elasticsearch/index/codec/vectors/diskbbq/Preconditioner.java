@@ -194,6 +194,12 @@ public class Preconditioner {
     // need something thread safe and a way to clear the cache when done indexing (after flush or merge ... but that defeats the point)
     // maybe not possible or we limit it to a fixed number of cached preconditioners
     // maybe use setExpireAfterAccess in CacheBuilder; to be fair this code is not a hot path though
+    /**
+     * Seed for random orthogonal blocks and for dimension-to-block permutation, aligned with the
+     * reference {@code auto_osq} implementation (two independent streams, both seeded identically).
+     */
+    public static final long PRECONDITIONER_RANDOM_SEED = 215873873L;
+
     public static Preconditioner createPreconditioner(int vectorDimension, int blockDimension) {
         if (blockDimension <= 0) {
             throw new IllegalArgumentException("block dimension must be positive but was [" + blockDimension + "]");
@@ -201,14 +207,17 @@ public class Preconditioner {
         if (vectorDimension <= 0) {
             throw new IllegalArgumentException("vector dimension must be positive but was [" + vectorDimension + "]");
         }
-        Random random = new Random(42L);
+        // Match reference C++: orthogonal matrix draws and permutation shuffle use independent RNGs
+        // with the same seed (see auto_osq randomOrthogonal vs randomPermutation).
+        Random matrixRandom = new Random(PRECONDITIONER_RANDOM_SEED);
+        Random permutationRandom = new Random(PRECONDITIONER_RANDOM_SEED);
         blockDimension = Math.min(vectorDimension, blockDimension);
-        float[][][] blocks = Preconditioner.generateRandomOrthogonalMatrix(vectorDimension, blockDimension, random);
+        float[][][] blocks = Preconditioner.generateRandomOrthogonalMatrix(vectorDimension, blockDimension, matrixRandom);
         int[] dimBlocks = new int[blocks.length];
         for (int i = 0; i < blocks.length; i++) {
             dimBlocks[i] = blocks[i].length;
         }
-        int[][] permutationMatrix = Preconditioner.createPermutationMatrixRandomly(vectorDimension, dimBlocks, random);
+        int[][] permutationMatrix = Preconditioner.createPermutationMatrixRandomly(vectorDimension, dimBlocks, permutationRandom);
         return new Preconditioner(blockDimension, permutationMatrix, blocks);
     }
 

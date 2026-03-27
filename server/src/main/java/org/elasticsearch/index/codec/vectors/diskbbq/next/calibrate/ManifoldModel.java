@@ -13,6 +13,14 @@ import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.VectorSimilarityFunction;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Manifold model for distance/similarity as a function of rank and corpus size.
@@ -82,6 +90,14 @@ public final class ManifoldModel {
     static final int[] RANKS_FOR_K = { 29, 25, 21, 17, 13, 9, 7, 5 };
 
     static final int[] SAMPLE_SIZES_FAST = { 4096, 5632, 7168, 8704, 10240, 11776, 13312, 16384 };
+
+    /**
+     * Maximum corpus chunk size (difference between consecutive {@link #SAMPLE_SIZES} entries);
+     * reused distance buffers are sized to this length.
+     */
+    static final int MAX_MANIFOLD_CHUNK = 4096;
+
+    private static final int PARALLEL_QUERY_THRESHOLD = 8;
 
     private ManifoldModel() {}
 
@@ -174,17 +190,49 @@ public final class ManifoldModel {
         double[] logDistances = new double[m];
 
         float[] scratch = cosine ? new float[dim] : null;
+        double[] distScratch = new double[MAX_MANIFOLD_CHUNK];
         int sampleStart = 0;
         for (int i = 0; i < m; i++) {
             int rank = ranksForK[i];
             int sampleEnd = sampleSizes[i];
             if (sampleEnd > nDocsTotal) break;
-            double avgDist = 0;
-            for (float[] query : queries) {
-                double d = ithDistance(similarityFunction, dim, rank, query, fvv, corpusOrdinals, sampleStart, sampleEnd, cosine, scratch);
-                avgDist += d;
+            int count = sampleEnd - sampleStart;
+            double avgDist;
+            if (nQueries >= PARALLEL_QUERY_THRESHOLD && Runtime.getRuntime().availableProcessors() > 1) {
+                avgDist = averageIthDistanceParallel(
+                    similarityFunction,
+                    dim,
+                    rank,
+                    queries,
+                    fvv,
+                    corpusOrdinals,
+                    sampleStart,
+                    sampleEnd,
+                    cosine,
+                    nQueries,
+                    count
+                );
+            } else {
+                double sum = 0;
+                for (float[] query : queries) {
+                    double d = ithDistance(
+                        similarityFunction,
+                        dim,
+                        rank,
+                        query,
+                        fvv,
+                        corpusOrdinals,
+                        sampleStart,
+                        sampleEnd,
+                        cosine,
+                        scratch,
+                        distScratch,
+                        count
+                    );
+                    sum += d;
+                }
+                avgDist = sum / nQueries;
             }
-            avgDist /= nQueries;
             logRanks[logCount] = Math.log(rank);
             logSampleSizes[logCount] = Math.log(sampleSizes[i]);
             logDistances[logCount] = Math.log(Math.max(avgDist, 1e-38));
@@ -204,6 +252,96 @@ public final class ManifoldModel {
         return new double[] { res.beta0(), res.beta1() };
     }
 
+    private static double averageIthDistanceParallel(
+        VectorSimilarityFunction similarityFunction,
+        int dim,
+        int rank,
+        float[][] queries,
+        FloatVectorValues fvv,
+        int[] corpusOrdinals,
+        int start,
+        int end,
+        boolean cosine,
+        int nQueries,
+        int count
+    ) throws IOException {
+        int workers = Math.min(nQueries, Runtime.getRuntime().availableProcessors());
+        double[] partialSums = new double[nQueries];
+        int[] queryStarts = new int[workers + 1];
+        for (int w = 0; w <= workers; w++) {
+            queryStarts[w] = w * nQueries / workers;
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(workers, r -> {
+            Thread t = new Thread(r, "manifold-calibration");
+            t.setDaemon(true);
+            return t;
+        });
+        try {
+            List<Future<?>> futures = new ArrayList<>(workers);
+            for (int w = 0; w < workers; w++) {
+                int w0 = w;
+                FloatVectorValues fvvCopy = fvv.copy();
+                futures.add(pool.submit(() -> {
+                    double[] localDists = new double[MAX_MANIFOLD_CHUNK];
+                    float[] localScratch = cosine ? new float[dim] : null;
+                    for (int qi = queryStarts[w0]; qi < queryStarts[w0 + 1]; qi++) {
+                        try {
+                            partialSums[qi] = ithDistance(
+                                similarityFunction,
+                                dim,
+                                rank,
+                                queries[qi],
+                                fvvCopy,
+                                corpusOrdinals,
+                                start,
+                                end,
+                                cosine,
+                                localScratch,
+                                localDists,
+                                count
+                            );
+                        } catch (IOException e) {
+                            throw new UncheckedIOException(e);
+                        }
+                    }
+                }));
+            }
+            for (Future<?> future : futures) {
+                future.get();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException(e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof UncheckedIOException uio) {
+                throw uio.getCause();
+            }
+            if (cause instanceof IOException ioe) {
+                throw ioe;
+            }
+            if (cause instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new IOException(cause);
+        } finally {
+            pool.shutdown();
+            try {
+                if (pool.awaitTermination(1, TimeUnit.HOURS) == false) {
+                    pool.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                pool.shutdownNow();
+            }
+        }
+        double sum = 0;
+        for (int qi = 0; qi < nQueries; qi++) {
+            sum += partialSums[qi];
+        }
+        return sum / nQueries;
+    }
+
     private static double ithDistance(
         VectorSimilarityFunction similarityFunction,
         int dim,
@@ -214,10 +352,10 @@ public final class ManifoldModel {
         int start,
         int end,
         boolean cosine,
-        float[] scratch
+        float[] scratch,
+        double[] dists,
+        int count
     ) throws IOException {
-        int count = end - start;
-        double[] dists = new double[count];
         boolean isDot = isDotLike(similarityFunction);
         for (int i = 0; i < count; i++) {
             float[] doc = fvv.vectorValue(corpusOrdinals[start + i]);
@@ -230,9 +368,9 @@ public final class ManifoldModel {
                 dists[i] = CalibrationUtils.euclideanSq(dim, query, doc);
             }
         }
-        int idx = Math.min(rank - 1, dists.length - 1);
+        int idx = Math.min(rank - 1, count - 1);
         if (idx < 0) return 0;
-        quickSelect(dists, 0, dists.length - 1, idx);
+        quickSelect(dists, 0, count - 1, idx);
         return isDot ? -dists[idx] : dists[idx];
     }
 

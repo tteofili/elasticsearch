@@ -15,7 +15,9 @@ import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.SegmentReader;
+import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.AcceptDocs;
+import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TopDocs;
 import org.elasticsearch.common.lucene.Lucene;
@@ -30,6 +32,7 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
 
     private boolean isQueryPreconditioned = false;
     private float[] query;
+    private final VectorSimilarityFunction vectorSimilarityFunction;
 
     /**
      * Creates a new {@link IVFKnnFloatVectorQuery} with the given parameters.
@@ -51,6 +54,7 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
     ) {
         super(field, visitRatio, k, numCands, filter, doPrecondition);
         this.query = query;
+        this.vectorSimilarityFunction = null;
     }
 
     public IVFKnnFloatVectorQuery(
@@ -65,6 +69,23 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
     ) {
         super(field, visitRatio, k, numCands, filter, doPrecondition, useCalibrationOversample);
         this.query = query;
+        this.vectorSimilarityFunction = null;
+    }
+
+    public IVFKnnFloatVectorQuery(
+        String field,
+        float[] query,
+        int k,
+        int numCands,
+        Query filter,
+        float visitRatio,
+        boolean doPrecondition,
+        boolean useCalibrationOversample,
+        VectorSimilarityFunction vectorSimilarityFunction
+    ) {
+        super(field, visitRatio, k, numCands, filter, doPrecondition, useCalibrationOversample);
+        this.query = query;
+        this.vectorSimilarityFunction = vectorSimilarityFunction;
     }
 
     public float[] getQuery() {
@@ -160,5 +181,14 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
         reader.searchNearestVectors(field, query, knnCollector, acceptDocs);
         TopDocs results = knnCollector.topDocs();
         return results != null ? results : NO_RESULTS;
+    }
+
+    @Override
+    protected Query getAutoRescoreQuery(IndexSearcher indexSearcher, TopDocs topOversampled, int effectiveK) {
+        if (vectorSimilarityFunction == null) {
+            return null;
+        }
+        Query topDocsQuery = new KnnScoreDocQuery(topOversampled.scoreDocs, indexSearcher.getIndexReader());
+        return RescoreKnnVectorQuery.fromInnerQuery(field, query, vectorSimilarityFunction, k, effectiveK, topDocsQuery);
     }
 }

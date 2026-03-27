@@ -30,7 +30,7 @@ public interface AutoQuantizationSelector {
     /**
      * No calibrated oversample; indicates the segment has no calibration-derived oversample.
      */
-    float NO_CALIBRATED_OVERSAMPLE = 1.5f;
+    float NO_CALIBRATED_OVERSAMPLE = DEFAULT_CALIBRATED_OVERSAMPLE;
 
     /**
      * Bundles the quantization encoding with the calibration-derived oversample ratio and
@@ -51,7 +51,10 @@ public interface AutoQuantizationSelector {
      * @param centroidSupplier  centroids for the segment
      * @param assignments       centroid assignment per vector
      * @param overspillAssignments overspill assignments, or empty if none
-     * @param mergeState        non-null when merging, null on flush
+     * @param mergeState        non-null when merging, null on flush. Bounded (force-merge) merges are
+     *                          identified from the merged segment's Lucene diagnostics and may take a
+     *                          different calibration path than background merges (see
+     *                          {@link CalibratingAutoQuantizationSelector}).
      * @return calibration result containing the encoding and oversample (never null)
      */
     CalibrationResult select(

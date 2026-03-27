@@ -35,7 +35,7 @@ import java.util.Map;
  * an error model, then sweeps candidate encodings in ascending bit-cost order and returns the
  * first one that meets the target recall.
  */
-public final class CalibratingAutoQuantizationSelector implements AutoQuantizationSelector {
+public class CalibratingAutoQuantizationSelector implements AutoQuantizationSelector {
 
     private static final Logger logger = LogManager.getLogger(CalibratingAutoQuantizationSelector.class);
 
@@ -75,33 +75,40 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
     private static final int[][] RERANK_RATIOS = { { 15, 10 }, { 2, 1 }, { 3, 1 } };
 
     private final int vectorsPerCluster;
-    private final boolean doPrecondition;
     private final int blockDimension;
     private final double targetRecall;
     private final int k;
 
-    public CalibratingAutoQuantizationSelector(int vectorsPerCluster, boolean doPrecondition) {
-        this(vectorsPerCluster, doPrecondition, ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION);
+    public CalibratingAutoQuantizationSelector(int vectorsPerCluster) {
+        this(vectorsPerCluster, ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION);
     }
 
-    public CalibratingAutoQuantizationSelector(int vectorsPerCluster, boolean doPrecondition, int blockDimension) {
-        this(vectorsPerCluster, doPrecondition, blockDimension, DEFAULT_TARGET_RECALL, DEFAULT_K);
+    public CalibratingAutoQuantizationSelector(int vectorsPerCluster, int blockDimension) {
+        this(vectorsPerCluster, blockDimension, DEFAULT_TARGET_RECALL, DEFAULT_K);
     }
 
     public CalibratingAutoQuantizationSelector(
         int vectorsPerCluster,
-        boolean doPrecondition,
         int blockDimension,
         double targetRecall,
         int k
     ) {
         this.vectorsPerCluster = vectorsPerCluster;
-        this.doPrecondition = doPrecondition;
         this.blockDimension = blockDimension;
         this.targetRecall = targetRecall;
         this.k = k;
     }
 
+    /**
+     * On flush ({@code mergeState == null}), runs full {@link #calibrate} when the segment is large enough.
+     * <p>
+     * On merge, attempts to reuse quantization metadata from input segments via {@link #selectFromMergeState},
+     * except for <em>bounded</em> (force-merge) merges: those run {@link #runFastCalibration} first so calibration
+     * is not skipped after major segment consolidation; if the fast path does not meet {@link #targetRecall},
+     * full {@link #calibrate} runs once on the same vectors (fast-then-full fallback) when the fast path does not
+     * meet the configured target recall. Bounded merges are detected
+     * from the merged segment's Lucene diagnostics key {@code mergeMaxNumSegments} ({@code >= 1}).
+     */
     @Override
     public CalibrationResult select(
         FieldInfo fieldInfo,
@@ -120,13 +127,51 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
         }
 
         if (mergeState != null) {
-            CalibrationResult reused = selectFromMergeState(fieldInfo, floatVectorValues, centroidSupplier, mergeState);
+            MergeCalibrationContext mergeCtx = MergeCalibrationContext.from(mergeState);
+            if (mergeCtx.boundedForceMerge()) {
+                logger.info(
+                    "Merge calibration: bounded force merge (mergeMaxNumSegments=[{}], inputSegments=[{}]), skipping metadata reuse; running fast calibration",
+                    mergeCtx.mergeMaxNumSegmentsForLog(),
+                    mergeCtx.inputSegments()
+                );
+                try {
+                    FastCalibrationOutcome fastOutcome = runFastCalibration(floatVectorValues, dim, similarityFunction, N, mergeCtx);
+                    if (fastOutcome.metTargetRecall()) {
+                        return fastOutcome.result();
+                    }
+                    logger.info(
+                        "Merge calibration: fast path did not meet target recall [{}], running full calibration [inputSegments={} mergeKind={} mergeMaxNumSegments={}]",
+                        targetRecall,
+                        mergeCtx.inputSegments(),
+                        mergeCtx.mergeKind(),
+                        mergeCtx.mergeMaxNumSegmentsForLog()
+                    );
+                    try {
+                        return calibrate(floatVectorValues, dim, similarityFunction, N);
+                    } catch (IOException e) {
+                        logger.warn("full calibration failed after bounded-merge fast miss, falling back to ONE_BIT_4BIT_QUERY", e);
+                        return new CalibrationResult(
+                            ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                            NO_CALIBRATED_OVERSAMPLE,
+                            false
+                        );
+                    }
+                } catch (IOException e) {
+                    logger.warn("fast calibration failed, falling back to ONE_BIT_4BIT_QUERY", e);
+                    return new CalibrationResult(
+                        ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                        NO_CALIBRATED_OVERSAMPLE,
+                        false
+                    );
+                }
+            }
+            CalibrationResult reused = selectFromMergeState(fieldInfo, floatVectorValues, centroidSupplier, mergeState, mergeCtx);
             if (reused != null) {
                 return reused;
             }
             logger.debug("Merge calibration reuse not possible, running fast calibration");
             try {
-                return calibrateFast(floatVectorValues, dim, similarityFunction, N);
+                return calibrateFast(floatVectorValues, dim, similarityFunction, N, mergeCtx);
             } catch (IOException e) {
                 logger.warn("fast calibration failed, falling back to ONE_BIT_4BIT_QUERY", e);
                 return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, NO_CALIBRATED_OVERSAMPLE, false);
@@ -144,13 +189,16 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
     /**
      * Attempts to reuse calibration results from the input segments being merged.
      * Returns a merged {@link CalibrationResult} if the data has not changed significantly,
-     * or {@code null} if full calibration should be performed.
+     * or {@code null} if merge-time fast calibration should be performed.
+     * Not used for bounded (force-merge) merges; those use {@link #runFastCalibration} with a full
+     * {@link #calibrate} fallback when the fast path does not meet the target recall.
      */
     CalibrationResult selectFromMergeState(
         FieldInfo fieldInfo,
         FloatVectorValues mergedVectors,
         CentroidSupplier centroidSupplier,
-        MergeState mergeState
+        MergeState mergeState,
+        MergeCalibrationContext mergeCtx
     ) {
         int dim = fieldInfo.getVectorDimension();
         Map<ESNextDiskBBQVectorsFormat.QuantEncoding, Long> encodingDocCounts = new EnumMap<>(
@@ -199,10 +247,13 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
                         float drift = ESVectorUtil.squareDistance(segmentCentroid, mergedGlobalCentroid) / dim;
                         if (drift > RECALIBRATE_DRIFT_THRESHOLD) {
                             logger.info(
-                                "Merge calibration: centroid drift [{}] exceeds threshold [{}] for segment [{}], re-calibrating",
+                                "Merge calibration: centroid drift [{}] exceeds threshold [{}] for segment [{}], re-calibrating [inputSegments={} mergeKind={} mergeMaxNumSegments={}]",
                                 drift,
                                 RECALIBRATE_DRIFT_THRESHOLD,
-                                i
+                                i,
+                                mergeCtx.inputSegments(),
+                                mergeCtx.mergeKind(),
+                                mergeCtx.mergeMaxNumSegmentsForLog()
                             );
                             return null;
                         }
@@ -218,9 +269,12 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
         long mergedSize = mergedVectors.size();
         if (mergedSize > RECALIBRATE_GROWTH_RATIO * largestSegmentDocs) {
             logger.info(
-                "Merge calibration: growth ratio [{}] exceeds threshold [{}], re-calibrating",
+                "Merge calibration: growth ratio [{}] exceeds threshold [{}], re-calibrating [inputSegments={} mergeKind={} mergeMaxNumSegments={}]",
                 (double) mergedSize / largestSegmentDocs,
-                RECALIBRATE_GROWTH_RATIO
+                RECALIBRATE_GROWTH_RATIO,
+                mergeCtx.inputSegments(),
+                mergeCtx.mergeKind(),
+                mergeCtx.mergeMaxNumSegmentsForLog()
             );
             return null;
         }
@@ -229,8 +283,11 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
             long maxEncDocs = encodingDocCounts.values().stream().mapToLong(Long::longValue).max().orElse(0);
             if (maxEncDocs < ENCODING_AGREEMENT_THRESHOLD * totalDocs) {
                 logger.info(
-                    "Merge calibration: encoding disagreement (max encoding covers [{}]% of docs), re-calibrating",
-                    (100.0 * maxEncDocs / totalDocs)
+                    "Merge calibration: encoding disagreement (max encoding covers [{}]% of docs), re-calibrating [inputSegments={} mergeKind={} mergeMaxNumSegments={}]",
+                    (100.0 * maxEncDocs / totalDocs),
+                    mergeCtx.inputSegments(),
+                    mergeCtx.mergeKind(),
+                    mergeCtx.mergeMaxNumSegmentsForLog()
                 );
                 return null;
             }
@@ -245,11 +302,14 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
         boolean doPreconditionResult = preconditionTrueDocs > preconditionFalseDocs;
 
         logger.info(
-            "Merge calibration: reusing encoding [{}] (oversample={}, precondition={}) from [{}] input segments",
+            "Merge calibration: reusing encoding [{}] (oversample={}, precondition={}) from [{}] input segments [inputSegments={} mergeKind={} mergeMaxNumSegments={}]",
             bestEncoding,
             avgOversample,
             doPreconditionResult,
-            calibratedSegments
+            calibratedSegments,
+            mergeCtx.inputSegments(),
+            mergeCtx.mergeKind(),
+            mergeCtx.mergeMaxNumSegmentsForLog()
         );
         return new CalibrationResult(bestEncoding, avgOversample, doPreconditionResult);
     }
@@ -265,12 +325,21 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
             CalibrationUtils.normalize(queries);
         }
 
-        // Manifold model always uses original (un-preconditioned) data
+        int dimWork = dim;
+        FloatVectorValues fvvForCalibration = floatVectorValues;
+        if (CalibrationUtils.needsNeyshaburSrebroLift(similarityFunction)) {
+            double maxNormSq = CalibrationUtils.maxSquaredNormOverCorpusSample(floatVectorValues, corpusOrdinals, dim);
+            queries = CalibrationUtils.liftQueriesForDotProduct(queries, dim);
+            fvvForCalibration = new CalibrationUtils.NeyshaburCorpusFloatVectorValues(floatVectorValues, dim, maxNormSq);
+            dimWork = dim + 1;
+        }
+
+        // Manifold model uses original (un-preconditioned) data; after optional Neyshabur lift for dot/MIP.
         double[] manifold = ManifoldModel.estimateManifoldParameters(
             similarityFunction,
-            dim,
+            dimWork,
             queries,
-            floatVectorValues,
+            fvvForCalibration,
             corpusOrdinals,
             cosine,
             k
@@ -278,26 +347,17 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
         double alpha = manifold[0];
         double invDim = manifold[1];
 
-        // When doPrecondition is enabled, create preconditioned copies of the queries
-        // and a preconditioned FloatVectorValues wrapper for the corpus.
-        // the error scaling model uses preconditioned data,
-        // while the magnitude model uses preconditioned or original depending on the sweep flag.
-        float[][] queriesP = null;
-        FloatVectorValues fvvP = null;
-        if (doPrecondition) {
-            Preconditioner preconditioner = Preconditioner.createPreconditioner(dim, blockDimension);
-            queriesP = preconditionQueries(queries, preconditioner);
-            fvvP = preconditionFvv(floatVectorValues, preconditioner);
-        }
-
-        float[][] scalingQueries = doPrecondition ? queriesP : queries;
-        FloatVectorValues scalingFvv = doPrecondition ? fvvP : floatVectorValues;
+        // Reference auto_osq: always fit the error scaling model on random orthogonal transforms,
+        // independent of whether the field enables preconditioning at index time.
+        Preconditioner calibrationPreconditioner = Preconditioner.createPreconditioner(dimWork, blockDimension);
+        float[][] queriesOrth = preconditionQueries(queries, calibrationPreconditioner);
+        FloatVectorValues fvvOrth = preconditionFvv(fvvForCalibration, calibrationPreconditioner);
 
         RepErrorStdModel errorScalingModel = ErrorModel.estimateRepErrorStdScalingParameter(
             similarityFunction,
-            dim,
-            scalingQueries,
-            scalingFvv,
+            dimWork,
+            queriesOrth,
+            fvvOrth,
             corpusOrdinals,
             cosine,
             k
@@ -308,17 +368,17 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
         float bestOversample = AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
         boolean bestPrecondition = false;
 
-        boolean[] preconditionValues = doPrecondition ? new boolean[] { false, true } : new boolean[] { false };
+        boolean[] preconditionValues = new boolean[] { false, true };
 
         for (CandidateEncoding candidate : CANDIDATES) {
             for (boolean precondition : preconditionValues) {
-                float[][] magnitudeQueries = precondition ? queriesP : queries;
-                FloatVectorValues magnitudeFvv = precondition ? fvvP : floatVectorValues;
+                float[][] magnitudeQueries = precondition ? queriesOrth : queries;
+                FloatVectorValues magnitudeFvv = precondition ? fvvOrth : fvvForCalibration;
 
                 RepErrorStdModel errorModel = ErrorModel.estimateRepErrorStdMagnitudeParameter(
                     errorScalingModel,
                     similarityFunction,
-                    dim,
+                    dimWork,
                     magnitudeQueries,
                     magnitudeFvv,
                     corpusOrdinals,
@@ -378,11 +438,35 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
     }
 
     /**
+     * Outcome of {@link #runFastCalibration}: {@code metTargetRecall} is true when an encoding met the
+     * target recall before the best-effort path.
+     */
+    protected record FastCalibrationOutcome(CalibrationResult result, boolean metTargetRecall) {}
+
+    /**
      * Runs calibration with reduced sample sizes, fewer sweep iterations, and fewer
      * manifold model data points for faster execution during merge re-calibration.
      */
-    CalibrationResult calibrateFast(FloatVectorValues floatVectorValues, int dim, VectorSimilarityFunction similarityFunction, int N)
-        throws IOException {
+    CalibrationResult calibrateFast(
+        FloatVectorValues floatVectorValues,
+        int dim,
+        VectorSimilarityFunction similarityFunction,
+        int N,
+        MergeCalibrationContext mergeCtx
+    ) throws IOException {
+        return runFastCalibration(floatVectorValues, dim, similarityFunction, N, mergeCtx).result();
+    }
+
+    /**
+     * Same work as {@link #calibrateFast} but exposes whether the target recall was reached (for bounded-merge fallback).
+     */
+    protected FastCalibrationOutcome runFastCalibration(
+        FloatVectorValues floatVectorValues,
+        int dim,
+        VectorSimilarityFunction similarityFunction,
+        int N,
+        MergeCalibrationContext mergeCtx
+    ) throws IOException {
         CalibrationUtils.SampledData sampled = CalibrationUtils.sampleDataFast(floatVectorValues, dim);
         float[][] queries = sampled.queries();
         int[] corpusOrdinals = sampled.corpusOrdinals();
@@ -392,11 +476,20 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
             CalibrationUtils.normalize(queries);
         }
 
+        int dimWork = dim;
+        FloatVectorValues fvvForCalibration = floatVectorValues;
+        if (CalibrationUtils.needsNeyshaburSrebroLift(similarityFunction)) {
+            double maxNormSq = CalibrationUtils.maxSquaredNormOverCorpusSample(floatVectorValues, corpusOrdinals, dim);
+            queries = CalibrationUtils.liftQueriesForDotProduct(queries, dim);
+            fvvForCalibration = new CalibrationUtils.NeyshaburCorpusFloatVectorValues(floatVectorValues, dim, maxNormSq);
+            dimWork = dim + 1;
+        }
+
         double[] manifold = ManifoldModel.estimateManifoldParametersFast(
             similarityFunction,
-            dim,
+            dimWork,
             queries,
-            floatVectorValues,
+            fvvForCalibration,
             corpusOrdinals,
             cosine,
             k
@@ -404,22 +497,15 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
         double alpha = manifold[0];
         double invDim = manifold[1];
 
-        float[][] queriesP = null;
-        FloatVectorValues fvvP = null;
-        if (doPrecondition) {
-            Preconditioner preconditioner = Preconditioner.createPreconditioner(dim, blockDimension);
-            queriesP = preconditionQueries(queries, preconditioner);
-            fvvP = preconditionFvv(floatVectorValues, preconditioner);
-        }
-
-        float[][] scalingQueries = doPrecondition ? queriesP : queries;
-        FloatVectorValues scalingFvv = doPrecondition ? fvvP : floatVectorValues;
+        Preconditioner calibrationPreconditioner = Preconditioner.createPreconditioner(dimWork, blockDimension);
+        float[][] queriesOrth = preconditionQueries(queries, calibrationPreconditioner);
+        FloatVectorValues fvvOrth = preconditionFvv(fvvForCalibration, calibrationPreconditioner);
 
         RepErrorStdModel errorScalingModel = ErrorModel.estimateRepErrorStdScalingParameterFast(
             similarityFunction,
-            dim,
-            scalingQueries,
-            scalingFvv,
+            dimWork,
+            queriesOrth,
+            fvvOrth,
             corpusOrdinals,
             cosine,
             k
@@ -430,17 +516,17 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
         float bestOversample = AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
         boolean bestPrecondition = false;
 
-        boolean[] preconditionValues = doPrecondition ? new boolean[] { false, true } : new boolean[] { false };
+        boolean[] preconditionValues = new boolean[] { false, true };
 
         for (CandidateEncoding candidate : CANDIDATES) {
             for (boolean precondition : preconditionValues) {
-                float[][] magnitudeQueries = precondition ? queriesP : queries;
-                FloatVectorValues magnitudeFvv = precondition ? fvvP : floatVectorValues;
+                float[][] magnitudeQueries = precondition ? queriesOrth : queries;
+                FloatVectorValues magnitudeFvv = precondition ? fvvOrth : fvvForCalibration;
 
                 RepErrorStdModel errorModel = ErrorModel.estimateRepErrorStdMagnitudeParameterFast(
                     errorScalingModel,
                     similarityFunction,
-                    dim,
+                    dimWork,
                     magnitudeQueries,
                     magnitudeFvv,
                     corpusOrdinals,
@@ -468,15 +554,29 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
                     }
 
                     if (expected >= targetRecall) {
-                        logger.info(
-                            "Fast calibration selected encoding [{}] (precondition={}, rerank={}, oversample={}) with expected recall [{}]",
-                            candidate.encoding(),
-                            precondition,
-                            rerankVal,
-                            oversample,
-                            expected
-                        );
-                        return new CalibrationResult(candidate.encoding(), oversample, precondition);
+                        if (mergeCtx != null) {
+                            logger.info(
+                                "Fast calibration selected encoding [{}] (precondition={}, rerank={}, oversample={}) with expected recall [{}] [inputSegments={} mergeKind={} mergeMaxNumSegments={}]",
+                                candidate.encoding(),
+                                precondition,
+                                rerankVal,
+                                oversample,
+                                expected,
+                                mergeCtx.inputSegments(),
+                                mergeCtx.mergeKind(),
+                                mergeCtx.mergeMaxNumSegmentsForLog()
+                            );
+                        } else {
+                            logger.info(
+                                "Fast calibration selected encoding [{}] (precondition={}, rerank={}, oversample={}) with expected recall [{}]",
+                                candidate.encoding(),
+                                precondition,
+                                rerankVal,
+                                oversample,
+                                expected
+                            );
+                        }
+                        return new FastCalibrationOutcome(new CalibrationResult(candidate.encoding(), oversample, precondition), true);
                     }
                     if (expected > maxRecall) {
                         maxRecall = expected;
@@ -488,15 +588,29 @@ public final class CalibratingAutoQuantizationSelector implements AutoQuantizati
             }
         }
 
-        logger.info(
-            "Fast calibration: no encoding met target recall [{}], selecting best [{}] oversample [{}] precondition [{}] recall [{}]",
-            targetRecall,
-            bestEncoding,
-            bestOversample,
-            bestPrecondition,
-            maxRecall
-        );
-        return new CalibrationResult(bestEncoding, bestOversample, bestPrecondition);
+        if (mergeCtx != null) {
+            logger.info(
+                "Fast calibration: no encoding met target recall [{}], selecting best [{}] oversample [{}] precondition [{}] recall [{}] [inputSegments={} mergeKind={} mergeMaxNumSegments={}]",
+                targetRecall,
+                bestEncoding,
+                bestOversample,
+                bestPrecondition,
+                maxRecall,
+                mergeCtx.inputSegments(),
+                mergeCtx.mergeKind(),
+                mergeCtx.mergeMaxNumSegmentsForLog()
+            );
+        } else {
+            logger.info(
+                "Fast calibration: no encoding met target recall [{}], selecting best [{}] oversample [{}] precondition [{}] recall [{}]",
+                targetRecall,
+                bestEncoding,
+                bestOversample,
+                bestPrecondition,
+                maxRecall
+            );
+        }
+        return new FastCalibrationOutcome(new CalibrationResult(bestEncoding, bestOversample, bestPrecondition), false);
     }
 
     private static float[][] preconditionQueries(float[][] queries, Preconditioner preconditioner) {

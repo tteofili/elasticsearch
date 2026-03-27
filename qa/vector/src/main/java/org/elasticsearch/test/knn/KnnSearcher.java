@@ -109,6 +109,7 @@ class KnnSearcher {
     private final VectorSimilarityFunction similarityFunction;
     private final VectorEncoding vectorEncoding;
     private final boolean doPrecondition;
+    private final boolean useCalibrationOversample;
 
     KnnSearcher(Path indexPath, TestConfiguration testConfiguration) {
         this.docPath = testConfiguration.docVectors();
@@ -124,6 +125,8 @@ class KnnSearcher {
         }
         this.indexType = testConfiguration.indexType();
         this.doPrecondition = testConfiguration.doPrecondition();
+        this.useCalibrationOversample = indexType == KnnIndexTester.IndexType.IVF
+            && Integer.valueOf(0).equals(testConfiguration.quantizeBits());
     }
 
     void runSearch(KnnIndexTester.Results finalResults, SearchParameters searchParameters, Directory dir) throws IOException {
@@ -455,7 +458,18 @@ class KnnSearcher {
         int efSearch = Math.max(overSampledTopK, searchParameters.numCandidates());
         if (indexType == KnnIndexTester.IndexType.IVF) {
             float visitRatio = (float) (searchParameters.visitPercentage() / 100);
-            knnQuery = new IVFKnnFloatVectorQuery(VECTOR_FIELD, vector, overSampledTopK, efSearch, filterQuery, visitRatio, doPrecondition);
+            boolean applyCalibrationOversample = useCalibrationOversample && searchParameters.overSamplingFactor() <= 1f;
+            knnQuery = new IVFKnnFloatVectorQuery(
+                VECTOR_FIELD,
+                vector,
+                overSampledTopK,
+                efSearch,
+                filterQuery,
+                visitRatio,
+                doPrecondition,
+                applyCalibrationOversample,
+                similarityFunction
+            );
         } else {
             knnQuery = new ESKnnFloatVectorQuery(
                 VECTOR_FIELD,

@@ -3172,8 +3172,11 @@ public class DenseVectorFieldMapper extends FieldMapper {
             int adjustedK = k;
             // By default utilize the quantized oversample is configured
             // allow the user provided at query time overwrite
+            boolean useAutoCalibrationOversample = indexOptions instanceof BBQIVFIndexOptions bbqIvfIndexOptions
+                && bbqIvfIndexOptions.quantizationAuto;
             Float oversample = queryOversample;
             if (oversample == null
+                && useAutoCalibrationOversample == false
                 && indexOptions instanceof QuantizedIndexOptions quantizedIndexOptions
                 && quantizedIndexOptions.rescoreVector != null) {
                 oversample = quantizedIndexOptions.rescoreVector.oversample;
@@ -3197,8 +3200,8 @@ public class DenseVectorFieldMapper extends FieldMapper {
             } else if (indexOptions instanceof BBQIVFIndexOptions bbqIndexOptions) {
                 float defaultVisitRatio = (float) (bbqIndexOptions.defaultVisitPercentage / 100d);
                 float visitRatio = visitPercentage == null ? defaultVisitRatio : (float) (visitPercentage / 100d);
-                // Use segment calibration oversample only for bits:auto when the user did not set rescore/oversample
-                boolean useCalibrationOversample = rescore == false && bbqIndexOptions.quantizationAuto;
+                // For bits:auto, prefer per-segment calibration oversampling unless the user explicitly requested query-time rescore.
+                boolean useCalibrationOversample = bbqIndexOptions.quantizationAuto && queryOversample == null;
                 knnQuery = parentFilter != null
                     ? new DiversifyingChildrenIVFKnnFloatVectorQuery(
                         name(),
@@ -3209,7 +3212,8 @@ public class DenseVectorFieldMapper extends FieldMapper {
                         parentFilter,
                         visitRatio,
                         bbqIndexOptions.doPrecondition(),
-                        useCalibrationOversample
+                        useCalibrationOversample,
+                        similarity.vectorSimilarityFunction(indexVersionCreated, ElementType.FLOAT)
                     )
                     : new IVFKnnFloatVectorQuery(
                         name(),
@@ -3219,7 +3223,8 @@ public class DenseVectorFieldMapper extends FieldMapper {
                         filter,
                         visitRatio,
                         bbqIndexOptions.doPrecondition(),
-                        useCalibrationOversample
+                        useCalibrationOversample,
+                        similarity.vectorSimilarityFunction(indexVersionCreated, ElementType.FLOAT)
                     );
             } else {
                 knnQuery = parentFilter != null

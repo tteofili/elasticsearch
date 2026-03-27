@@ -204,6 +204,7 @@ public class ErrorModelTests extends ESTestCase {
             queries,
             fvv,
             corpusOrdinals,
+            corpusOrdinals.length,
             false,
             2,
             32,

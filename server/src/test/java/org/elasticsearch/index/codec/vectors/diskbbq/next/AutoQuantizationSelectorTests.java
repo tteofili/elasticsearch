@@ -27,6 +27,11 @@ import org.elasticsearch.test.ESTestCase;
 import java.io.IOException;
 import java.util.List;
 
+/**
+ * Contract tests for {@link AutoQuantizationSelector}. Precondition selection for
+ * {@link CalibratingAutoQuantizationSelector} is covered in
+ * {@link CalibratingAutoQuantizationSelectorTests}.
+ */
 public class AutoQuantizationSelectorTests extends ESTestCase {
 
     public void testDefaultSelectorReturnsValidEncoding() throws IOException {
@@ -70,6 +75,46 @@ public class AutoQuantizationSelectorTests extends ESTestCase {
         assertNotNull(result);
         assertSame(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, result.encoding());
         assertEquals(AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE, result.oversample(), 0.0f);
+    }
+
+    public void testNoOpSelectorAlwaysReportsPreconditionFalse() throws IOException {
+        int dimension = 4;
+        int numVectors = 10;
+        float[][] vectors = new float[numVectors][dimension];
+        float[] globalCentroid = new float[dimension];
+        for (int i = 0; i < numVectors; i++) {
+            for (int d = 0; d < dimension; d++) {
+                vectors[i][d] = randomFloat();
+                globalCentroid[d] += vectors[i][d];
+            }
+        }
+        for (int d = 0; d < dimension; d++) {
+            globalCentroid[d] /= numVectors;
+        }
+        CentroidAssignments assignments = new CentroidAssignments(
+            dimension,
+            new float[][] { globalCentroid },
+            new int[numVectors],
+            new int[0]
+        );
+        CentroidSupplier supplier = CentroidSupplier.fromArray(
+            assignments.centroids(),
+            KMeansResult.singleCluster(assignments.globalCentroid(), assignments.numCentroids()),
+            dimension
+        );
+        List<float[]> vectorsList = List.of(vectors);
+        KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(vectorsList, null, dimension);
+        FieldInfo fieldInfo = getFieldInfoFromIndex(dimension);
+
+        AutoQuantizationSelector.CalibrationResult result = NoOpAutomaticQuantizationSelector.INSTANCE.select(
+            fieldInfo,
+            fvv,
+            supplier,
+            assignments.assignments(),
+            assignments.overspillAssignments(),
+            null
+        );
+        assertFalse(result.doPrecondition());
     }
 
     private static FieldInfo getFieldInfoFromIndex(int dimension) throws IOException {

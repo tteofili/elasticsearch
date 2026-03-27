@@ -365,6 +365,583 @@ public class ESNextOSQVectorsScorerTests extends BaseVectorizationTests {
         doTestScoreBulkOffsets(offsets, offsetsCount, tailSize);
     }
 
+    public void testScoreBulkOffsetsEquivalentToIndividualAligned() throws Exception {
+        int count = ESNextOSQVectorsScorer.BULK_SIZE;
+        int filtered = random().nextInt(0, count);
+        int[] offsets = VectorScorerTestUtils.generateFilteredOffsets(random(), count, filtered);
+        doTestScoreBulkOffsetsEquivalentToIndividual(offsets, count);
+    }
+
+    public void testScoreBulkOffsetsEquivalentToIndividualTail() throws Exception {
+        int count = randomIntBetween(1, ESNextOSQVectorsScorer.BULK_SIZE - 1);
+        int filtered = random().nextInt(0, count);
+        int[] offsets = VectorScorerTestUtils.generateFilteredOffsets(random(), count, filtered);
+        doTestScoreBulkOffsetsEquivalentToIndividual(offsets, count);
+    }
+
+    public void testScoreBulkEquivalentToIndividualAligned() throws Exception {
+        doTestScoreBulkEquivalentToIndividual(ESNextOSQVectorsScorer.BULK_SIZE * randomIntBetween(1, 4));
+    }
+
+    public void testScoreBulkEquivalentToIndividualWithTail() throws Exception {
+        final int bulkSize = ESNextOSQVectorsScorer.BULK_SIZE;
+        final int tail = randomIntBetween(1, bulkSize - 1);
+        doTestScoreBulkEquivalentToIndividual(bulkSize + tail);
+    }
+
+    public void testAdditionalCorrectionMonotonicity() throws Exception {
+        final int iterations = 20;
+        for (int it = 0; it < iterations; it++) {
+            final int dimensions = randomIntBetween(4, 256);
+            final int indexVectorPackedLengthInBytes = ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits)
+                .getDocPackedLength(dimensions);
+            final int queryVectorPackedLengthInBytes = indexBits == 7
+                ? ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits).getQueryPackedLength(dimensions)
+                : indexVectorPackedLengthInBytes * (queryBits / indexBits);
+
+            final float[] centroid = new float[dimensions];
+            randomVector(random(), centroid, similarityFunction);
+            final OptimizedScalarQuantizer quantizer = new OptimizedScalarQuantizer(similarityFunction);
+
+            final float[] vector = new float[dimensions];
+            randomVector(random(), vector, similarityFunction);
+            final var vectorData = createOSQIndexData(vector, centroid, quantizer, dimensions, indexBits, indexVectorPackedLengthInBytes);
+
+            final float[] query = new float[dimensions];
+            randomVector(random(), query, similarityFunction);
+            final var queryData = createOSQQueryData(query, centroid, quantizer, dimensions, queryBits, queryVectorPackedLengthInBytes);
+            final float centroidDp = VectorUtil.dotProduct(centroid, centroid);
+            final float delta = randomFloatBetween(1e-3f, 0.5f, true);
+
+            try (Directory dir = newParametrizedDirectory()) {
+                try (IndexOutput out = dir.createOutput("monotonicity.bin", IOContext.DEFAULT)) {
+                    writeSingleOSQVectorData(out, vectorData);
+                    CodecUtil.writeFooter(out);
+                }
+                try (IndexInput in = dir.openInput("monotonicity.bin", IOContext.DEFAULT)) {
+                    final IndexInput slice = in.slice("monotonicity", 0, indexVectorPackedLengthInBytes + 16L);
+                    final var scorer = defaultProvider().newESNextOSQVectorsScorer(
+                        slice,
+                        queryBits,
+                        indexBits,
+                        dimensions,
+                        indexVectorPackedLengthInBytes,
+                        ESNextOSQVectorsScorer.BULK_SIZE
+                    );
+                    final long qDist = scorer.quantizeScore(queryData.quantizedVector());
+                    final float baseline = scorer.applyCorrectionsIndividually(
+                        queryData.lowerInterval(),
+                        queryData.upperInterval(),
+                        queryData.quantizedComponentSum(),
+                        queryData.additionalCorrection(),
+                        similarityFunction,
+                        centroidDp,
+                        vectorData.lowerInterval(),
+                        vectorData.upperInterval(),
+                        vectorData.quantizedComponentSum(),
+                        vectorData.additionalCorrection(),
+                        qDist
+                    );
+                    final float shifted = scorer.applyCorrectionsIndividually(
+                        queryData.lowerInterval(),
+                        queryData.upperInterval(),
+                        queryData.quantizedComponentSum(),
+                        queryData.additionalCorrection(),
+                        similarityFunction,
+                        centroidDp,
+                        vectorData.lowerInterval(),
+                        vectorData.upperInterval(),
+                        vectorData.quantizedComponentSum(),
+                        vectorData.additionalCorrection() + delta,
+                        qDist
+                    );
+
+                    if (similarityFunction == VectorSimilarityFunction.EUCLIDEAN) {
+                        assertTrue("Increasing additional correction should not increase EUCLIDEAN score", shifted <= baseline + 1e-5f);
+                    } else {
+                        assertTrue(
+                            "Increasing additional correction should not decrease DOT_PRODUCT/MIP score",
+                            shifted >= baseline - 1e-5f
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    public void testQueryAdditionalCorrectionMonotonicity() throws Exception {
+        final int iterations = 20;
+        for (int it = 0; it < iterations; it++) {
+            final int dimensions = randomIntBetween(4, 256);
+            final int indexVectorPackedLengthInBytes = ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits)
+                .getDocPackedLength(dimensions);
+            final int queryVectorPackedLengthInBytes = indexBits == 7
+                ? ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits).getQueryPackedLength(dimensions)
+                : indexVectorPackedLengthInBytes * (queryBits / indexBits);
+
+            final float[] centroid = new float[dimensions];
+            randomVector(random(), centroid, similarityFunction);
+            final OptimizedScalarQuantizer quantizer = new OptimizedScalarQuantizer(similarityFunction);
+
+            final float[] vector = new float[dimensions];
+            randomVector(random(), vector, similarityFunction);
+            final var vectorData = createOSQIndexData(vector, centroid, quantizer, dimensions, indexBits, indexVectorPackedLengthInBytes);
+
+            final float[] query = new float[dimensions];
+            randomVector(random(), query, similarityFunction);
+            final var queryData = createOSQQueryData(query, centroid, quantizer, dimensions, queryBits, queryVectorPackedLengthInBytes);
+            final float centroidDp = VectorUtil.dotProduct(centroid, centroid);
+            final float delta = randomFloatBetween(1e-3f, 0.5f, true);
+
+            try (Directory dir = newParametrizedDirectory()) {
+                try (IndexOutput out = dir.createOutput("queryMonotonicity.bin", IOContext.DEFAULT)) {
+                    writeSingleOSQVectorData(out, vectorData);
+                    CodecUtil.writeFooter(out);
+                }
+                try (IndexInput in = dir.openInput("queryMonotonicity.bin", IOContext.DEFAULT)) {
+                    final IndexInput slice = in.slice("queryMonotonicity", 0, indexVectorPackedLengthInBytes + 16L);
+                    final var scorer = defaultProvider().newESNextOSQVectorsScorer(
+                        slice,
+                        queryBits,
+                        indexBits,
+                        dimensions,
+                        indexVectorPackedLengthInBytes,
+                        ESNextOSQVectorsScorer.BULK_SIZE
+                    );
+                    final long qDist = scorer.quantizeScore(queryData.quantizedVector());
+                    final float baseline = scorer.applyCorrectionsIndividually(
+                        queryData.lowerInterval(),
+                        queryData.upperInterval(),
+                        queryData.quantizedComponentSum(),
+                        queryData.additionalCorrection(),
+                        similarityFunction,
+                        centroidDp,
+                        vectorData.lowerInterval(),
+                        vectorData.upperInterval(),
+                        vectorData.quantizedComponentSum(),
+                        vectorData.additionalCorrection(),
+                        qDist
+                    );
+                    final float shifted = scorer.applyCorrectionsIndividually(
+                        queryData.lowerInterval(),
+                        queryData.upperInterval(),
+                        queryData.quantizedComponentSum(),
+                        queryData.additionalCorrection() + delta,
+                        similarityFunction,
+                        centroidDp,
+                        vectorData.lowerInterval(),
+                        vectorData.upperInterval(),
+                        vectorData.quantizedComponentSum(),
+                        vectorData.additionalCorrection(),
+                        qDist
+                    );
+
+                    if (similarityFunction == VectorSimilarityFunction.EUCLIDEAN) {
+                        assertTrue(
+                            "Increasing query additional correction should not increase EUCLIDEAN score",
+                            shifted <= baseline + 1e-5f
+                        );
+                    } else {
+                        assertTrue(
+                            "Increasing query additional correction should not decrease DOT_PRODUCT/MIP score",
+                            shifted >= baseline - 1e-5f
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    public void testAdditionalCorrectionMonotonicityDeterministic() throws Exception {
+        final int dimensions = 16;
+        final int indexVectorPackedLengthInBytes = ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits)
+            .getDocPackedLength(dimensions);
+        final int queryVectorPackedLengthInBytes = indexBits == 7
+            ? ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits).getQueryPackedLength(dimensions)
+            : indexVectorPackedLengthInBytes * (queryBits / indexBits);
+
+        final float[] centroid = new float[dimensions];
+        Arrays.fill(centroid, 1.0f / (float) Math.sqrt(dimensions));
+        final OptimizedScalarQuantizer quantizer = new OptimizedScalarQuantizer(similarityFunction);
+
+        final float[] vector = new float[dimensions];
+        final float[] query = new float[dimensions];
+        Arrays.fill(vector, 0.5f);
+        Arrays.fill(query, 0.25f);
+        if (similarityFunction != VectorSimilarityFunction.EUCLIDEAN) {
+            VectorUtil.l2normalize(vector);
+            VectorUtil.l2normalize(query);
+        }
+
+        final var vectorData = createOSQIndexData(vector, centroid, quantizer, dimensions, indexBits, indexVectorPackedLengthInBytes);
+        final var queryData = createOSQQueryData(query, centroid, quantizer, dimensions, queryBits, queryVectorPackedLengthInBytes);
+        final float centroidDp = VectorUtil.dotProduct(centroid, centroid);
+        final float delta = 0.25f;
+
+        try (Directory dir = newParametrizedDirectory()) {
+            try (IndexOutput out = dir.createOutput("deterministicMonotonicity.bin", IOContext.DEFAULT)) {
+                writeSingleOSQVectorData(out, vectorData);
+                CodecUtil.writeFooter(out);
+            }
+            try (IndexInput in = dir.openInput("deterministicMonotonicity.bin", IOContext.DEFAULT)) {
+                final IndexInput slice = in.slice("deterministicMonotonicity", 0, indexVectorPackedLengthInBytes + 16L);
+                final var scorer = defaultProvider().newESNextOSQVectorsScorer(
+                    slice,
+                    queryBits,
+                    indexBits,
+                    dimensions,
+                    indexVectorPackedLengthInBytes,
+                    ESNextOSQVectorsScorer.BULK_SIZE
+                );
+                final long qDist = scorer.quantizeScore(queryData.quantizedVector());
+
+                final float base = scorer.applyCorrectionsIndividually(
+                    queryData.lowerInterval(),
+                    queryData.upperInterval(),
+                    queryData.quantizedComponentSum(),
+                    queryData.additionalCorrection(),
+                    similarityFunction,
+                    centroidDp,
+                    vectorData.lowerInterval(),
+                    vectorData.upperInterval(),
+                    vectorData.quantizedComponentSum(),
+                    vectorData.additionalCorrection(),
+                    qDist
+                );
+                final float vectorShifted = scorer.applyCorrectionsIndividually(
+                    queryData.lowerInterval(),
+                    queryData.upperInterval(),
+                    queryData.quantizedComponentSum(),
+                    queryData.additionalCorrection(),
+                    similarityFunction,
+                    centroidDp,
+                    vectorData.lowerInterval(),
+                    vectorData.upperInterval(),
+                    vectorData.quantizedComponentSum(),
+                    vectorData.additionalCorrection() + delta,
+                    qDist
+                );
+                final float queryShifted = scorer.applyCorrectionsIndividually(
+                    queryData.lowerInterval(),
+                    queryData.upperInterval(),
+                    queryData.quantizedComponentSum(),
+                    queryData.additionalCorrection() + delta,
+                    similarityFunction,
+                    centroidDp,
+                    vectorData.lowerInterval(),
+                    vectorData.upperInterval(),
+                    vectorData.quantizedComponentSum(),
+                    vectorData.additionalCorrection(),
+                    qDist
+                );
+
+                if (similarityFunction == VectorSimilarityFunction.EUCLIDEAN) {
+                    assertTrue(vectorShifted <= base + 1e-5f);
+                    assertTrue(queryShifted <= base + 1e-5f);
+                } else {
+                    assertTrue(vectorShifted >= base - 1e-5f);
+                    assertTrue(queryShifted >= base - 1e-5f);
+                }
+            }
+        }
+    }
+
+    public void testCentroidDpMonotonicityDeterministic() throws Exception {
+        final int dimensions = 16;
+        final int indexVectorPackedLengthInBytes = ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits)
+            .getDocPackedLength(dimensions);
+        final int queryVectorPackedLengthInBytes = indexBits == 7
+            ? ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits).getQueryPackedLength(dimensions)
+            : indexVectorPackedLengthInBytes * (queryBits / indexBits);
+
+        final float[] centroid = new float[dimensions];
+        Arrays.fill(centroid, 1.0f / (float) Math.sqrt(dimensions));
+        final OptimizedScalarQuantizer quantizer = new OptimizedScalarQuantizer(similarityFunction);
+
+        final float[] vector = new float[dimensions];
+        final float[] query = new float[dimensions];
+        Arrays.fill(vector, 0.5f);
+        Arrays.fill(query, 0.25f);
+        if (similarityFunction != VectorSimilarityFunction.EUCLIDEAN) {
+            VectorUtil.l2normalize(vector);
+            VectorUtil.l2normalize(query);
+        }
+
+        final var vectorData = createOSQIndexData(vector, centroid, quantizer, dimensions, indexBits, indexVectorPackedLengthInBytes);
+        final var queryData = createOSQQueryData(query, centroid, quantizer, dimensions, queryBits, queryVectorPackedLengthInBytes);
+        final float centroidDp = VectorUtil.dotProduct(centroid, centroid);
+        final float largerCentroidDp = centroidDp + 0.25f;
+
+        try (Directory dir = newParametrizedDirectory()) {
+            try (IndexOutput out = dir.createOutput("centroidDpMonotonicity.bin", IOContext.DEFAULT)) {
+                writeSingleOSQVectorData(out, vectorData);
+                CodecUtil.writeFooter(out);
+            }
+            try (IndexInput in = dir.openInput("centroidDpMonotonicity.bin", IOContext.DEFAULT)) {
+                final IndexInput slice = in.slice("centroidDpMonotonicity", 0, indexVectorPackedLengthInBytes + 16L);
+                final var scorer = defaultProvider().newESNextOSQVectorsScorer(
+                    slice,
+                    queryBits,
+                    indexBits,
+                    dimensions,
+                    indexVectorPackedLengthInBytes,
+                    ESNextOSQVectorsScorer.BULK_SIZE
+                );
+                final long qDist = scorer.quantizeScore(queryData.quantizedVector());
+
+                final float base = scorer.applyCorrectionsIndividually(
+                    queryData.lowerInterval(),
+                    queryData.upperInterval(),
+                    queryData.quantizedComponentSum(),
+                    queryData.additionalCorrection(),
+                    similarityFunction,
+                    centroidDp,
+                    vectorData.lowerInterval(),
+                    vectorData.upperInterval(),
+                    vectorData.quantizedComponentSum(),
+                    vectorData.additionalCorrection(),
+                    qDist
+                );
+                final float shifted = scorer.applyCorrectionsIndividually(
+                    queryData.lowerInterval(),
+                    queryData.upperInterval(),
+                    queryData.quantizedComponentSum(),
+                    queryData.additionalCorrection(),
+                    similarityFunction,
+                    largerCentroidDp,
+                    vectorData.lowerInterval(),
+                    vectorData.upperInterval(),
+                    vectorData.quantizedComponentSum(),
+                    vectorData.additionalCorrection(),
+                    qDist
+                );
+
+                if (similarityFunction == VectorSimilarityFunction.EUCLIDEAN) {
+                    assertEquals(base, shifted, 1e-5f);
+                } else {
+                    assertTrue(shifted <= base + 1e-5f);
+                }
+            }
+        }
+    }
+
+    private void doTestScoreBulkEquivalentToIndividual(int numVectors) throws Exception {
+        final int dimensions = random().nextInt(1, random().nextInt(1, 1000) * 2);
+        final int bulkSize = ESNextOSQVectorsScorer.BULK_SIZE;
+        final int indexVectorPackedLengthInBytes = ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits)
+            .getDocPackedLength(dimensions);
+        final int perVectorBytes = indexVectorPackedLengthInBytes + 16;
+
+        final float[] centroid = new float[dimensions];
+        randomVector(random(), centroid, similarityFunction);
+        final OptimizedScalarQuantizer quantizer = new OptimizedScalarQuantizer(similarityFunction);
+
+        final VectorScorerTestUtils.OSQVectorData[] vectors = new VectorScorerTestUtils.OSQVectorData[numVectors];
+        for (int i = 0; i < numVectors; i++) {
+            float[] vector = new float[dimensions];
+            randomVector(random(), vector, similarityFunction);
+            vectors[i] = createOSQIndexData(vector, centroid, quantizer, dimensions, indexBits, indexVectorPackedLengthInBytes);
+        }
+
+        final float[] query = new float[dimensions];
+        randomVector(random(), query, similarityFunction);
+        final int queryVectorPackedLengthInBytes = indexBits == 7
+            ? ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits).getQueryPackedLength(dimensions)
+            : indexVectorPackedLengthInBytes * (queryBits / indexBits);
+        final var queryData = createOSQQueryData(query, centroid, quantizer, dimensions, queryBits, queryVectorPackedLengthInBytes);
+        final float centroidDp = VectorUtil.dotProduct(centroid, centroid);
+
+        try (Directory dir = newParametrizedDirectory()) {
+            try (IndexOutput bulkOut = dir.createOutput("bulk.bin", IOContext.DEFAULT)) {
+                for (int i = 0; i < numVectors; i += bulkSize) {
+                    int count = Math.min(bulkSize, numVectors - i);
+                    writeBulkOSQVectorData(count, bulkOut, vectors, i);
+                }
+                CodecUtil.writeFooter(bulkOut);
+            }
+
+            final float[] bulkScores = new float[numVectors];
+            final float[] individualScores = new float[numVectors];
+            final float[] scoreScratch = new float[bulkSize];
+
+            try (IndexInput bulkIn = dir.openInput("bulk.bin", IOContext.DEFAULT)) {
+                final long dataLength = (long) numVectors * perVectorBytes;
+                final IndexInput bulkSlice = bulkIn.slice("bulk", 0, dataLength);
+                final IndexInput individualSlice = bulkIn.slice("individual", 0, dataLength);
+
+                final var bulkScorer = defaultProvider().newESNextOSQVectorsScorer(
+                    bulkSlice,
+                    queryBits,
+                    indexBits,
+                    dimensions,
+                    indexVectorPackedLengthInBytes,
+                    bulkSize
+                );
+                final var individualScorer = defaultProvider().newESNextOSQVectorsScorer(
+                    individualSlice,
+                    queryBits,
+                    indexBits,
+                    dimensions,
+                    indexVectorPackedLengthInBytes,
+                    bulkSize
+                );
+
+                for (int i = 0; i < numVectors; i += bulkSize) {
+                    int count = Math.min(bulkSize, numVectors - i);
+                    bulkScorer.scoreBulk(
+                        queryData.quantizedVector(),
+                        queryData.lowerInterval(),
+                        queryData.upperInterval(),
+                        queryData.quantizedComponentSum(),
+                        queryData.additionalCorrection(),
+                        similarityFunction,
+                        centroidDp,
+                        scoreScratch,
+                        count
+                    );
+                    System.arraycopy(scoreScratch, 0, bulkScores, i, count);
+                }
+
+                for (int i = 0; i < numVectors; i += bulkSize) {
+                    int count = Math.min(bulkSize, numVectors - i);
+                    for (int j = 0; j < count; j++) {
+                        long qDist = individualScorer.quantizeScore(queryData.quantizedVector());
+                        var vectorData = vectors[i + j];
+                        individualScores[i + j] = individualScorer.applyCorrectionsIndividually(
+                            queryData.lowerInterval(),
+                            queryData.upperInterval(),
+                            queryData.quantizedComponentSum(),
+                            queryData.additionalCorrection(),
+                            similarityFunction,
+                            centroidDp,
+                            vectorData.lowerInterval(),
+                            vectorData.upperInterval(),
+                            vectorData.quantizedComponentSum(),
+                            vectorData.additionalCorrection(),
+                            qDist
+                        );
+                    }
+                    individualSlice.skipBytes(16L * count);
+                }
+
+                assertArrayEqualsPercent(individualScores, bulkScores, 0.001f, 1e-3f);
+                assertEquals(dataLength, bulkSlice.getFilePointer());
+                assertEquals(dataLength, individualSlice.getFilePointer());
+            }
+        }
+    }
+
+    private void doTestScoreBulkOffsetsEquivalentToIndividual(int[] offsets, int count) throws Exception {
+        final int dimensions = random().nextInt(1, random().nextInt(1, 1000) * 2);
+        final int bulkSize = ESNextOSQVectorsScorer.BULK_SIZE;
+        final int numVectors = count * randomIntBetween(1, 4);
+        final int offsetsCount = offsets.length;
+        final int indexVectorPackedLengthInBytes = ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits)
+            .getDocPackedLength(dimensions);
+        final int perVectorBytes = indexVectorPackedLengthInBytes + 16;
+
+        final float[] centroid = new float[dimensions];
+        randomVector(random(), centroid, similarityFunction);
+        final OptimizedScalarQuantizer quantizer = new OptimizedScalarQuantizer(similarityFunction);
+
+        final VectorScorerTestUtils.OSQVectorData[] vectors = new VectorScorerTestUtils.OSQVectorData[numVectors];
+        for (int i = 0; i < numVectors; i++) {
+            float[] vector = new float[dimensions];
+            randomVector(random(), vector, similarityFunction);
+            vectors[i] = createOSQIndexData(vector, centroid, quantizer, dimensions, indexBits, indexVectorPackedLengthInBytes);
+        }
+
+        final float[] query = new float[dimensions];
+        randomVector(random(), query, similarityFunction);
+        final int queryVectorPackedLengthInBytes = indexBits == 7
+            ? ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(indexBits).getQueryPackedLength(dimensions)
+            : indexVectorPackedLengthInBytes * (queryBits / indexBits);
+        final var queryData = createOSQQueryData(query, centroid, quantizer, dimensions, queryBits, queryVectorPackedLengthInBytes);
+        final float centroidDp = VectorUtil.dotProduct(centroid, centroid);
+
+        try (Directory dir = newParametrizedDirectory()) {
+            try (IndexOutput out = dir.createOutput("bulkOffsets.bin", IOContext.DEFAULT)) {
+                for (int i = 0; i < numVectors; i += count) {
+                    writeBulkOSQVectorData(count, out, vectors, i);
+                }
+                CodecUtil.writeFooter(out);
+            }
+
+            final float[] bulkOffsetScores = new float[numVectors];
+            final float[] individualScores = new float[numVectors];
+            final float[] scoreScratch = new float[bulkSize];
+
+            try (IndexInput in = dir.openInput("bulkOffsets.bin", IOContext.DEFAULT)) {
+                final long dataLength = (long) numVectors * perVectorBytes;
+                final IndexInput bulkSlice = in.slice("bulk-offsets", 0, dataLength);
+                final IndexInput individualSlice = in.slice("individual-offsets", 0, dataLength);
+
+                final var bulkOffsetScorer = defaultProvider().newESNextOSQVectorsScorer(
+                    bulkSlice,
+                    queryBits,
+                    indexBits,
+                    dimensions,
+                    indexVectorPackedLengthInBytes,
+                    bulkSize
+                );
+                final var individualScorer = defaultProvider().newESNextOSQVectorsScorer(
+                    individualSlice,
+                    queryBits,
+                    indexBits,
+                    dimensions,
+                    indexVectorPackedLengthInBytes,
+                    bulkSize
+                );
+
+                for (int i = 0; i < numVectors; i += count) {
+                    bulkOffsetScorer.scoreBulkOffsets(
+                        queryData.quantizedVector(),
+                        queryData.lowerInterval(),
+                        queryData.upperInterval(),
+                        queryData.quantizedComponentSum(),
+                        queryData.additionalCorrection(),
+                        similarityFunction,
+                        centroidDp,
+                        offsets,
+                        offsetsCount,
+                        scoreScratch,
+                        count
+                    );
+                    System.arraycopy(scoreScratch, 0, bulkOffsetScores, i, count);
+                }
+
+                for (int i = 0; i < numVectors; i += count) {
+                    for (int j = 0; j < count; j++) {
+                        long qDist = individualScorer.quantizeScore(queryData.quantizedVector());
+                        if (Arrays.binarySearch(offsets, j) >= 0) {
+                            var vectorData = vectors[i + j];
+                            individualScores[i + j] = individualScorer.applyCorrectionsIndividually(
+                                queryData.lowerInterval(),
+                                queryData.upperInterval(),
+                                queryData.quantizedComponentSum(),
+                                queryData.additionalCorrection(),
+                                similarityFunction,
+                                centroidDp,
+                                vectorData.lowerInterval(),
+                                vectorData.upperInterval(),
+                                vectorData.quantizedComponentSum(),
+                                vectorData.additionalCorrection(),
+                                qDist
+                            );
+                        } else {
+                            individualScores[i + j] = 0.0f;
+                        }
+                    }
+                    individualSlice.skipBytes(16L * count);
+                }
+
+                assertArrayEqualsPercent(individualScores, bulkOffsetScores, 0.001f, 1e-3f);
+                assertEquals(dataLength, bulkSlice.getFilePointer());
+                assertEquals(dataLength, individualSlice.getFilePointer());
+            }
+        }
+    }
+
     private void doTestScoreBulkOffsets(int[] offsets, int offsetsCount, int count) throws Exception {
         final int bulkSize = ESNextOSQVectorsScorer.BULK_SIZE;
         final int maxDims = random().nextInt(1, 1000) * 2;

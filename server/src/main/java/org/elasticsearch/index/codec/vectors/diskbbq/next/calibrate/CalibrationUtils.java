@@ -10,6 +10,8 @@
 package org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate;
 
 import org.apache.lucene.index.FloatVectorValues;
+import org.apache.lucene.index.KnnVectorValues.DocIndexIterator;
+import org.apache.lucene.index.VectorSimilarityFunction;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -31,7 +33,7 @@ public final class CalibrationUtils {
 
     /**
      * Sampled data from a {@link FloatVectorValues}: materialized query vectors and
-     * ordinal indices into the original {@code FloatVectorValues} for the corpus.
+     * ordinal indices into the original {@code floatVectorValues} for the corpus.
      */
     public record SampledData(float[][] queries, int[] corpusOrdinals) {}
 
@@ -90,6 +92,94 @@ public final class CalibrationUtils {
         System.arraycopy(src, 0, scratch, 0, src.length);
         normalizeVector(scratch);
         return scratch;
+    }
+
+    /**
+     * Whether to apply the Neyshabur–Srebro lift (dot product → Euclidean in one higher dimension)
+     * before calibration, matching {@code auto_osq} for inner-product metrics.
+     */
+    public static boolean needsNeyshaburSrebroLift(VectorSimilarityFunction similarityFunction) {
+        return similarityFunction == VectorSimilarityFunction.DOT_PRODUCT
+            || similarityFunction == VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT;
+    }
+
+    /**
+     * Maximum squared L2 norm over the sampled corpus vectors (same statistic as reference
+     * {@code neyshaburSrebroTransform} over the calibration corpus subset).
+     */
+    public static double maxSquaredNormOverCorpusSample(FloatVectorValues vectorValues, int[] corpusOrdinals, int dim) throws IOException {
+        double maxNormSq = 0;
+        for (int ord : corpusOrdinals) {
+            float[] v = vectorValues.vectorValue(ord);
+            double normSq = dot(dim, v, v);
+            if (normSq > maxNormSq) {
+                maxNormSq = normSq;
+            }
+        }
+        return maxNormSq;
+    }
+
+    /**
+     * Lift query rows to {@code dim+1}: {@code [q, 0]} (reference: queries get a zero last coordinate).
+     */
+    public static float[][] liftQueriesForDotProduct(float[][] queries, int dim) {
+        float[][] lifted = new float[queries.length][dim + 1];
+        for (int i = 0; i < queries.length; i++) {
+            System.arraycopy(queries[i], 0, lifted[i], 0, dim);
+            lifted[i][dim] = 0f;
+        }
+        return lifted;
+    }
+
+    /**
+     * Corpus view that maps each vector {@code x} to {@code [x, sqrt(M - ||x||^2)]} with
+     * {@code M = maxNormSq} over the calibration corpus sample, per Neyshabur and Srebro (ICML 2015).
+     */
+    public static final class NeyshaburCorpusFloatVectorValues extends FloatVectorValues {
+        private final FloatVectorValues delegate;
+        private final int dim;
+        private final double maxNormSq;
+        private final float[] buffer;
+
+        public NeyshaburCorpusFloatVectorValues(FloatVectorValues delegate, int dim, double maxNormSq) {
+            this.delegate = delegate;
+            this.dim = dim;
+            this.maxNormSq = maxNormSq;
+            this.buffer = new float[dim + 1];
+        }
+
+        @Override
+        public float[] vectorValue(int ord) throws IOException {
+            float[] v = delegate.vectorValue(ord);
+            double normSq = 0;
+            for (int j = 0; j < dim; j++) {
+                float t = v[j];
+                buffer[j] = t;
+                normSq += (double) t * t;
+            }
+            buffer[dim] = (float) Math.sqrt(Math.max(0.0, maxNormSq - normSq));
+            return buffer;
+        }
+
+        @Override
+        public FloatVectorValues copy() throws IOException {
+            return new NeyshaburCorpusFloatVectorValues(delegate.copy(), dim, maxNormSq);
+        }
+
+        @Override
+        public int dimension() {
+            return dim + 1;
+        }
+
+        @Override
+        public int size() {
+            return delegate.size();
+        }
+
+        @Override
+        public DocIndexIterator iterator() {
+            return delegate.iterator();
+        }
     }
 
     /**

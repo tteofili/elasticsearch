@@ -20,4 +20,19 @@ package org.elasticsearch.index.codec.vectors.diskbbq;
  */
 public record PostingMetadata(long offset, long length, int queryCentroidOrdinal, float documentCentroidScore) {
     public static final int NO_ORDINAL = -1;
+
+    public PostingMetadata {
+        if (offset < 0) {
+            throw new IllegalArgumentException("offset must be >= 0, got: " + offset);
+        }
+        if (length < 0) {
+            throw new IllegalArgumentException("length must be >= 0, got: " + length);
+        }
+        if (queryCentroidOrdinal < NO_ORDINAL) {
+            throw new IllegalArgumentException("queryCentroidOrdinal must be >= " + NO_ORDINAL + ", got: " + queryCentroidOrdinal);
+        }
+        if (Float.isNaN(documentCentroidScore)) {
+            throw new IllegalArgumentException("documentCentroidScore must not be NaN");
+        }
+    }
 }

@@ -73,6 +73,7 @@ import static org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper.MAX_
 /**
  * A utility class to create and test KNN indices using Lucene.
  * It supports various index types (HNSW, FLAT, IVF) and configurations.
+ * IVF preconditioning defaults to enabled via {@link TestConfiguration} unless overridden in JSON.
  */
 public class KnnIndexTester {
     static final Logger logger;
