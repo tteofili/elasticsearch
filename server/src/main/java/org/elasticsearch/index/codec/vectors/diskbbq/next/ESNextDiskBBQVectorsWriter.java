@@ -243,6 +243,11 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             int cachedOrd = -1;
 
             @Override
+            public int getVectorByteLength() {
+                return vectors.getVectorByteLength();
+            }
+
+            @Override
             public float[] vectorValue(int ord) throws IOException {
                 assert ord != -1;
                 if (ord != cachedOrd) {
