@@ -11,11 +11,16 @@ package org.elasticsearch.index.codec.vectors.diskbbq.next.calibrate;
 
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
+import java.util.PriorityQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,8 +31,15 @@ import java.util.concurrent.TimeUnit;
  * Manifold model for distance/similarity as a function of rank and corpus size.
  * Fits a log-linear model: log(distance at rank k) ~ alpha + invDim * (log(k) - log(N)).
  * Used in calibration to predict expected distances and compute expected recall@k.
+ * <p>
+ * Average rank-distance estimation:
+ * per-query {@code TopK} heaps of capacity {@code 6 * k} are fed successive corpus slices
+ * without reset, so each sweep step uses the cumulative corpus prefix (not disjoint chunks).
+ * Dot, cosine, and maximum-inner-product metrics use negated float dot product in the heap
+ * (no extra L2 normalization).
  */
 public final class ManifoldModel {
+    private static final Logger logger = LogManager.getLogger(ManifoldModel.class);
 
     /**
      * multipliers for the manifold rank sweep:
@@ -180,6 +192,7 @@ public final class ManifoldModel {
         int[] ranksForK,
         int[] sampleSizes
     ) throws IOException {
+        long startNanos = System.nanoTime();
         int nQueries = queries.size();
         int nDocsTotal = corpusOrdinals.length;
         int m = Math.min(ranksForK.length, sampleSizes.length);
@@ -189,55 +202,32 @@ public final class ManifoldModel {
         double[] logSampleSizes = new double[m];
         double[] logDistances = new double[m];
 
-        float[] scratch = cosine ? new float[dim] : null;
         float[] queryScratch = new float[dim];
-        double[] distScratch = new double[MAX_MANIFOLD_CHUNK];
+        ManifoldTopK[] topKs = new ManifoldTopK[nQueries];
+        for (int qi = 0; qi < nQueries; qi++) {
+            topKs[qi] = new ManifoldTopK(similarityFunction, 6 * k);
+        }
+
         int sampleStart = 0;
         for (int i = 0; i < m; i++) {
             int rank = ranksForK[i];
             int sampleEnd = sampleSizes[i];
             if (sampleEnd > nDocsTotal) break;
-            int count = sampleEnd - sampleStart;
             double avgDist;
             if (nQueries >= PARALLEL_QUERY_THRESHOLD && Runtime.getRuntime().availableProcessors() > 1) {
-                avgDist = averageIthDistanceParallel(
-                    similarityFunction,
-                    dim,
-                    rank,
-                    queries,
-                    fvv,
-                    corpusOrdinals,
-                    sampleStart,
-                    sampleEnd,
-                    cosine,
-                    nQueries,
-                    count
-                );
+                avgDist = averageIthDistanceParallel(dim, rank, queries, fvv, corpusOrdinals, sampleStart, sampleEnd, topKs, nQueries);
             } else {
                 double sum = 0;
                 for (int qi = 0; qi < nQueries; qi++) {
                     queries.copyQuery(qi, false, queryScratch);
-                    double d = ithDistance(
-                        similarityFunction,
-                        dim,
-                        rank,
-                        queryScratch,
-                        fvv,
-                        corpusOrdinals,
-                        sampleStart,
-                        sampleEnd,
-                        cosine,
-                        scratch,
-                        distScratch,
-                        count
-                    );
-                    sum += d;
+                    topKs[qi].add(dim, queryScratch, fvv, corpusOrdinals, sampleStart, sampleEnd);
+                    sum += topKs[qi].ithDistance(rank);
                 }
                 avgDist = sum / nQueries;
             }
             logRanks[logCount] = Math.log(rank);
             logSampleSizes[logCount] = Math.log(sampleSizes[i]);
-            logDistances[logCount] = Math.log(Math.max(avgDist, 1e-38));
+            logDistances[logCount] = Math.log(avgDist);
             logCount++;
             sampleStart = sampleEnd;
         }
@@ -251,11 +241,19 @@ public final class ManifoldModel {
         double[] y = new double[logCount];
         System.arraycopy(logDistances, 0, y, 0, logCount);
         Regression.OLSResult res = Regression.fitOls(x, y);
+        double r2 = Regression.rSquared(x, y, res);
+        double elapsed = (System.nanoTime() - startNanos) / 1_000_000_000.0;
+        logger.info(
+            "------------------------------------------\nEstimated manifold parameters in [{}]s\ndist(k) = [{}] * (k/N)^[{}] (R² = [{}])",
+            String.format(Locale.ROOT, "%.4f", elapsed),
+            String.format(Locale.ROOT, "%.4f", Math.exp(res.beta0())),
+            String.format(Locale.ROOT, "%.4f", res.beta1()),
+            String.format(Locale.ROOT, "%.4f", r2)
+        );
         return new double[] { res.beta0(), res.beta1() };
     }
 
     private static double averageIthDistanceParallel(
-        VectorSimilarityFunction similarityFunction,
         int dim,
         int rank,
         CalibrationQueries queries,
@@ -263,9 +261,8 @@ public final class ManifoldModel {
         int[] corpusOrdinals,
         int start,
         int end,
-        boolean cosine,
-        int nQueries,
-        int count
+        ManifoldTopK[] topKs,
+        int nQueries
     ) throws IOException {
         int workers = Math.min(nQueries, Runtime.getRuntime().availableProcessors());
         double[] partialSums = new double[nQueries];
@@ -284,26 +281,12 @@ public final class ManifoldModel {
                 int w0 = w;
                 FloatVectorValues fvvCopy = fvv.copy();
                 futures.add(pool.submit(() -> {
-                    double[] localDists = new double[MAX_MANIFOLD_CHUNK];
-                    float[] localScratch = cosine ? new float[dim] : null;
                     float[] localQueryScratch = new float[dim];
                     for (int qi = queryStarts[w0]; qi < queryStarts[w0 + 1]; qi++) {
                         try {
                             queries.copyQuery(qi, false, localQueryScratch);
-                            partialSums[qi] = ithDistance(
-                                similarityFunction,
-                                dim,
-                                rank,
-                                localQueryScratch,
-                                fvvCopy,
-                                corpusOrdinals,
-                                start,
-                                end,
-                                cosine,
-                                localScratch,
-                                localDists,
-                                count
-                            );
+                            topKs[qi].add(dim, localQueryScratch, fvvCopy, corpusOrdinals, start, end);
+                            partialSums[qi] = topKs[qi].ithDistance(rank);
                         } catch (IOException e) {
                             throw new UncheckedIOException(e);
                         }
@@ -346,80 +329,69 @@ public final class ManifoldModel {
         return sum / nQueries;
     }
 
-    private static double ithDistance(
-        VectorSimilarityFunction similarityFunction,
-        int dim,
-        int rank,
-        float[] query,
-        FloatVectorValues fvv,
-        int[] corpusOrdinals,
-        int start,
-        int end,
-        boolean cosine,
-        float[] scratch,
-        double[] dists,
-        int count
-    ) throws IOException {
-        boolean isDot = isDotLike(similarityFunction);
-        for (int i = 0; i < count; i++) {
-            float[] doc = fvv.vectorValue(corpusOrdinals[start + i]);
-            if (cosine) {
-                doc = CalibrationUtils.copyAndNormalize(doc, scratch);
-            }
-            if (isDot) {
-                dists[i] = -CalibrationUtils.dot(dim, query, doc);
-            } else {
-                dists[i] = CalibrationUtils.euclideanSq(dim, query, doc);
-            }
-        }
-        int idx = Math.min(rank - 1, count - 1);
-        if (idx < 0) return 0;
-        quickSelect(dists, 0, count - 1, idx);
-        return isDot ? -dists[idx] : dists[idx];
-    }
-
     /**
-     * Partition-based selection (Hoare's quickselect) that rearranges {@code a} so that
-     * {@code a[k]} holds the value that would be at index {@code k} in a sorted array.
-     * Average O(n), worst-case O(n^2) but median-of-3 pivot makes worst case unlikely.
+     * Max-heap of up to {@code k} smallest float distances (float dot / float squared Euclidean).
      */
-    private static void quickSelect(double[] a, int lo, int hi, int k) {
-        while (lo < hi) {
-            int pivotIdx = medianOfThree(a, lo, lo + (hi - lo) / 2, hi);
-            double pivot = a[pivotIdx];
-            a[pivotIdx] = a[hi];
-            a[hi] = pivot;
+    static final class ManifoldTopK {
+        private final VectorSimilarityFunction similarityFunction;
+        private final int capacity;
+        private final PriorityQueue<Float> pq;
 
-            int store = lo;
-            for (int i = lo; i < hi; i++) {
-                if (a[i] < pivot) {
-                    double tmp = a[store];
-                    a[store] = a[i];
-                    a[i] = tmp;
-                    store++;
+        ManifoldTopK(VectorSimilarityFunction similarityFunction, int capacity) {
+            this.similarityFunction = similarityFunction;
+            this.capacity = capacity;
+            this.pq = new PriorityQueue<>(capacity, Comparator.reverseOrder());
+        }
+
+        void add(int dim, float[] query, FloatVectorValues fvv, int[] corpusOrdinals, int startDoc, int endDoc) throws IOException {
+            boolean dotLike = isDotLike(similarityFunction);
+            for (int d = startDoc; d < endDoc; d++) {
+                float[] doc = fvv.vectorValue(corpusOrdinals[d]);
+                float dist = dotLike ? -dotFloat(dim, query, doc) : euclideanSqFloat(dim, query, doc);
+                if (pq.size() < capacity) {
+                    pq.offer(dist);
+                } else if (dist < pq.peek()) {
+                    pq.poll();
+                    pq.offer(dist);
                 }
             }
-            a[hi] = a[store];
-            a[store] = pivot;
+        }
 
-            if (store == k) {
-                return;
-            } else if (k < store) {
-                hi = store - 1;
-            } else {
-                lo = store + 1;
+        /**
+         * {@code rank}-th smallest stored distance (1-based).
+         */
+        float ithDistance(int rank) {
+            PriorityQueue<Float> pqCopy = new PriorityQueue<>(capacity, Comparator.reverseOrder());
+            pqCopy.addAll(pq);
+            for (int j = 0; j < capacity - rank; j++) {
+                pqCopy.poll();
             }
+            Float top = pqCopy.peek();
+            if (top == null) {
+                return 0f;
+            }
+            float val = top;
+            return isDotLike(similarityFunction) ? -val : val;
         }
     }
 
-    private static int medianOfThree(double[] a, int i, int j, int k) {
-        if (a[i] > a[j]) {
-            if (a[j] > a[k]) return j;
-            return a[i] > a[k] ? k : i;
-        } else {
-            if (a[i] > a[k]) return i;
-            return a[j] > a[k] ? k : j;
+    /** Float dot product. */
+    static float dotFloat(int dim, float[] x, float[] y) {
+        float sum = 0f;
+        for (int i = 0; i < dim; i++) {
+            sum += x[i] * y[i];
         }
+        return sum;
+    }
+
+    /** Float squared Euclidean distance. */
+    static float euclideanSqFloat(int dim, float[] x, float[] y) {
+        float sum = 0f;
+        for (int i = 0; i < dim; i++) {
+            float d = x[i] - y[i];
+            sum += d * d;
+        }
+        return sum;
     }
 
     /**

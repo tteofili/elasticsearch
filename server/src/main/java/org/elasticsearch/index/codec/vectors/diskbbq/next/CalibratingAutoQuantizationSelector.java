@@ -28,6 +28,7 @@ import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
 import java.util.EnumMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -41,8 +42,8 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
     private static final Logger logger = LogManager.getLogger(CalibratingAutoQuantizationSelector.class);
 
     static final double DEFAULT_TARGET_RECALL = 0.97;
-    static final int DEFAULT_K = 100;
-    static final int MIN_VECTORS_FOR_CALIBRATION = 4096;
+    static final int DEFAULT_K = 10;
+    static final int MIN_VECTORS_FOR_CALIBRATION = 100000;
 
     /**
      * If the merged segment is more than this factor larger than the largest input segment,
@@ -338,6 +339,12 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
             dimWork
         );
 
+        logger.info("Read {} corpus vectors of dimension {}", corpusOrdinals.length, dim);
+        logger.info("Sampled {} queries from the corpus", queryOrdinals.length);
+        logger.info("Using {} documents per cluster", vectorsPerCluster);
+        logger.info("Calibrating quantization parameters");
+        logger.info("block dim: {}", blockDimension);
+
         // Manifold model uses original (un-preconditioned) data; after optional Neyshabur lift for dot/MIP.
         double[] manifold = ManifoldModel.estimateManifoldParameters(
             similarityFunction,
@@ -396,25 +403,25 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
                     double errorStd = errorModel.quantizeRepErrorStd(vectorsPerCluster, N);
                     double expected = ExpectedRecall.expectedRecallAtK(similarityFunction, N, alpha, invDim, errorStd, k, rerankVal);
 
-                    if (logger.isDebugEnabled()) {
-                        logger.debug(
-                            "Calibration: encoding [{}] precondition [{}] rerank [{}] oversample [{}] -> expected recall [{}]",
-                            candidate.encoding(),
-                            precondition,
-                            rerankVal,
-                            oversample,
-                            expected
-                        );
-                    }
+                    logger.info(
+                        "Quantization recall(({}, {}) | {}, {}) = {}%",
+                        candidate.qbits(),
+                        candidate.dbits(),
+                        rerankVal,
+                        precondition ? "precondition" : "no precondition",
+                        String.format(Locale.ROOT, "%.2f", expected * 100.0)
+                    );
 
                     if (expected >= targetRecall) {
                         logger.info(
-                            "Calibration selected encoding [{}] (precondition={}, rerank={}, oversample={}) with expected recall [{}]",
+                            "Selected: encoding [{}] docs per cluster {} preconditioning {} {} query bits {} document bits rerank {} candidates (expected recall {}%)",
                             candidate.encoding(),
+                            vectorsPerCluster,
                             precondition,
+                            candidate.qbits(),
+                            candidate.dbits(),
                             rerankVal,
-                            oversample,
-                            expected
+                            String.format(Locale.ROOT, "%.2f", expected * 100.0)
                         );
                         return new CalibrationResult(candidate.encoding(), oversample, precondition);
                     }
@@ -495,6 +502,12 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
             dimWork
         );
 
+        logger.info("Read {} corpus vectors of dimension {} (fast calibration sample)", corpusOrdinals.length, dim);
+        logger.info("Sampled {} queries from the corpus", queryOrdinals.length);
+        logger.info("Using {} documents per cluster", vectorsPerCluster);
+        logger.info("Calibrating quantization parameters (fast)");
+        logger.info("block dim: {}", blockDimension);
+
         double[] manifold = ManifoldModel.estimateManifoldParametersFast(
             similarityFunction,
             dimWork,
@@ -550,38 +563,40 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
                     double errorStd = errorModel.quantizeRepErrorStd(vectorsPerCluster, N);
                     double expected = ExpectedRecall.expectedRecallAtK(similarityFunction, N, alpha, invDim, errorStd, k, rerankVal);
 
-                    if (logger.isDebugEnabled()) {
-                        logger.debug(
-                            "Fast calibration: encoding [{}] precondition [{}] rerank [{}] oversample [{}] -> expected recall [{}]",
-                            candidate.encoding(),
-                            precondition,
-                            rerankVal,
-                            oversample,
-                            expected
-                        );
-                    }
+                    logger.info(
+                        "Quantization recall(({}, {}) | {}, {}) = {}%",
+                        candidate.qbits(),
+                        candidate.dbits(),
+                        rerankVal,
+                        precondition ? "precondition" : "no precondition",
+                        String.format(Locale.ROOT, "%.2f", expected * 100.0)
+                    );
 
                     if (expected >= targetRecall) {
                         if (mergeCtx != null) {
                             logger.info(
-                                "Fast calibration selected encoding [{}] (precondition={}, rerank={}, oversample={}) with expected recall [{}] [inputSegments={} mergeKind={} mergeMaxNumSegments={}]",
+                                "Fast calibration Selected: encoding [{}] docs per cluster {} preconditioning {} {} query bits {} document bits rerank {} candidates (expected recall {}%) [inputSegments={} mergeKind={} mergeMaxNumSegments={}]",
                                 candidate.encoding(),
+                                vectorsPerCluster,
                                 precondition,
+                                candidate.qbits(),
+                                candidate.dbits(),
                                 rerankVal,
-                                oversample,
-                                expected,
+                                String.format(Locale.ROOT, "%.2f", expected * 100.0),
                                 mergeCtx.inputSegments(),
                                 mergeCtx.mergeKind(),
                                 mergeCtx.mergeMaxNumSegmentsForLog()
                             );
                         } else {
                             logger.info(
-                                "Fast calibration selected encoding [{}] (precondition={}, rerank={}, oversample={}) with expected recall [{}]",
+                                "Fast calibration Selected: encoding [{}] docs per cluster {} preconditioning {} {} query bits {} document bits rerank {} candidates (expected recall {}%)",
                                 candidate.encoding(),
+                                vectorsPerCluster,
                                 precondition,
+                                candidate.qbits(),
+                                candidate.dbits(),
                                 rerankVal,
-                                oversample,
-                                expected
+                                String.format(Locale.ROOT, "%.2f", expected * 100.0)
                             );
                         }
                         return new FastCalibrationOutcome(new CalibrationResult(candidate.encoding(), oversample, precondition), true);

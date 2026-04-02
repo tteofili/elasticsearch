@@ -20,6 +20,7 @@ import org.elasticsearch.logging.Logger;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Locale;
 
 /**
  * Error model for representation (quantization) error in scalar quantization.
@@ -469,9 +470,14 @@ public final class ErrorModel {
         int m = nDocsPerClusterArray.length;
         int nDocsTotal = corpusOrdinals.length;
 
+        logger.info("Fitting error scaling models");
+        long scalingStartNanos = System.nanoTime();
+
         double[] x = new double[m];
         double[] logCStd = new double[m];
         double[] logQStd = new double[m];
+        double[] logNDocsRow = new double[m];
+        double[] logSampleRow = new double[m];
         int mActual = 0;
 
         for (int i = 0; i < m; i++) {
@@ -498,10 +504,15 @@ public final class ErrorModel {
                     1,
                     k
                 );
-                x[mActual] = Math.log(nDocsPerClusterArray[i]) - Math.log(sampleSizesArray[i]);
+                logNDocsRow[mActual] = Math.log(nDocsPerClusterArray[i]);
+                logSampleRow[mActual] = Math.log(sampleSizesArray[i]);
+                x[mActual] = logNDocsRow[mActual] - logSampleRow[mActual];
                 logCStd[mActual] = Math.log(Math.max(stds[0], 1e-38));
                 logQStd[mActual] = Math.log(Math.max(stds[1], 1e-38));
                 mActual++;
+                if (mActual % 5 == 0) {
+                    logger.info("Processed {}/{} samples", mActual, m);
+                }
             } catch (IOException e) {
                 logger.warn("failed to compute rep error stds for sample size [{}]", ss, e);
             }
@@ -510,8 +521,29 @@ public final class ErrorModel {
         if (mActual < 2) {
             return new RepErrorStdModel(Regression.OLSResult.ZERO, Regression.OLSResult.ZERO);
         }
-        Regression.OLSResult cparams = Regression.fitOls(Arrays.copyOf(x, mActual), Arrays.copyOf(logCStd, mActual));
-        Regression.OLSResult qparams = Regression.fitOls(Arrays.copyOf(x, mActual), Arrays.copyOf(logQStd, mActual));
+        double[] xFit = Arrays.copyOf(x, mActual);
+        double[] logCFit = Arrays.copyOf(logCStd, mActual);
+        double[] logQFit = Arrays.copyOf(logQStd, mActual);
+        Regression.OLSResult cparams = Regression.fitOls(xFit, logCFit);
+        Regression.OLSResult qparams = Regression.fitOls(xFit, logQFit);
+
+        double[] logNDocsPerCluster = Arrays.copyOf(logNDocsRow, mActual);
+        double[] logSampleSizes = Arrays.copyOf(logSampleRow, mActual);
+
+        double scalingSeconds = (System.nanoTime() - scalingStartNanos) / 1_000_000_000.0;
+        double r2c = repErrorStdR2(logNDocsPerCluster, logSampleSizes, logCFit, cparams);
+        double r2q = repErrorStdR2(logNDocsPerCluster, logSampleSizes, logQFit, qparams);
+        logger.info(
+            "--------------------------------------\nFit error scaling models in {}s\n"
+                + "centroid error {} (L/N)^{} (R² = {})\n"
+                + "quantization error ∝ (L/N)^{} (R² = {})",
+            String.format(Locale.ROOT, "%.5f", scalingSeconds),
+            String.format(Locale.ROOT, "%.4f", Math.exp(cparams.beta0())),
+            String.format(Locale.ROOT, "%.4f", cparams.beta1()),
+            String.format(Locale.ROOT, "%.4f", r2c),
+            String.format(Locale.ROOT, "%.4f", qparams.beta1()),
+            String.format(Locale.ROOT, "%.4f", r2q)
+        );
 
         if (logger.isDebugEnabled()) {
             logger.debug(
@@ -523,6 +555,21 @@ public final class ErrorModel {
         }
 
         return new RepErrorStdModel(cparams, qparams);
+    }
+
+    /** R² for log(error) ~ beta0 + beta1 * (log(L) - log(N)). */
+    private static double repErrorStdR2(
+        double[] logNDocsPerCluster,
+        double[] logSampleSizes,
+        double[] logErrorStd,
+        Regression.OLSResult res
+    ) {
+        int n = logErrorStd.length;
+        double[] x = new double[n];
+        for (int i = 0; i < n; i++) {
+            x[i] = logNDocsPerCluster[i] - logSampleSizes[i];
+        }
+        return Regression.rSquared(x, logErrorStd, res);
     }
 
     /**
@@ -611,6 +658,8 @@ public final class ErrorModel {
         int m = nDocsPerClusterArray.length;
         int sampleSize = Math.min(SAMPLE_SIZE_MAGNITUDE, corpusOrdinals.length);
 
+        long magnitudeStartNanos = System.nanoTime();
+
         double[] logNDocs = new double[m];
         double[] logSizes = new double[m];
         double[] logQStd = new double[m];
@@ -644,11 +693,19 @@ public final class ErrorModel {
         if (mActual < 2) {
             return scalingModel;
         }
-        Regression.OLSResult qparams = fitRepErrorStdPlugin(
-            scalingModel,
-            Arrays.copyOf(logNDocs, mActual),
-            Arrays.copyOf(logSizes, mActual),
-            Arrays.copyOf(logQStd, mActual)
+        double[] logNDocsTrim = Arrays.copyOf(logNDocs, mActual);
+        double[] logSizesTrim = Arrays.copyOf(logSizes, mActual);
+        double[] logQTrim = Arrays.copyOf(logQStd, mActual);
+        Regression.OLSResult qparams = fitRepErrorStdPlugin(scalingModel, logNDocsTrim, logSizesTrim, logQTrim);
+
+        double magnitudeSeconds = (System.nanoTime() - magnitudeStartNanos) / 1_000_000_000.0;
+        double r2Mag = repErrorStdR2(logNDocsTrim, logSizesTrim, logQTrim, qparams);
+        logger.info(
+            "--------------------------------------\nFit error magnitude models in {}s\nquantization error {} (L/N)^{} (R² = {})",
+            String.format(Locale.ROOT, "%.2f", magnitudeSeconds),
+            String.format(Locale.ROOT, "%.4f", Math.exp(qparams.beta0())),
+            String.format(Locale.ROOT, "%.4f", qparams.beta1()),
+            String.format(Locale.ROOT, "%.4f", r2Mag)
         );
 
         if (logger.isDebugEnabled()) {

@@ -437,6 +437,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     indexVersionCreated,
                     false,
                     bits,
+                    true,
                     experimentalFeaturesEnabled
                 );
             }

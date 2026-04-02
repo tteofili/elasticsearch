@@ -82,4 +82,27 @@ public final class Regression {
         double std = Math.sqrt(varYHat + res.sigmaSq());
         return new Prediction(yHat, std);
     }
+
+    /**
+     * Coefficient of determination R² for y = beta0 + beta1 * x.
+     */
+    public static double rSquared(double[] x, double[] y, OLSResult res) {
+        int m = x.length;
+        double sumY = 0;
+        double sumYY = 0;
+        double sumRes = 0;
+        for (int i = 0; i < m; i++) {
+            double yi = y[i];
+            double yPred = res.beta0() + res.beta1() * x[i];
+            sumY += yi;
+            sumYY += yi * yi;
+            double e = yi - yPred;
+            sumRes += e * e;
+        }
+        double denom = sumYY - sumY * sumY / m;
+        if (denom == 0) {
+            return 0;
+        }
+        return 1.0 - sumRes / denom;
+    }
 }
