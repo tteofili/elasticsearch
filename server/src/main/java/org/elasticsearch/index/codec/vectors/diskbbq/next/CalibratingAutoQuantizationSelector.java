@@ -43,7 +43,7 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
 
     static final double DEFAULT_TARGET_RECALL = 0.97;
     static final int DEFAULT_K = 10;
-    static final int MIN_VECTORS_FOR_CALIBRATION = 100000;
+    static final int MIN_VECTORS_FOR_CALIBRATION = 10_000;
 
     /**
      * If the merged segment is more than this factor larger than the largest input segment,
@@ -120,7 +120,7 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
         int N = floatVectorValues.size();
 
         if (N < MIN_VECTORS_FOR_CALIBRATION) {
-            return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC, DEFAULT_CALIBRATED_OVERSAMPLE, false);
+            return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, DEFAULT_CALIBRATED_OVERSAMPLE, false);
         }
 
         if (mergeState != null) {

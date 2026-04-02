@@ -55,8 +55,6 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
 
     static final TopDocs NO_RESULTS = TopDocsCollector.EMPTY_TOPDOCS;
 
-    static final int OVERSAMPLE_LIMIT = 10_000;
-
     protected final String field;
     protected final float providedVisitRatio;
     protected final int k;
@@ -141,11 +139,13 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
             filterWeight = null;
         }
 
+        float calibratedOversample = useCalibrationOversample ? resolveCalibratedOversample(reader.leaves()) : 1f;
+
         // we request numCands as we are using it as an approximation measure
         // we need to ensure we are getting at least 2*k results to ensure we cover overspill duplicates
         // TODO move the logic for automatically adjusting percentages to the query, so we can only pass
         // 2k to the collector.
-        IVFCollectorManager knnCollectorManager = getKnnCollectorManager(Math.round(2f * k), indexSearcher);
+        IVFCollectorManager knnCollectorManager = getKnnCollectorManager(Math.round(2f * k * calibratedOversample), indexSearcher);
         TaskExecutor taskExecutor = indexSearcher.getTaskExecutor();
         List<LeafReaderContext> leafReaderContexts = reader.leaves();
 
@@ -155,7 +155,8 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
 
         List<Callable<TopDocs>> tasks = new ArrayList<>(leafReaderContexts.size());
         for (LeafReaderContext context : leafReaderContexts) {
-            if (doPrecondition) {
+            // TODO : make sure we favour the user provided parameter
+            if (doPrecondition || resolveCalibratedDoPrecondition(leafReaderContexts)) {
                 preconditionQuery(context);
             }
             tasks.add(() -> searchLeaf(context, filterWeight, knnCollectorManager, visitRatio));
@@ -163,18 +164,24 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
         TopDocs[] perLeafResults = taskExecutor.invokeAll(tasks).toArray(TopDocs[]::new);
 
         // Merge sort the results
-        TopDocs topK = TopDocs.merge(k, perLeafResults);
+        int calibratedK = (int) (k * calibratedOversample);
+        TopDocs topK = TopDocs.merge(calibratedK, perLeafResults);
         vectorOpsCount = (int) topK.totalHits.value();
         if (topK.scoreDocs.length == 0) {
             return Queries.NO_DOCS_INSTANCE;
         }
-        return new KnnScoreDocQuery(topK.scoreDocs, reader);
+        KnnScoreDocQuery topDocsQuery = new KnnScoreDocQuery(topK.scoreDocs, reader);
+        if (useCalibrationOversample) {
+            return getAutoRescoreQuery(indexSearcher, topK, calibratedK);
+        } else {
+            return topDocsQuery;
+        }
     }
 
     /**
-     * Returns a query that performs exact rescoring of oversampled candidates.
-     * Implementations can return {@code null} when rescoring is unavailable.
-     */
+        * Returns a query that performs exact rescoring of oversampled candidates.
+        * Implementations can return {@code null} when rescoring is unavailable.
+        */
     protected Query getAutoRescoreQuery(IndexSearcher indexSearcher, TopDocs topOversampled, int effectiveK) {
         return null;
     }
