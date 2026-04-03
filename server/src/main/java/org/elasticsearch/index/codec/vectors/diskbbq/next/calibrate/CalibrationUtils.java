@@ -103,8 +103,8 @@ public final class CalibrationUtils {
     }
 
     /**
-     * Whether to apply the Neyshabur–Srebro lift (dot product → Euclidean in one higher dimension)
-     * before calibration, matching {@code auto_osq} for inner-product metrics.
+     * Whether to apply the Neyshabur–Srebro lift (dot product -> Euclidean in one higher dimension)
+     * before calibration.
      */
     public static boolean needsNeyshaburSrebroLift(VectorSimilarityFunction similarityFunction) {
         return similarityFunction == VectorSimilarityFunction.DOT_PRODUCT
@@ -196,7 +196,6 @@ public final class CalibrationUtils {
 
     /**
      * Sample random, disjoint query and corpus subsets from {@link FloatVectorValues}.
-     * Uses bounded memory (no {@code O(n)} permutation array): two small sets of ordinals.
      */
     static SampledData sampleData(FloatVectorValues vectorValues, int dim, int maxQuerySample, int maxCorpusSample) throws IOException {
         int n = vectorValues.size();

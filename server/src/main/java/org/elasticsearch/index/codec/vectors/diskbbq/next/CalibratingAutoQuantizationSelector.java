@@ -358,8 +358,8 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
         double alpha = manifold[0];
         double invDim = manifold[1];
 
-        // Reference auto_osq: always fit the error scaling model on random orthogonal transforms,
-        // independent of whether the field enables preconditioning at index time.
+        // fit the error scaling model on random orthogonal transforms,
+        // independent of whether the field enables preconditioning at index time
         FloatVectorValues fvvOrth = preconditionFvv(fvvForCalibration, calibrationPreconditioner);
 
         RepErrorStdModel errorScalingModel = ErrorModel.estimateRepErrorStdScalingParameter(

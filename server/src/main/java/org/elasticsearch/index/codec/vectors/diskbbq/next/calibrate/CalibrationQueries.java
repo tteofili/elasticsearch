@@ -89,7 +89,13 @@ public final class CalibrationQueries {
     }
 
     public int size() {
-        return materializedRows != null ? materializedRows.length : queryOrdinals.length;
+        if (materializedRows != null) {
+            return materializedRows.length;
+        } else if(queryOrdinals != null) {
+            return queryOrdinals.length;
+        } else {
+            throw new IllegalStateException("no query source");
+        }
     }
 
     public int dimension() {
@@ -112,6 +118,8 @@ public final class CalibrationQueries {
                 dst[baseDim] = 0f;
             }
         } else {
+            assert baseFvv != null;
+            assert queryOrdinals != null;
             float[] raw = baseFvv.vectorValue(queryOrdinals[index]);
             System.arraycopy(raw, 0, dst, 0, baseDim);
             if (cosine) {

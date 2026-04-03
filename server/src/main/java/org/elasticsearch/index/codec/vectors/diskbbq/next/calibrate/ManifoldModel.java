@@ -125,7 +125,7 @@ public final class ManifoldModel {
         boolean cosine,
         int k
     ) throws IOException {
-        return estimateManifoldParameters(similarityFunction, dim, queries, fvv, corpusOrdinals, cosine, k, ranksForK(k), SAMPLE_SIZES);
+        return estimateManifoldParameters(similarityFunction, dim, queries, fvv, corpusOrdinals, k, ranksForK(k), SAMPLE_SIZES);
     }
 
     /**
@@ -146,7 +146,6 @@ public final class ManifoldModel {
             queries,
             fvv,
             corpusOrdinals,
-            cosine,
             k,
             ranksForKFast(k),
             SAMPLE_SIZES_FAST
@@ -170,16 +169,15 @@ public final class ManifoldModel {
     }
 
     /**
-     * Estimate manifold parameters (alpha, invDim) from query-corpus distances at various
+     * Estimate manifold parameters (log(alpha), invDim) from query-corpus distances at various
      * ranks and sample sizes. Corpus vectors are accessed lazily via {@code fvv} and
-     * {@code corpusOrdinals} rather than materializing a {@code float[][]}.
+     * {@code corpusOrdinals}.
      *
      * @param fvv the underlying vector values source
      * @param corpusOrdinals ordinal indices into {@code fvv} for the corpus subset
-     * @param cosine if true, corpus vectors are L2-normalized into a scratch buffer before distance computation
      * @param ranksForK the rank values to sweep
      * @param sampleSizes the corpus sample sizes to sweep (must be same length as ranksForK)
-     * @return double[2] containing {alpha, invDim}
+     * @return double[2] containing {log(alpha), invDim}
      */
     static double[] estimateManifoldParameters(
         VectorSimilarityFunction similarityFunction,
@@ -187,7 +185,6 @@ public final class ManifoldModel {
         CalibrationQueries queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
-        boolean cosine,
         int k,
         int[] ranksForK,
         int[] sampleSizes
@@ -218,6 +215,7 @@ public final class ManifoldModel {
                 avgDist = averageIthDistanceParallel(dim, rank, queries, fvv, corpusOrdinals, sampleStart, sampleEnd, topKs, nQueries);
             } else {
                 double sum = 0;
+                // compute average rank-th distance across sampled queries
                 for (int qi = 0; qi < nQueries; qi++) {
                     queries.copyQuery(qi, false, queryScratch);
                     topKs[qi].add(dim, queryScratch, fvv, corpusOrdinals, sampleStart, sampleEnd);
@@ -234,12 +232,17 @@ public final class ManifoldModel {
         if (logCount < 2) {
             return new double[] { 0, 0 };
         }
+        // builds regression variables:
+        // x = log(rank) - log(sampleSize) = log(k/N)
+        // y = log(distance)
         double[] x = new double[logCount];
         for (int i = 0; i < logCount; i++) {
             x[i] = logRanks[i] - logSampleSizes[i];
         }
         double[] y = new double[logCount];
         System.arraycopy(logDistances, 0, y, 0, logCount);
+
+        // fit regression model (log(alpha) and 1/d) and compute R²
         Regression.OLSResult res = Regression.fitOls(x, y);
         double r2 = Regression.rSquared(x, y, res);
         double elapsed = (System.nanoTime() - startNanos) / 1_000_000_000.0;
