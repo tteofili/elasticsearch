@@ -734,7 +734,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] overspillAssignments,
         MergeState mergeState
     ) {
-        if (quantizationAuto) {
+        if (quantizationAuto && mergeState != null) {
             return autoQuantizationSelector.select(
                 fieldInfo,
                 floatVectorValues,

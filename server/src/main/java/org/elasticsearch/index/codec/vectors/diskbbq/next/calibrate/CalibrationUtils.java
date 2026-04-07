@@ -26,7 +26,7 @@ public final class CalibrationUtils {
 
     static final int MAX_QUERY_SAMPLE = 1024;
     static final int MAX_CORPUS_SAMPLE = 16384;
-    static final int MAX_QUERY_SAMPLE_FAST = 48;
+    static final int MAX_QUERY_SAMPLE_FAST = 128;
     static final int MAX_CORPUS_SAMPLE_FAST = 8192;
     static final long CALIBRATION_SEED = 215873873L;
 
