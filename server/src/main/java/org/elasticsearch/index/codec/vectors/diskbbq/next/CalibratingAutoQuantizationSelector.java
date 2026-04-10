@@ -131,53 +131,29 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
         MergeCalibrationContext mergeCtx = MergeCalibrationContext.from(mergeState);
         if (mergeCtx.boundedForceMerge()) {
             logger.info(
-                "Merge calibration: bounded force merge (mergeMaxNumSegments=[{}], inputSegments=[{}]), skipping metadata reuse; running fast calibration",
+                "Merge calibration: bounded force merge (mergeMaxNumSegments=[{}], inputSegments=[{}]), skipping metadata reuse; running calibration",
                 mergeCtx.mergeMaxNumSegmentsForLog(),
                 mergeCtx.inputSegments()
             );
             try {
-                FastCalibrationOutcome fastOutcome = runFastCalibration(floatVectorValues, dim, similarityFunction, numVectors, mergeCtx);
-                if (fastOutcome.metTargetRecall()) {
-                    return fastOutcome.result();
-                }
-                logger.info(
-                    "Merge calibration: fast path did not meet target recall [{}], running full calibration [inputSegments={} mergeKind={} mergeMaxNumSegments={}]",
-                    targetRecall,
-                    mergeCtx.inputSegments(),
-                    mergeCtx.mergeKind(),
-                    mergeCtx.mergeMaxNumSegmentsForLog()
-                );
-                try {
-                    return calibrate(floatVectorValues, dim, similarityFunction, numVectors);
-                } catch (IOException e) {
-                    logger.warn("full calibration failed after bounded-merge fast miss, falling back to ONE_BIT_4BIT_QUERY", e);
-                    return new CalibrationResult(
-                        ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
-                        NO_CALIBRATED_OVERSAMPLE,
-                        false
-                    );
-                }
+                return calibrate(floatVectorValues, dim, similarityFunction, numVectors);
+            } catch (IOException e) {
+                logger.warn("full calibration failed after bounded-merge fast miss, falling back to ONE_BIT_4BIT_QUERY", e);
+                return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, NO_CALIBRATED_OVERSAMPLE, false);
+            }
+        } else {
+            CalibrationResult reused = selectFromMergeState(fieldInfo, floatVectorValues, centroidSupplier, mergeState, mergeCtx);
+            if (reused != null) {
+                return reused;
+            }
+            logger.debug("Merge calibration reuse not possible, running fast calibration");
+            try {
+                return calibrateFast(floatVectorValues, dim, similarityFunction, numVectors, mergeCtx);
             } catch (IOException e) {
                 logger.warn("fast calibration failed, falling back to ONE_BIT_4BIT_QUERY", e);
-                return new CalibrationResult(
-                    ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
-                    NO_CALIBRATED_OVERSAMPLE,
-                    false
-                );
+                return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, NO_CALIBRATED_OVERSAMPLE, false);
             }
         }
-        CalibrationResult reused = selectFromMergeState(fieldInfo, floatVectorValues, centroidSupplier, mergeState, mergeCtx);
-        if (reused != null) {
-            return reused;
-        }
-        logger.debug("Merge calibration reuse not possible, running fast calibration");
-        try {
-            return calibrateFast(floatVectorValues, dim, similarityFunction, numVectors, mergeCtx);
-        } catch (IOException e) {
-            logger.warn("fast calibration failed, falling back to ONE_BIT_4BIT_QUERY", e);
-            return new CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, NO_CALIBRATED_OVERSAMPLE, false);
-        }
-
     }
 
     /**

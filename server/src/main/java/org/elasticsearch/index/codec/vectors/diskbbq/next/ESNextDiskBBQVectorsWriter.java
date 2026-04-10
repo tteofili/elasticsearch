@@ -228,7 +228,6 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             if (preconditioner != null) {
                 savedPreconditioner = preconditioner;
             }
-            return vectors;
         }
         if (doPrecondition == false) {
             return vectors;
@@ -748,7 +747,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
     /**
-     * When quantizationAuto is true and calibration determined preconditioning helps,
+     * When quantizationAuto is true and calibration recommends preconditioning,
      * applies the saved preconditioner to second-level cluster centroids (in-place) and the
      * global centroid (in-place). First-level centroids are handled via a wrapping supplier.
      */
