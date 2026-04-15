@@ -179,12 +179,10 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
     }
 
     /**
-        * Returns a query that performs exact rescoring of oversampled candidates.
-        * Implementations can return {@code null} when rescoring is unavailable.
-        */
-    protected Query getAutoRescoreQuery(IndexSearcher indexSearcher, TopDocs topOversampled, int effectiveK) {
-        return null;
-    }
+     * Returns a query that performs exact rescoring of oversampled candidates.
+     * Implementations can return {@code null} when rescoring is unavailable.
+     */
+    abstract Query getAutoRescoreQuery(IndexSearcher indexSearcher, TopDocs topOversampled, int effectiveK);
 
     /**
      * Iterates segment readers and returns true if any segment has calibration-determined

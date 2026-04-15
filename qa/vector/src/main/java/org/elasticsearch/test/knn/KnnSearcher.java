@@ -737,7 +737,7 @@ public class KnnSearcher {
                 indexType == KnnIndexTester.IndexType.HNSW && searchParameters.earlyTermination()
             );
         }
-        if (searchParameters.overSamplingFactor() > 1f) {
+        if (searchParameters.overSamplingFactor() > 1f && useCalibrationOversample == false) {
             // oversample the topK results to get more candidates for the final result
             knnQuery = RescoreKnnVectorQuery.fromInnerQuery(
                 VECTOR_FIELD,
