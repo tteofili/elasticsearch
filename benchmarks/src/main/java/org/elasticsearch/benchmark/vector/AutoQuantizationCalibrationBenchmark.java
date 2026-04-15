@@ -23,7 +23,7 @@ import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansResult;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidAssignments;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
-import org.elasticsearch.index.codec.vectors.diskbbq.next.CalibratingAutoQuantizationSelector;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ManifoldErrorCalibrationSelector;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -44,7 +44,7 @@ import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
 /**
- * JMH benchmark for {@link CalibratingAutoQuantizationSelector} calibration on synthetic vectors.
+ * JMH benchmark for {@link ManifoldErrorCalibrationSelector} calibration on synthetic vectors.
  * Run with:
  * {@code ./gradlew -p benchmarks run --args 'AutoQuantizationCalibrationBenchmark'}
  */
@@ -60,7 +60,7 @@ public class AutoQuantizationCalibrationBenchmark {
         Utils.configureBenchmarkLogging();
     }
 
-    private CalibratingAutoQuantizationSelector selector;
+    private ManifoldErrorCalibrationSelector selector;
     private KMeansFloatVectorValues fvv;
     private CentroidSupplier supplier;
     private CentroidAssignments assignments;
@@ -93,7 +93,7 @@ public class AutoQuantizationCalibrationBenchmark {
 
         fieldInfo = fieldInfoFromTinyIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
 
-        selector = new CalibratingAutoQuantizationSelector(ESNextDiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER);
+        selector = new ManifoldErrorCalibrationSelector(ESNextDiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER);
     }
 
     private static FieldInfo fieldInfoFromTinyIndex(int dimension, VectorSimilarityFunction similarity) throws IOException {

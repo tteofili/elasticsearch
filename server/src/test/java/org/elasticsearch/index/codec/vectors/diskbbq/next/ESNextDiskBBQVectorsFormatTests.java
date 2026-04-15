@@ -286,7 +286,7 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
                         float oversample = calibrationReader.getOversampleFactor(fieldInfo);
                         assertTrue(
                             "calibrated oversample should be non-negative, got " + oversample,
-                            oversample >= AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE
+                            oversample >= AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE
                         );
                         // doPrecondition round-trips with calibration metadata
                         calibrationReader.shouldPrecondition(fieldInfo);
@@ -303,7 +303,7 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         boolean expectedDoPrecondition = true;
         ESNextDiskBBQVectorsFormat.QuantEncoding expectedEncoding = ESNextDiskBBQVectorsFormat.QuantEncoding.TWO_BIT_4BIT_QUERY;
 
-        AutoQuantizationSelector fixedSelector = new AutoQuantizationSelector() {
+        AutoCalibrationSelector fixedSelector = new AutoCalibrationSelector() {
             @Override
             public CalibrationResult select(
                 FieldInfo fieldInfo,
@@ -362,11 +362,11 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
     public void testCalibratedOversampleSentinelRoundTrip() throws IOException {
         int dimensions = random().nextInt(16, 64);
         int numDocs = random().nextInt(600, 1200);
-        float expectedOversample = AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
+        float expectedOversample = AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE;
         boolean expectedDoPrecondition = false;
         ESNextDiskBBQVectorsFormat.QuantEncoding expectedEncoding = ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC;
 
-        AutoQuantizationSelector fixedSelector = new AutoQuantizationSelector() {
+        AutoCalibrationSelector fixedSelector = new AutoCalibrationSelector() {
             @Override
             public CalibrationResult select(
                 FieldInfo fieldInfo,
@@ -1220,12 +1220,12 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         int dimensions = 32;
         int numDocsPerSegment = 1500;
 
-        ESNextDiskBBQVectorsFormat.QuantEncoding[] encodingSequence = new ESNextDiskBBQVectorsFormat.QuantEncoding[]{
+        ESNextDiskBBQVectorsFormat.QuantEncoding[] encodingSequence = new ESNextDiskBBQVectorsFormat.QuantEncoding[] {
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
-            ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC,};
+            ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC, };
 
         AtomicInteger callCount = new AtomicInteger();
-        AutoQuantizationSelector alternatingSelector = new AutoQuantizationSelector() {
+        AutoCalibrationSelector alternatingSelector = new AutoCalibrationSelector() {
             @Override
             public CalibrationResult select(
                 FieldInfo fieldInfo,

@@ -83,7 +83,6 @@ public class ManifoldModelTests extends ESTestCase {
             calibrationQueries,
             fvv,
             corpusOrdinals,
-            false,
             10
         );
         assertEquals(2, result.length);
@@ -110,7 +109,6 @@ public class ManifoldModelTests extends ESTestCase {
             calibrationQueries,
             fvv,
             corpusOrdinals,
-            false,
             10
         );
         assertEquals(2, result.length);

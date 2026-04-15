@@ -103,7 +103,7 @@ public final class CalibrationUtils {
     }
 
     /**
-     * Whether to apply the Neyshabur–Srebro lift (dot product -> Euclidean in one higher dimension)
+     * Whether to apply the Neyshabur–Srebro lift (dot product -> euclidean in one higher dimension)
      * before calibration.
      */
     public static boolean needsNeyshaburSrebroLift(VectorSimilarityFunction similarityFunction) {

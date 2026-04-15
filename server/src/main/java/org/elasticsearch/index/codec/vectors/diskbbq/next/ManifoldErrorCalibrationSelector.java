@@ -32,14 +32,14 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Selects a {@link ESNextDiskBBQVectorsFormat.QuantEncoding} at segment write time by running
+ * Selects a {@link org.elasticsearch.index.codec.vectors.diskbbq.next.AutoCalibrationSelector.CalibrationResult} at segment write time by running
  * calibration on a sample of the segment's vectors. The calibration fits a manifold model and
- * an error model, then sweeps candidate encodings in ascending bit-cost order and returns the
+ * an error model, then sweeps candidate encodings in ascending bit-cost order, and returns the
  * first one that meets the target recall.
  */
-public class CalibratingAutoQuantizationSelector implements AutoQuantizationSelector {
+public class ManifoldErrorCalibrationSelector implements AutoCalibrationSelector {
 
-    private static final Logger logger = LogManager.getLogger(CalibratingAutoQuantizationSelector.class);
+    private static final Logger logger = LogManager.getLogger(ManifoldErrorCalibrationSelector.class);
 
     static final double DEFAULT_TARGET_RECALL = 0.97;
     static final int DEFAULT_K = 10;
@@ -81,15 +81,15 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
     private final double targetRecall;
     private final int k;
 
-    public CalibratingAutoQuantizationSelector(int vectorsPerCluster) {
+    public ManifoldErrorCalibrationSelector(int vectorsPerCluster) {
         this(vectorsPerCluster, ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION);
     }
 
-    public CalibratingAutoQuantizationSelector(int vectorsPerCluster, int blockDimension) {
+    public ManifoldErrorCalibrationSelector(int vectorsPerCluster, int blockDimension) {
         this(vectorsPerCluster, blockDimension, DEFAULT_TARGET_RECALL, DEFAULT_K);
     }
 
-    public CalibratingAutoQuantizationSelector(int vectorsPerCluster, int blockDimension, double targetRecall, int k) {
+    public ManifoldErrorCalibrationSelector(int vectorsPerCluster, int blockDimension, double targetRecall, int k) {
         this.vectorsPerCluster = vectorsPerCluster;
         this.blockDimension = blockDimension;
         this.targetRecall = targetRecall;
@@ -97,8 +97,6 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
     }
 
     /**
-     * On flush ({@code mergeState == null}), runs full {@link #calibrate} when the segment is large enough.
-     * <p>
      * On merge, attempts to reuse quantization metadata from input segments via {@link #selectFromMergeState},
      * except for <em>bounded</em> (force-merge) merges: those run {@link #runFastCalibration} first so calibration
      * is not skipped after major segment consolidation; if the fast path does not meet {@link #targetRecall},
@@ -286,11 +284,15 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
 
     CalibrationResult calibrate(FloatVectorValues floatVectorValues, int dim, VectorSimilarityFunction similarityFunction, int N)
         throws IOException {
+
+        // sample some docs as queries
         CalibrationUtils.SampledData sampled = CalibrationUtils.sampleData(floatVectorValues, dim);
         int[] queryOrdinals = sampled.queryOrdinals();
         int[] corpusOrdinals = sampled.corpusOrdinals();
 
         boolean cosine = similarityFunction == VectorSimilarityFunction.COSINE;
+
+        // for dot-product / MIPS we need to add one more dimension with max squared norm (to treat it as it was Euclidean distance)
         boolean neyshabur = CalibrationUtils.needsNeyshaburSrebroLift(similarityFunction);
 
         int dimWork = dim;
@@ -318,14 +320,13 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
         logger.info("Calibrating quantization parameters");
         logger.info("block dim: {}", blockDimension);
 
-        // Manifold model uses original (un-preconditioned) data; after optional Neyshabur lift for dot/MIP.
+        // manifold model uses original (un-preconditioned) data; after optional Neyshabur lift for dot/MIP.
         double[] manifold = ManifoldModel.estimateManifoldParameters(
             similarityFunction,
             dimWork,
             calibrationQueries,
             fvvForCalibration,
             corpusOrdinals,
-            cosine,
             k
         );
         double alpha = manifold[0];
@@ -347,7 +348,7 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
 
         double maxRecall = -1;
         ESNextDiskBBQVectorsFormat.QuantEncoding bestEncoding = ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY;
-        float bestOversample = AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
+        float bestOversample = AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE;
         boolean bestPrecondition = false;
 
         boolean[] preconditionValues = new boolean[] { false, true };
@@ -487,7 +488,6 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
             calibrationQueries,
             fvvForCalibration,
             corpusOrdinals,
-            cosine,
             k
         );
         double alpha = manifold[0];
@@ -507,7 +507,7 @@ public class CalibratingAutoQuantizationSelector implements AutoQuantizationSele
 
         double maxRecall = -1;
         ESNextDiskBBQVectorsFormat.QuantEncoding bestEncoding = ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY;
-        float bestOversample = AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
+        float bestOversample = AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE;
         boolean bestPrecondition = false;
 
         boolean[] preconditionValues = new boolean[] { false, true };

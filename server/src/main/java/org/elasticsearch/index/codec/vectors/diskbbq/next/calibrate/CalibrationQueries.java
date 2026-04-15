@@ -91,7 +91,7 @@ public final class CalibrationQueries {
     public int size() {
         if (materializedRows != null) {
             return materializedRows.length;
-        } else if(queryOrdinals != null) {
+        } else if (queryOrdinals != null) {
             return queryOrdinals.length;
         } else {
             throw new IllegalStateException("no query source");

@@ -67,6 +67,7 @@ record TestConfiguration(
     int writerMaxBufferedDocs,
     int forceMergeMaxNumSegments,
     boolean onDiskRescore,
+    boolean autoCalibrate,
     List<SearchParameters> searchParams,
     int numMergeWorkers,
     boolean doPrecondition,
@@ -109,6 +110,7 @@ record TestConfiguration(
     static final ParseField WRITER_BUFFER_MB_FIELD = new ParseField("writer_buffer_mb");
     static final ParseField WRITER_BUFFER_DOCS_FIELD = new ParseField("writer_buffer_docs");
     static final ParseField ON_DISK_RESCORE_FIELD = new ParseField("on_disk_rescore");
+    static final ParseField AUTO_CALIBRATE_FIELD = new ParseField("auto_calibrate");
     static final ParseField DO_PRECONDITION = new ParseField("precondition");
     static final ParseField PRECONDITIONING_BLOCK_DIMS = new ParseField("preconditioning_block_dims");
     static final ParseField FILTER_CACHED = new ParseField("filter_cache");
@@ -153,7 +155,14 @@ record TestConfiguration(
         PARSER.declareString(Builder::setVectorSpace, VECTOR_SPACE_FIELD);
         PARSER.declareField(Builder::setQuantizeBits, p -> {
             if (p.currentToken() == XContentParser.Token.VALUE_NULL) return null;
-            if (p.currentToken() == XContentParser.Token.VALUE_STRING && "auto".equals(p.text())) return 0;
+            if (p.currentToken() == XContentParser.Token.VALUE_STRING) {
+                if ("auto".equals(p.text())) {
+                    throw new IllegalArgumentException(
+                        "quantize_bits \"auto\" is not supported; set auto_calibrate to true and use quantize_bits 1, 2, 4, or 7"
+                    );
+                }
+                throw new IllegalArgumentException("Unsupported quantize_bits value: " + p.text());
+            }
             return p.intValue();
         }, QUANTIZE_BITS_FIELD, ObjectParser.ValueType.VALUE);
         PARSER.declareString(Builder::setVectorEncoding, VECTOR_ENCODING_FIELD);
@@ -171,6 +180,7 @@ record TestConfiguration(
         PARSER.declareInt(Builder::setWriterMaxBufferedDocs, WRITER_BUFFER_DOCS_FIELD);
         PARSER.declareInt(Builder::setForceMergeMaxNumSegments, FORCE_MERGE_MAX_NUM_SEGMENTS_FIELD);
         PARSER.declareBoolean(Builder::setOnDiskRescore, ON_DISK_RESCORE_FIELD);
+        PARSER.declareBoolean(Builder::setAutoCalibrate, AUTO_CALIBRATE_FIELD);
         PARSER.declareBoolean(Builder::setDoPrecondition, DO_PRECONDITION);
         PARSER.declareInt(Builder::setPreconditioningBlockDims, PRECONDITIONING_BLOCK_DIMS);
         PARSER.declareFieldArray(Builder::setFilterCached, (p, c) -> p.booleanValue(), FILTER_CACHED, ObjectParser.ValueType.VALUE_ARRAY);
@@ -212,7 +222,12 @@ record TestConfiguration(
             new ParameterHelp("force_merge", "boolean", "Whether to force-merge the index after indexing."),
             new ParameterHelp("force_merge_max_num_segments", "int", "Force-merge target number of segments."),
             new ParameterHelp("vector_space", "string", "Similarity: euclidean, dot_product, or cosine."),
-            new ParameterHelp("quantize_bits", "int|\"auto\"", "Quantization bits (1,2,4,7) or \"auto\" for IVF calibration."),
+            new ParameterHelp("quantize_bits", "int", "Quantization bits (1, 2, 4, or 7)."),
+            new ParameterHelp(
+                "auto_calibrate",
+                "boolean",
+                "IVF: enable merge-time calibration (encoding, oversample, preconditioning); requires numeric quantize_bits."
+            ),
             new ParameterHelp("vector_encoding", "string", "Vector encoding: byte, float32, or bfloat16."),
             new ParameterHelp("dimensions", "int", "Vector dimensions; -1 uses dimensions from the vector file."),
             new ParameterHelp("merge_policy", "string", "Merge policy: tiered, log_byte, log_doc, or no."),
@@ -377,6 +392,7 @@ record TestConfiguration(
         private KnnIndexTester.MergePolicyType mergePolicy = null;
         private double writerBufferSizeInMb = DEFAULT_WRITER_BUFFER_MB;
         private boolean onDiskRescore = false;
+        private boolean autoCalibrate = false;
         private boolean doPrecondition = false;
         private int preconditioningBlockDims = 64;
         private List<Boolean> filterCached = List.of(Boolean.TRUE);
@@ -513,6 +529,11 @@ record TestConfiguration(
         }
 
         public Builder setQuantizeBits(Integer quantizeBits) {
+            if (quantizeBits != null && quantizeBits == 0) {
+                throw new IllegalArgumentException(
+                    "quantize_bits 0 is not supported; set auto_calibrate to true and use quantize_bits 1, 2, 4, or 7"
+                );
+            }
             this.quantizeBits = quantizeBits;
             return this;
         }
@@ -564,6 +585,11 @@ record TestConfiguration(
 
         public Builder setOnDiskRescore(boolean onDiskRescore) {
             this.onDiskRescore = onDiskRescore;
+            return this;
+        }
+
+        public Builder setAutoCalibrate(boolean autoCalibrate) {
+            this.autoCalibrate = autoCalibrate;
             return this;
         }
 
@@ -828,6 +854,7 @@ record TestConfiguration(
                 writerMaxBufferedDocs,
                 forceMergeMaxNumSegments,
                 onDiskRescore,
+                autoCalibrate,
                 searchRuns,
                 numMergeWorkers,
                 doPrecondition,
@@ -873,7 +900,10 @@ record TestConfiguration(
                 builder.field(VECTOR_SPACE_FIELD.getPreferredName(), vectorSpace.name().toLowerCase(Locale.ROOT));
             }
             if (quantizeBits != null) {
-                builder.field(QUANTIZE_BITS_FIELD.getPreferredName(), quantizeBits == 0 ? "auto" : quantizeBits);
+                builder.field(QUANTIZE_BITS_FIELD.getPreferredName(), quantizeBits);
+            }
+            if (autoCalibrate) {
+                builder.field(AUTO_CALIBRATE_FIELD.getPreferredName(), true);
             }
             builder.field(VECTOR_ENCODING_FIELD.getPreferredName(), vectorEncoding.name().toLowerCase(Locale.ROOT));
             builder.field(DIMENSIONS_FIELD.getPreferredName(), dimensions);

@@ -55,7 +55,8 @@ import static org.elasticsearch.simdvec.ESNextOSQVectorsScorer.BULK_SIZE;
  */
 public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVectorsReader.NextFieldEntry>
     implements
-        VectorPreconditioner, CalibrationAwareReader {
+        VectorPreconditioner,
+        CalibrationAwareReader {
 
     public ESNextDiskBBQVectorsReader(SegmentReadState state, GenericFlatVectorReaders.LoadFlatVectorsReader getFormatReader)
         throws IOException {
@@ -249,29 +250,29 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
 
     @Override
     public float getOversampleFactor(FieldInfo fieldInfo) {
-        final FieldEntry fieldEntry = fields.get(fieldInfo.number);
+        final NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
         if (fieldEntry == null) {
-            return AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
+            return AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE;
         }
-        return ((NextFieldEntry) fieldEntry).calibratedOversample();
+        return fieldEntry.calibratedOversample();
     }
 
     @Override
     public boolean shouldPrecondition(FieldInfo fieldInfo) {
-        final FieldEntry fieldEntry = fields.get(fieldInfo.number);
+        final NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
         if (fieldEntry == null) {
             return false;
         }
-        return ((NextFieldEntry) fieldEntry).calibratedDoPrecondition();
+        return fieldEntry.calibratedDoPrecondition();
     }
 
     @Override
     public ESNextDiskBBQVectorsFormat.QuantEncoding getQuantEncoding(FieldInfo fieldInfo) {
-        final FieldEntry fieldEntry = fields.get(fieldInfo.number);
+        final NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
         if (fieldEntry == null) {
             return null;
         }
-        return ((NextFieldEntry) fieldEntry).quantEncoding();
+        return fieldEntry.quantEncoding();
     }
 
     @Override

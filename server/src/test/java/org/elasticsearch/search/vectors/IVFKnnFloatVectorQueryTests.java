@@ -28,7 +28,7 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.tests.util.TestUtil;
 import org.apache.lucene.util.VectorUtil;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
-import org.elasticsearch.index.codec.vectors.diskbbq.next.AutoQuantizationSelector;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.AutoCalibrationSelector;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
 import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
 
@@ -83,7 +83,7 @@ public class IVFKnnFloatVectorQueryTests extends AbstractIVFKnnVectorQueryTestCa
     public void testRewriteWithCalibrationSentinelDoesNotAutoRescore() throws IOException {
         int dimensions = 16;
         int numDocs = 800;
-        AutoQuantizationSelector fixedSelector = new AutoQuantizationSelector() {
+        AutoCalibrationSelector fixedSelector = new AutoCalibrationSelector() {
             @Override
             public CalibrationResult select(
                 FieldInfo fieldInfo,
@@ -95,7 +95,7 @@ public class IVFKnnFloatVectorQueryTests extends AbstractIVFKnnVectorQueryTestCa
             ) {
                 return new CalibrationResult(
                     ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC,
-                    AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE,
+                    AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE,
                     false
                 );
             }
@@ -145,7 +145,7 @@ public class IVFKnnFloatVectorQueryTests extends AbstractIVFKnnVectorQueryTestCa
         int numDocs = 800;
         float calibratedOversample = 2.0f;
 
-        AutoQuantizationSelector fixedSelector = new AutoQuantizationSelector() {
+        AutoCalibrationSelector fixedSelector = new AutoCalibrationSelector() {
             @Override
             public CalibrationResult select(
                 FieldInfo fieldInfo,

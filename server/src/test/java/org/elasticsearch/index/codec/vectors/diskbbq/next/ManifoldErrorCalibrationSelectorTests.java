@@ -46,21 +46,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
-
-    public void testParityDefaultsMatchCxxCalibration() {
-        assertEquals(0.97, CalibratingAutoQuantizationSelector.DEFAULT_TARGET_RECALL, 0.0d);
-        assertEquals(100, CalibratingAutoQuantizationSelector.DEFAULT_K);
-    }
+public class ManifoldErrorCalibrationSelectorTests extends ESTestCase {
 
     /**
      * With {@code doPrecondition == false} on the selector (mapper disallows index-time preconditioning),
-     * calibration still runs the full sweep; {@link AutoQuantizationSelector.CalibrationResult#doPrecondition()}
+     * calibration still runs the full sweep; {@link AutoCalibrationSelector.CalibrationResult#doPrecondition()}
      * reflects the best recall branch, not the mapper flag.
      */
     public void testMapperPreconditionDisabledCalibrationStillCompletesOnFlush() throws IOException {
         int dimension = 16;
-        int numVectors = CalibratingAutoQuantizationSelector.MIN_VECTORS_FOR_CALIBRATION;
+        int numVectors = ManifoldErrorCalibrationSelector.MIN_VECTORS_FOR_CALIBRATION;
         Random rng = new Random(42);
         float[][] vectors = new float[numVectors][dimension];
         float[] globalCentroid = new float[dimension];
@@ -88,10 +83,10 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(vectorsList, null, dimension);
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(
             ESNextDiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER
         );
-        AutoQuantizationSelector.CalibrationResult result = selector.select(
+        AutoCalibrationSelector.CalibrationResult result = selector.select(
             fieldInfo,
             fvv,
             supplier,
@@ -103,12 +98,12 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
     }
 
     /**
-     * Flush path must return {@link AutoQuantizationSelector.CalibrationResult#doPrecondition()} exactly
-     * as computed by {@link CalibratingAutoQuantizationSelector#calibrate} when the target recall is met.
+     * Flush path must return {@link AutoCalibrationSelector.CalibrationResult#doPrecondition()} exactly
+     * as computed by {@link ManifoldErrorCalibrationSelector#calibrate} when the target recall is met.
      */
     public void testFlushSelectPropagatesPreconditionTrueWhenCalibrateSelectsPrecondition() throws IOException {
         int dimension = 16;
-        int numVectors = CalibratingAutoQuantizationSelector.MIN_VECTORS_FOR_CALIBRATION;
+        int numVectors = ManifoldErrorCalibrationSelector.MIN_VECTORS_FOR_CALIBRATION;
         Random rng = new Random(42);
         float[][] vectors = new float[numVectors][dimension];
         float[] globalCentroid = new float[dimension];
@@ -137,7 +132,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
 
         PreconditionForcedCalibrateSelector selector = new PreconditionForcedCalibrateSelector();
-        AutoQuantizationSelector.CalibrationResult result = selector.select(
+        AutoCalibrationSelector.CalibrationResult result = selector.select(
             fieldInfo,
             fvv,
             supplier,
@@ -147,7 +142,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         );
         assertTrue(result.doPrecondition());
         assertEquals(ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC, result.encoding());
-        assertEquals(AutoQuantizationSelector.DEFAULT_CALIBRATED_OVERSAMPLE, result.oversample(), 0.0f);
+        assertEquals(AutoCalibrationSelector.DEFAULT_CALIBRATED_OVERSAMPLE, result.oversample(), 0.0f);
     }
 
     /**
@@ -156,7 +151,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
      */
     public void testPreconditionEnabledRealCalibrationCanSelectTrue() throws IOException {
         int dimension = 16;
-        int numVectors = CalibratingAutoQuantizationSelector.MIN_VECTORS_FOR_CALIBRATION;
+        int numVectors = ManifoldErrorCalibrationSelector.MIN_VECTORS_FOR_CALIBRATION;
         long[] seeds = { 0L, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 42L, 99L, 1337L, 12345L, 99999L };
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
         boolean found = false;
@@ -186,11 +181,11 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
             );
             List<float[]> vectorsList = List.of(vectors);
             KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(vectorsList, null, dimension);
-            CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(
+            ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(
                 ESNextDiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER,
                 ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION
             );
-            AutoQuantizationSelector.CalibrationResult result = selector.select(
+            AutoCalibrationSelector.CalibrationResult result = selector.select(
                 fieldInfo,
                 fvv,
                 supplier,
@@ -237,11 +232,11 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
 
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(
             ESNextDiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER
         );
 
-        AutoQuantizationSelector.CalibrationResult result = selector.select(
+        AutoCalibrationSelector.CalibrationResult result = selector.select(
             fieldInfo,
             fvv,
             supplier,
@@ -284,11 +279,11 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
 
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.DOT_PRODUCT);
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(
             ESNextDiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER
         );
 
-        AutoQuantizationSelector.CalibrationResult result = selector.select(
+        AutoCalibrationSelector.CalibrationResult result = selector.select(
             fieldInfo,
             fvv,
             supplier,
@@ -337,11 +332,11 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
 
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.COSINE);
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(
             ESNextDiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER
         );
 
-        AutoQuantizationSelector.CalibrationResult result = selector.select(
+        AutoCalibrationSelector.CalibrationResult result = selector.select(
             fieldInfo,
             fvv,
             supplier,
@@ -365,9 +360,9 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(List.of(vectors), null, dimension);
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(384);
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(384);
 
-        AutoQuantizationSelector.CalibrationResult result = selector.select(
+        AutoCalibrationSelector.CalibrationResult result = selector.select(
             fieldInfo,
             fvv,
             supplier,
@@ -376,11 +371,11 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
             null
         );
         assertSame(ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC, result.encoding());
-        assertEquals(AutoQuantizationSelector.DEFAULT_CALIBRATED_OVERSAMPLE, result.oversample(), 0.0f);
+        assertEquals(AutoCalibrationSelector.DEFAULT_CALIBRATED_OVERSAMPLE, result.oversample(), 0.0f);
     }
 
     public void testCalibrationResultOversampleSemantics() {
-        AutoQuantizationSelector.CalibrationResult r1 = new AutoQuantizationSelector.CalibrationResult(
+        AutoCalibrationSelector.CalibrationResult r1 = new AutoCalibrationSelector.CalibrationResult(
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
             1.5f,
             false
@@ -389,14 +384,14 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertEquals(1.5f, r1.oversample(), 0.0f);
         assertFalse(r1.doPrecondition());
 
-        AutoQuantizationSelector.CalibrationResult r2 = new AutoQuantizationSelector.CalibrationResult(
+        AutoCalibrationSelector.CalibrationResult r2 = new AutoCalibrationSelector.CalibrationResult(
             ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC,
-            AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE,
+            AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE,
             false
         );
-        assertEquals(AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE, r2.oversample(), 0.0f);
+        assertEquals(AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE, r2.oversample(), 0.0f);
 
-        AutoQuantizationSelector.CalibrationResult r3 = new AutoQuantizationSelector.CalibrationResult(
+        AutoCalibrationSelector.CalibrationResult r3 = new AutoCalibrationSelector.CalibrationResult(
             ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC,
             3.0f,
             false
@@ -404,7 +399,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertEquals(3.0f, r3.oversample(), 0.0f);
     }
 
-    public void testSelectFromMergeState_unanimousReuse() throws IOException {
+    public void testSelectFromMergeStateUnanimousReuse() throws IOException {
         int dimension = 16;
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
         float[] centroid = new float[dimension];
@@ -430,8 +425,8 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
             dimension
         );
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(384);
-        AutoQuantizationSelector.CalibrationResult result = selector.selectFromMergeState(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(384);
+        AutoCalibrationSelector.CalibrationResult result = selector.selectFromMergeState(
             fieldInfo,
             fvv,
             supplier,
@@ -445,7 +440,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertFalse(result.doPrecondition());
     }
 
-    public void testSelectFromMergeState_majorityVote() throws IOException {
+    public void testSelectFromMergeStateMajorityVote() throws IOException {
         int dimension = 16;
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
         float[] centroid = new float[dimension];
@@ -471,8 +466,8 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
             dimension
         );
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(384);
-        AutoQuantizationSelector.CalibrationResult result = selector.selectFromMergeState(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(384);
+        AutoCalibrationSelector.CalibrationResult result = selector.selectFromMergeState(
             fieldInfo,
             fvv,
             supplier,
@@ -484,7 +479,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertEquals(ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC, result.encoding());
     }
 
-    public void testSelectFromMergeState_noCalibrationReadersReturnsNull() throws IOException {
+    public void testSelectFromMergeStateMoCalibrationReadersReturnsNull() throws IOException {
         int dimension = 16;
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
 
@@ -492,8 +487,8 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         MergeState mergeState = mockMergeState(new KnnVectorsReader[] { plainReader }, new int[] { 5000 });
         FloatVectorValues fvv = mockFloatVectorValues(5000);
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(384);
-        AutoQuantizationSelector.CalibrationResult result = selector.selectFromMergeState(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(384);
+        AutoCalibrationSelector.CalibrationResult result = selector.selectFromMergeState(
             fieldInfo,
             fvv,
             null,
@@ -504,7 +499,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertNull(result);
     }
 
-    public void testSelectFromMergeState_growthRatioTriggersRecalibration() throws IOException {
+    public void testSelectFromMergeStateGrowthRatioTriggersRecalibration() throws IOException {
         int dimension = 16;
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
         float[] centroid = new float[dimension];
@@ -524,8 +519,8 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
             dimension
         );
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(384);
-        AutoQuantizationSelector.CalibrationResult result = selector.selectFromMergeState(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(384);
+        AutoCalibrationSelector.CalibrationResult result = selector.selectFromMergeState(
             fieldInfo,
             fvv,
             supplier,
@@ -536,7 +531,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertNull(result);
     }
 
-    public void testSelectFromMergeState_centroidDriftTriggersRecalibration() throws IOException {
+    public void testSelectFromMergeStateCentroidDriftTriggersRecalibration() throws IOException {
         int dimension = 16;
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
         float[] centroid = new float[dimension];
@@ -560,8 +555,8 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
             dimension
         );
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(384);
-        AutoQuantizationSelector.CalibrationResult result = selector.selectFromMergeState(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(384);
+        AutoCalibrationSelector.CalibrationResult result = selector.selectFromMergeState(
             fieldInfo,
             fvv,
             supplier,
@@ -572,7 +567,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertNull(result);
     }
 
-    public void testSelectFromMergeState_encodingDisagreementTriggersRecalibration() throws IOException {
+    public void testSelectFromMergeStateEncodingDisagreementTriggersRecalibration() throws IOException {
         int dimension = 16;
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
         float[] centroid = new float[dimension];
@@ -598,8 +593,8 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
             dimension
         );
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(384);
-        AutoQuantizationSelector.CalibrationResult result = selector.selectFromMergeState(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(384);
+        AutoCalibrationSelector.CalibrationResult result = selector.selectFromMergeState(
             fieldInfo,
             fvv,
             supplier,
@@ -610,7 +605,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertNull(result);
     }
 
-    public void testSelectFromMergeState_preconditionMajorityVote() throws IOException {
+    public void testSelectFromMergeStatePreconditionMajorityVote() throws IOException {
         int dimension = 16;
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
         float[] centroid = new float[dimension];
@@ -642,8 +637,8 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
             dimension
         );
 
-        CalibratingAutoQuantizationSelector selector = new CalibratingAutoQuantizationSelector(384);
-        AutoQuantizationSelector.CalibrationResult result = selector.selectFromMergeState(
+        ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(384);
+        AutoCalibrationSelector.CalibrationResult result = selector.selectFromMergeState(
             fieldInfo,
             fvv,
             supplier,
@@ -655,7 +650,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertTrue(result.doPrecondition());
     }
 
-    public void testMergeCalibrationContext_forceMergeDiagnostics() {
+    public void testMergeCalibrationContextForceMergeDiagnostics() {
         MergeState mergeState = mockMergeState(new KnnVectorsReader[0], new int[0], Map.of("mergeMaxNumSegments", "1"));
         MergeCalibrationContext ctx = MergeCalibrationContext.from(mergeState);
         assertTrue(ctx.boundedForceMerge());
@@ -663,7 +658,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertEquals(1, (int) ctx.mergeMaxNumSegments());
     }
 
-    public void testMergeCalibrationContext_backgroundMergeDiagnostics() {
+    public void testMergeCalibrationContextBackgroundMergeDiagnostics() {
         MergeState mergeState = mockMergeState(new KnnVectorsReader[0], new int[0], Map.of("mergeMaxNumSegments", "-1"));
         MergeCalibrationContext ctx = MergeCalibrationContext.from(mergeState);
         assertFalse(ctx.boundedForceMerge());
@@ -687,7 +682,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         );
 
         FastMissThenFullSelector selector = new FastMissThenFullSelector();
-        AutoQuantizationSelector.CalibrationResult result = selector.select(
+        AutoCalibrationSelector.CalibrationResult result = selector.select(
             fieldInfo,
             fvv,
             supplier,
@@ -701,7 +696,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertEquals(2.0f, result.oversample(), 0.0f);
     }
 
-    public void testSelect_skipsReuseForBoundedForceMerge() throws IOException {
+    public void testSelectSkipsReuseForBoundedForceMerge() throws IOException {
         int dimension = 16;
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
         float[] centroid = new float[dimension];
@@ -732,7 +727,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         );
 
         CountingCalibratingSelector selector = new CountingCalibratingSelector();
-        AutoQuantizationSelector.CalibrationResult result = selector.select(
+        AutoCalibrationSelector.CalibrationResult result = selector.select(
             fieldInfo,
             fvv,
             supplier,
@@ -746,7 +741,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         assertEquals(ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC, result.encoding());
     }
 
-    public void testSelect_reusesWhenBackgroundMergeEligible() throws IOException {
+    public void testSelectReusesWhenBackgroundMergeEligible() throws IOException {
         int dimension = 16;
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
         float[] centroid = new float[dimension];
@@ -777,7 +772,7 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         );
 
         CountingCalibratingSelector selector = new CountingCalibratingSelector();
-        AutoQuantizationSelector.CalibrationResult result = selector.select(
+        AutoCalibrationSelector.CalibrationResult result = selector.select(
             fieldInfo,
             fvv,
             supplier,
@@ -829,10 +824,10 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
     }
 
     /**
-     * Forces {@link CalibratingAutoQuantizationSelector#calibrate} to report precondition=true to verify
-     * {@link #select} propagates {@link AutoQuantizationSelector.CalibrationResult#doPrecondition()} on flush.
+     * Forces {@link ManifoldErrorCalibrationSelector#calibrate} to report precondition=true to verify
+     * {@link #select} propagates {@link AutoCalibrationSelector.CalibrationResult#doPrecondition()} on flush.
      */
-    private static final class PreconditionForcedCalibrateSelector extends CalibratingAutoQuantizationSelector {
+    private static final class PreconditionForcedCalibrateSelector extends ManifoldErrorCalibrationSelector {
         PreconditionForcedCalibrateSelector() {
             super(
                 ESNextDiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER,
@@ -841,21 +836,21 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         }
 
         @Override
-        AutoQuantizationSelector.CalibrationResult calibrate(
+        AutoCalibrationSelector.CalibrationResult calibrate(
             FloatVectorValues floatVectorValues,
             int dim,
             VectorSimilarityFunction similarityFunction,
             int n
         ) throws IOException {
-            return new AutoQuantizationSelector.CalibrationResult(
+            return new AutoCalibrationSelector.CalibrationResult(
                 ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC,
-                AutoQuantizationSelector.DEFAULT_CALIBRATED_OVERSAMPLE,
+                AutoCalibrationSelector.DEFAULT_CALIBRATED_OVERSAMPLE,
                 true
             );
         }
     }
 
-    private static final class CountingCalibratingSelector extends CalibratingAutoQuantizationSelector {
+    private static final class CountingCalibratingSelector extends ManifoldErrorCalibrationSelector {
         final AtomicInteger calibrateFastCalls = new AtomicInteger();
 
         CountingCalibratingSelector() {
@@ -872,14 +867,14 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         ) throws IOException {
             calibrateFastCalls.incrementAndGet();
             return new FastCalibrationOutcome(
-                new AutoQuantizationSelector.CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC, 1.5f, false),
+                new AutoCalibrationSelector.CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC, 1.5f, false),
                 true
             );
         }
     }
 
-    /** When fast path does not meet target recall, bounded merge should invoke full {@link CalibratingAutoQuantizationSelector#calibrate}. */
-    private static final class FastMissThenFullSelector extends CalibratingAutoQuantizationSelector {
+    /** When fast path does not meet target recall, bounded merge should invoke full {@link ManifoldErrorCalibrationSelector#calibrate}. */
+    private static final class FastMissThenFullSelector extends ManifoldErrorCalibrationSelector {
         final AtomicInteger fullCalibrateCalls = new AtomicInteger();
 
         FastMissThenFullSelector() {
@@ -895,9 +890,9 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
             MergeCalibrationContext mergeCtx
         ) {
             return new FastCalibrationOutcome(
-                new AutoQuantizationSelector.CalibrationResult(
+                new AutoCalibrationSelector.CalibrationResult(
                     ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
-                    AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE,
+                    AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE,
                     false
                 ),
                 false
@@ -905,18 +900,14 @@ public class CalibratingAutoQuantizationSelectorTests extends ESTestCase {
         }
 
         @Override
-        AutoQuantizationSelector.CalibrationResult calibrate(
+        AutoCalibrationSelector.CalibrationResult calibrate(
             FloatVectorValues floatVectorValues,
             int dim,
             VectorSimilarityFunction similarityFunction,
             int n
         ) {
             fullCalibrateCalls.incrementAndGet();
-            return new AutoQuantizationSelector.CalibrationResult(
-                ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC,
-                2.0f,
-                false
-            );
+            return new AutoCalibrationSelector.CalibrationResult(ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC, 2.0f, false);
         }
     }
 

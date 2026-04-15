@@ -284,7 +284,7 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
 
     private final QuantEncoding quantEncoding;
     private final boolean quantizationAuto;
-    private final AutoQuantizationSelector autoQuantizationSelector;
+    private final AutoCalibrationSelector autoCalibrationSelector;
     private final int vectorPerCluster;
     private final int centroidsPerParentCluster;
     private final boolean useDirectIO;
@@ -321,7 +321,7 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
      */
     public ESNextDiskBBQVectorsFormat(
         boolean quantizationAuto,
-        AutoQuantizationSelector autoQuantizationSelector,
+        AutoCalibrationSelector autoCalibrationSelector,
         int vectorPerCluster,
         int centroidsPerParentCluster,
         DenseVectorFieldMapper.ElementType elementType,
@@ -335,9 +335,7 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
         this(
             QuantEncoding.ONE_BIT_4BIT_QUERY,
             quantizationAuto,
-            autoQuantizationSelector != null
-                ? autoQuantizationSelector
-                : new CalibratingAutoQuantizationSelector(vectorPerCluster, preconditioningBlockDimension),
+            autoCalibrationSelector,
             vectorPerCluster,
             centroidsPerParentCluster,
             elementType,
@@ -405,10 +403,14 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
         );
     }
 
-    private ESNextDiskBBQVectorsFormat(
+    /**
+     * Full constructor: when {@code quantizationAuto} is true and {@code autoCalibrationSelector} is null,
+     * {@link ManifoldErrorCalibrationSelector} is used.
+     */
+    public ESNextDiskBBQVectorsFormat(
         QuantEncoding quantEncoding,
         boolean quantizationAuto,
-        AutoQuantizationSelector autoQuantizationSelector,
+        AutoCalibrationSelector autoCalibrationSelector,
         int vectorPerCluster,
         int centroidsPerParentCluster,
         DenseVectorFieldMapper.ElementType elementType,
@@ -457,11 +459,15 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
                 "flatVectorThreshold must be -1 (dynamic), 0 (disabled), or > 0, got: " + flatVectorThreshold
             );
         }
+        AutoCalibrationSelector selector = autoCalibrationSelector;
+        if (quantizationAuto && selector == null) {
+            selector = new ManifoldErrorCalibrationSelector(vectorPerCluster, preconditioningBlockDimension);
+        }
         this.vectorPerCluster = vectorPerCluster;
         this.centroidsPerParentCluster = centroidsPerParentCluster;
         this.quantEncoding = quantEncoding;
         this.quantizationAuto = quantizationAuto;
-        this.autoQuantizationSelector = autoQuantizationSelector;
+        this.autoCalibrationSelector = selector;
         this.rawVectorFormat = switch (elementType) {
             case FLOAT -> float32VectorFormat;
             case BFLOAT16 -> bfloat16VectorFormat;
@@ -489,7 +495,7 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             rawVectorFormat.fieldsWriter(state),
             quantEncoding,
             quantizationAuto,
-            autoQuantizationSelector,
+            autoCalibrationSelector,
             vectorPerCluster,
             centroidsPerParentCluster,
             mergeExec,

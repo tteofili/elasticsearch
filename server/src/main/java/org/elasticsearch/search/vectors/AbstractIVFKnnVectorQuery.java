@@ -38,7 +38,7 @@ import org.apache.lucene.search.knn.KnnSearchStrategy;
 import org.apache.lucene.util.Bits;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.common.lucene.search.Queries;
-import org.elasticsearch.index.codec.vectors.diskbbq.next.AutoQuantizationSelector;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.AutoCalibrationSelector;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.CalibrationAwareReader;
 import org.elasticsearch.search.profile.query.QueryProfiler;
 
@@ -213,7 +213,7 @@ abstract class AbstractIVFKnnVectorQuery extends Query implements QueryProfilerP
     /**
      * Iterates segment readers and returns the maximum calibrated oversample across segments that
      * use {@link CalibrationAwareReader}. If no such segment exists, returns {@code 1f} so
-     * {@code k} is unchanged (avoids conflating the {@link AutoQuantizationSelector#NO_CALIBRATED_OVERSAMPLE}
+     * {@code k} is unchanged (avoids conflating the {@link AutoCalibrationSelector#NO_CALIBRATED_OVERSAMPLE}
      * sentinel with a real calibrated value of {@code 1.5f}).
      */
     private float resolveCalibratedOversample(List<LeafReaderContext> leafReaderContexts) {

@@ -70,7 +70,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     private final int centroidsPerParentCluster;
     private final ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding;
     private final boolean quantizationAuto;
-    private final AutoQuantizationSelector autoQuantizationSelector;
+    private final AutoCalibrationSelector autoCalibrationSelector;
     private final TaskExecutor mergeExec;
     private final int numMergeWorkers;
     private final int blockDimension;
@@ -79,7 +79,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     /**
      * Resolved calibration result for the current field during buildAndWritePostingsLists; used when quantizationAuto is true.
      */
-    private AutoQuantizationSelector.CalibrationResult calibrationResultForCurrentField;
+    private AutoCalibrationSelector.CalibrationResult calibrationResultForCurrentField;
 
     /**
      * Preconditioner stored for deferred application when quantizationAuto is true.
@@ -101,7 +101,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         FlatVectorsWriter rawVectorDelegate,
         ESNextDiskBBQVectorsFormat.QuantEncoding encoding,
         boolean quantizationAuto,
-        AutoQuantizationSelector autoQuantizationSelector,
+        AutoCalibrationSelector autoCalibrationSelector,
         int vectorPerCluster,
         int centroidsPerParentCluster,
         TaskExecutor mergeExec,
@@ -127,9 +127,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         this.centroidsPerParentCluster = centroidsPerParentCluster;
         this.quantEncoding = encoding;
         this.quantizationAuto = quantizationAuto;
-        this.autoQuantizationSelector = autoQuantizationSelector != null
-            ? autoQuantizationSelector
-            : NoOpAutomaticQuantizationSelector.INSTANCE;
+        this.autoCalibrationSelector = autoCalibrationSelector != null
+            ? autoCalibrationSelector
+            : NoOpAutomaticCalibrationSelector.INSTANCE;
         this.mergeExec = mergeExec;
         this.numMergeWorkers = numMergeWorkers;
         this.blockDimension = blockDimension;
@@ -290,7 +290,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] overspillAssignments
     ) throws IOException {
         final long calibrationStartNanos = System.nanoTime();
-        final AutoQuantizationSelector.CalibrationResult calibrationResult = resolveCalibrationResult(
+        final AutoCalibrationSelector.CalibrationResult calibrationResult = resolveCalibrationResult(
             fieldInfo,
             floatVectorValues,
             centroidSupplier,
@@ -407,7 +407,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     ) throws IOException {
         final long calibrationStartNanos = System.nanoTime();
         final MergeCalibrationContext mergeCalibrationContext = MergeCalibrationContext.from(mergeState);
-        final AutoQuantizationSelector.CalibrationResult calibrationResult = resolveCalibrationResult(
+        final AutoCalibrationSelector.CalibrationResult calibrationResult = resolveCalibrationResult(
             fieldInfo,
             floatVectorValues,
             centroidSupplier,
@@ -678,7 +678,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             calibratedOversample = calibrationResultForCurrentField.oversample();
         } else {
             encodingToWrite = quantEncoding;
-            calibratedOversample = AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE;
+            calibratedOversample = AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE;
         }
         boolean calibratedDoPrecondition = quantizationAuto
             && calibrationResultForCurrentField != null
@@ -698,7 +698,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         MergeState mergeState,
         MergeCalibrationContext mergeCalibrationContext,
         long calibrationNanos,
-        AutoQuantizationSelector.CalibrationResult result
+        AutoCalibrationSelector.CalibrationResult result
     ) {
         int vectorCount = floatVectorValues.size();
         if (mergeState != null && mergeCalibrationContext != null) {
@@ -725,7 +725,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         }
     }
 
-    private AutoQuantizationSelector.CalibrationResult resolveCalibrationResult(
+    private AutoCalibrationSelector.CalibrationResult resolveCalibrationResult(
         FieldInfo fieldInfo,
         FloatVectorValues floatVectorValues,
         CentroidSupplier centroidSupplier,
@@ -734,7 +734,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         MergeState mergeState
     ) {
         if (quantizationAuto && mergeState != null) {
-            return autoQuantizationSelector.select(
+            return autoCalibrationSelector.select(
                 fieldInfo,
                 floatVectorValues,
                 centroidSupplier,
@@ -743,7 +743,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                 mergeState
             );
         }
-        return new AutoQuantizationSelector.CalibrationResult(quantEncoding, AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE, false);
+        return new AutoCalibrationSelector.CalibrationResult(quantEncoding, AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE, false);
     }
 
     /**

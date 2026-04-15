@@ -21,11 +21,9 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.PriorityQueue;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Manifold model for distance/similarity as a function of rank and corpus size.
@@ -103,13 +101,7 @@ public final class ManifoldModel {
 
     static final int[] SAMPLE_SIZES_FAST = { 4096, 5632, 7168, 8704, 10240, 11776, 13312, 16384 };
 
-    /**
-     * Maximum corpus chunk size (difference between consecutive {@link #SAMPLE_SIZES} entries);
-     * reused distance buffers are sized to this length.
-     */
-    static final int MAX_MANIFOLD_CHUNK = 4096;
-
-    private static final int PARALLEL_QUERY_THRESHOLD = 8;
+    private static final int PARALLEL_QUERY_THRESHOLD = Integer.MAX_VALUE;
 
     private ManifoldModel() {}
 
@@ -122,7 +114,6 @@ public final class ManifoldModel {
         CalibrationQueries queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
-        boolean cosine,
         int k
     ) throws IOException {
         return estimateManifoldParameters(similarityFunction, dim, queries, fvv, corpusOrdinals, k, ranksForK(k), SAMPLE_SIZES);
@@ -137,19 +128,9 @@ public final class ManifoldModel {
         CalibrationQueries queries,
         FloatVectorValues fvv,
         int[] corpusOrdinals,
-        boolean cosine,
         int k
     ) throws IOException {
-        return estimateManifoldParameters(
-            similarityFunction,
-            dim,
-            queries,
-            fvv,
-            corpusOrdinals,
-            k,
-            ranksForKFast(k),
-            SAMPLE_SIZES_FAST
-        );
+        return estimateManifoldParameters(similarityFunction, dim, queries, fvv, corpusOrdinals, k, ranksForKFast(k), SAMPLE_SIZES_FAST);
     }
 
     static int[] ranksForK(int k) {
@@ -209,13 +190,15 @@ public final class ManifoldModel {
         for (int i = 0; i < m; i++) {
             int rank = ranksForK[i];
             int sampleEnd = sampleSizes[i];
-            if (sampleEnd > nDocsTotal) break;
+            if (sampleEnd > nDocsTotal) {
+                break;
+            }
             double avgDist;
+            // compute average rank-th distance across sampled queries
             if (nQueries >= PARALLEL_QUERY_THRESHOLD && Runtime.getRuntime().availableProcessors() > 1) {
                 avgDist = averageIthDistanceParallel(dim, rank, queries, fvv, corpusOrdinals, sampleStart, sampleEnd, topKs, nQueries);
             } else {
                 double sum = 0;
-                // compute average rank-th distance across sampled queries
                 for (int qi = 0; qi < nQueries; qi++) {
                     queries.copyQuery(qi, false, queryScratch);
                     topKs[qi].add(dim, queryScratch, fvv, corpusOrdinals, sampleStart, sampleEnd);
@@ -232,7 +215,7 @@ public final class ManifoldModel {
         if (logCount < 2) {
             return new double[] { 0, 0 };
         }
-        // builds regression variables:
+        // build regression variables
         // x = log(rank) - log(sampleSize) = log(k/N)
         // y = log(distance)
         double[] x = new double[logCount];
@@ -242,9 +225,11 @@ public final class ManifoldModel {
         double[] y = new double[logCount];
         System.arraycopy(logDistances, 0, y, 0, logCount);
 
+        // for different sample sizes, the typical distance to the rank-th nearest neighbor is avgDist.
+        // log(alpha) + (1/d) * (log(rank) - log(sampleSize)) = log(distance)
         // fit regression model (log(alpha) and 1/d) and compute R²
         Regression.OLSResult res = Regression.fitOls(x, y);
-        double r2 = Regression.rSquared(x, y, res);
+        double r2 = Regression.rSquared(x, y, res); // coefficient of determination for the fitted model
         double elapsed = (System.nanoTime() - startNanos) / 1_000_000_000.0;
         logger.info(
             "------------------------------------------\nEstimated manifold parameters in [{}]s\ndist(k) = [{}] * (k/N)^[{}] (R² = [{}])",
@@ -267,18 +252,19 @@ public final class ManifoldModel {
         ManifoldTopK[] topKs,
         int nQueries
     ) throws IOException {
+        // TODO : revisit usage of workers / thread pool
         int workers = Math.min(nQueries, Runtime.getRuntime().availableProcessors());
         double[] partialSums = new double[nQueries];
         int[] queryStarts = new int[workers + 1];
         for (int w = 0; w <= workers; w++) {
             queryStarts[w] = w * nQueries / workers;
         }
-        ExecutorService pool = Executors.newFixedThreadPool(workers, r -> {
+        try (ExecutorService pool = Executors.newFixedThreadPool(workers, r -> {
             Thread t = new Thread(r, "manifold-calibration");
             t.setDaemon(true);
             return t;
-        });
-        try {
+        });) {
+
             List<Future<?>> futures = new ArrayList<>(workers);
             for (int w = 0; w < workers; w++) {
                 int w0 = w;
@@ -299,31 +285,8 @@ public final class ManifoldModel {
             for (Future<?> future : futures) {
                 future.get();
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException(e);
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof UncheckedIOException uio) {
-                throw uio.getCause();
-            }
-            if (cause instanceof IOException ioe) {
-                throw ioe;
-            }
-            if (cause instanceof RuntimeException re) {
-                throw re;
-            }
-            throw new IOException(cause);
-        } finally {
-            pool.shutdown();
-            try {
-                if (pool.awaitTermination(1, TimeUnit.HOURS) == false) {
-                    pool.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                pool.shutdownNow();
-            }
+        } catch (Throwable t) {
+            throw new IOException(t);
         }
         double sum = 0;
         for (int qi = 0; qi < nQueries; qi++) {

@@ -127,7 +127,7 @@ class KnnSearcher {
         this.indexType = testConfiguration.indexType();
         this.doPrecondition = testConfiguration.doPrecondition();
         this.useCalibrationOversample = indexType == KnnIndexTester.IndexType.IVF
-            && Integer.valueOf(0).equals(testConfiguration.quantizeBits());
+            && testConfiguration.autoCalibrate();
     }
 
     void runSearch(KnnIndexTester.Results finalResults, SearchParameters searchParameters, Directory dir) throws IOException {
@@ -478,14 +478,13 @@ class KnnSearcher {
     TopDocs doVectorQuery(float[] vector, IndexSearcher searcher, Query filterQuery, SearchParameters searchParameters) throws IOException {
         Query knnQuery;
         int overSampledTopK = searchParameters.topK();
-        if (searchParameters.overSamplingFactor() > 1f) {
+        if (searchParameters.overSamplingFactor() > 1f && useCalibrationOversample == false) {
             // oversample the topK results to get more candidates for the final result
             overSampledTopK = (int) Math.ceil(overSampledTopK * searchParameters.overSamplingFactor());
         }
         int efSearch = Math.max(overSampledTopK, searchParameters.numCandidates());
         if (indexType == KnnIndexTester.IndexType.IVF) {
             float visitRatio = (float) (searchParameters.visitPercentage() / 100);
-            boolean applyCalibrationOversample = useCalibrationOversample && searchParameters.overSamplingFactor() <= 1f;
             knnQuery = new IVFKnnFloatVectorQuery(
                 VECTOR_FIELD,
                 vector,
@@ -494,7 +493,7 @@ class KnnSearcher {
                 filterQuery,
                 visitRatio,
                 doPrecondition,
-                applyCalibrationOversample,
+                useCalibrationOversample,
                 similarityFunction
             );
         } else {

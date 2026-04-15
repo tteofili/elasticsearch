@@ -15,12 +15,11 @@ import org.apache.lucene.index.MergeState;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
 
 /**
- * Selects a concrete {@link ESNextDiskBBQVectorsFormat.QuantEncoding} at segment write time
- * (flush or merge) for IVF/diskbbq when automatic quantization is enabled.
- * The implementation can be replaced for more advanced selection logic.
+ * Selects i) a concrete {@link ESNextDiskBBQVectorsFormat.QuantEncoding}, ii) the required oversampling ratio, and
+ * iii) whether preconditioning should be used, at segment write time for IVF/diskbbq when automatic calibration is enabled.
  */
 @FunctionalInterface
-public interface AutoQuantizationSelector {
+public interface AutoCalibrationSelector {
 
     /**
      * Default oversample used when the segment is too small for calibration.
@@ -54,7 +53,7 @@ public interface AutoQuantizationSelector {
      * @param mergeState        non-null when merging, null on flush. Bounded (force-merge) merges are
      *                          identified from the merged segment's Lucene diagnostics and may take a
      *                          different calibration path than background merges (see
-     *                          {@link CalibratingAutoQuantizationSelector}).
+     *                          {@link ManifoldErrorCalibrationSelector}).
      * @return calibration result containing the encoding and oversample (never null)
      */
     CalibrationResult select(

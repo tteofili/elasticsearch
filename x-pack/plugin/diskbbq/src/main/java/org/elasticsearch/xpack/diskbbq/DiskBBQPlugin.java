@@ -71,6 +71,22 @@ public class DiskBBQPlugin extends Plugin implements InternalVectorFormatProvide
                     boolean doPrecondition = diskbbq.doPrecondition();
                     int flatIndexThreshold = diskbbq.getFlatIndexThreshold();
                     if (Build.current().isSnapshot()) {
+                        if (diskbbq.autoCalibrate()) {
+                            return new ESNextDiskBBQVectorsFormat(
+                                ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) diskbbq.getBits()),
+                                true,
+                                null,
+                                clusterSize,
+                                ES920DiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
+                                elementType,
+                                onDiskRescore,
+                                mergingExecutorService,
+                                maxMergingWorkers,
+                                doPrecondition,
+                                ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
+                                flatIndexThreshold
+                            );
+                        }
                         return new ESNextDiskBBQVectorsFormat(
                             ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) diskbbq.getBits()),
                             clusterSize,

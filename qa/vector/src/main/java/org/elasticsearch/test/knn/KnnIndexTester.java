@@ -199,7 +199,10 @@ public class KnnIndexTester {
                             : args.secondaryClusterSize()
                     )
                 );
-                suffix.add(args.quantizeBits() == 0 ? "auto" : Integer.toString(args.quantizeBits()));
+                suffix.add(Integer.toString(args.quantizeBits()));
+                if (args.autoCalibrate()) {
+                    suffix.add("cal");
+                }
             }
             case HNSW -> {
                 suffix.add(Integer.toString(args.hnswM()));
@@ -222,8 +225,9 @@ public class KnnIndexTester {
         format = switch (args.indexType()) {
             case IVF -> {
                 int flatVectorThreshold = args.flatVectorThreshold() >= 0 ? args.flatVectorThreshold() : -1;
-                if (quantizeBits == 0) {
+                if (args.autoCalibrate()) {
                     yield new ESNextDiskBBQVectorsFormat(
+                        ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits(quantizeBits.byteValue()),
                         true,
                         null,
                         args.ivfClusterSize(),
@@ -588,9 +592,9 @@ public class KnnIndexTester {
     private static void checkQuantizeBits(TestConfiguration args) {
         switch (args.indexType()) {
             case IVF:
-                if (args.quantizeBits() == null || !Set.of(0, 1, 2, 4, 7).contains(args.quantizeBits())) {
+                if (args.quantizeBits() == null || !Set.of(1, 2, 4, 7).contains(args.quantizeBits())) {
                     throw new IllegalArgumentException(
-                        "IVF index type only supports 1, 2, 4, 7 bits or \"auto\" (0) quantization, but got: " + args.quantizeBits()
+                        "IVF index type requires quantize_bits 1, 2, 4, or 7, but got: " + args.quantizeBits()
                     );
                 }
                 break;

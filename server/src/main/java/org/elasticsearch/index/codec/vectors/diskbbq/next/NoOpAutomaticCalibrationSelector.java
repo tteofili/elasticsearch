@@ -15,14 +15,14 @@ import org.apache.lucene.index.MergeState;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
 
 /**
- * Default implementation of {@link AutoQuantizationSelector}.
+ * Default implementation of {@link AutoCalibrationSelector}.
  * Returns a fixed encoding; can be replaced with a more advanced implementation.
  */
-public final class NoOpAutomaticQuantizationSelector implements AutoQuantizationSelector {
+public final class NoOpAutomaticCalibrationSelector implements AutoCalibrationSelector {
 
-    public static final NoOpAutomaticQuantizationSelector INSTANCE = new NoOpAutomaticQuantizationSelector();
+    public static final NoOpAutomaticCalibrationSelector INSTANCE = new NoOpAutomaticCalibrationSelector();
 
-    private NoOpAutomaticQuantizationSelector() {}
+    private NoOpAutomaticCalibrationSelector() {}
 
     @Override
     public CalibrationResult select(

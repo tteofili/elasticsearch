@@ -437,7 +437,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     indexVersionCreated,
                     false,
                     bits,
-                    true,
+                    true, // auto_calibrate: default on-disk BBQ uses merge-time calibration
                     experimentalFeaturesEnabled
                 );
             }
@@ -1890,21 +1890,24 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 boolean onDiskRescore = XContentMapValues.nodeBooleanValue(onDiskRescoreNode, false);
 
                 Object quantizeBitsNode = indexOptionsMap.remove("bits");
-                boolean quantizationAuto = false;
                 int quantizeBits = DEFAULT_BBQ_IVF_QUANTIZE_BITS;
                 if (quantizeBitsNode != null) {
                     if ("auto".equals(quantizeBitsNode)) {
-                        quantizationAuto = true;
-                    } else {
-                        quantizeBits = XContentMapValues.nodeIntegerValue(quantizeBitsNode, DEFAULT_BBQ_IVF_QUANTIZE_BITS);
-                        if ((quantizeBits == 1 || quantizeBits == 2 || quantizeBits == 4 || quantizeBits == 7) == false) {
-                            throw new IllegalArgumentException(
-                                "'bits' must be 1, 2, 4, 7 or \"auto\", got: " + quantizeBitsNode + " for field [" + fieldName + "]"
-                            );
-                        }
+                        throw new IllegalArgumentException(
+                            "index_options.bits cannot be \"auto\"; specify a numeric value (1, 2, 4, or 7) and set [auto_calibrate] to true for merge-time calibration ["
+                                + fieldName
+                                + "]"
+                        );
+                    }
+                    quantizeBits = XContentMapValues.nodeIntegerValue(quantizeBitsNode, DEFAULT_BBQ_IVF_QUANTIZE_BITS);
+                    if ((quantizeBits == 1 || quantizeBits == 2 || quantizeBits == 4 || quantizeBits == 7) == false) {
+                        throw new IllegalArgumentException(
+                            "'bits' must be 1, 2, 4, or 7, got: " + quantizeBitsNode + " for field [" + fieldName + "]"
+                        );
                     }
                 }
-                if (rescoreVector == null && quantizationAuto == false) {
+                boolean autoCalibrate = XContentMapValues.nodeBooleanValue(indexOptionsMap.remove("auto_calibrate"), false);
+                if (rescoreVector == null && autoCalibrate == false) {
                     // adjust the oversampling factor based on quantization scheme
                     // no oversampling with 4 bits
                     if (quantizeBits == 2) {
@@ -1926,7 +1929,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     indexVersion,
                     doPrecondition,
                     quantizeBits,
-                    quantizationAuto,
+                    autoCalibrate,
                     experimentalFeaturesEnabled
                 );
             }
@@ -2608,7 +2611,8 @@ public class DenseVectorFieldMapper extends FieldMapper {
         final IndexVersion indexVersionCreated;
         final int bits;
         final boolean doPrecondition;
-        final boolean quantizationAuto;
+        /** When true, merge-time calibration may set encoding, oversample, and preconditioning per segment. */
+        final boolean autoCalibrate;
         final boolean experimentalFeaturesEnabled;
 
         BBQIVFIndexOptions(
@@ -2620,7 +2624,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
             IndexVersion indexVersionCreated,
             boolean doPrecondition,
             int bits,
-            boolean quantizationAuto,
+            boolean autoCalibrate,
             boolean experimentalFeaturesEnabled
         ) {
             super(VectorIndexType.BBQ_DISK, rescoreVector);
@@ -2631,8 +2635,13 @@ public class DenseVectorFieldMapper extends FieldMapper {
             this.indexVersionCreated = indexVersionCreated;
             this.bits = bits;
             this.doPrecondition = doPrecondition;
-            this.quantizationAuto = quantizationAuto;
+            this.autoCalibrate = autoCalibrate;
             this.experimentalFeaturesEnabled = experimentalFeaturesEnabled;
+        }
+
+        /** Whether merge-time calibration is enabled for this field. */
+        public boolean autoCalibrate() {
+            return autoCalibrate;
         }
 
         @Override
@@ -2647,8 +2656,9 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 );
             }
             if (indexVersionCreated.onOrAfter(DISK_BBQ_QUANTIZE_BITS) && experimentalFeaturesEnabled) {
-                if (quantizationAuto) {
+                if (autoCalibrate) {
                     return new ESNextDiskBBQVectorsFormat(
+                        ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) bits),
                         true,
                         null,
                         clusterSize,
@@ -2703,13 +2713,13 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 && defaultVisitPercentage == that.defaultVisitPercentage
                 && onDiskRescore == that.onDiskRescore
                 && bits == that.bits
-                && quantizationAuto == that.quantizationAuto
+                && autoCalibrate == that.autoCalibrate
                 && Objects.equals(rescoreVector, that.rescoreVector);
         }
 
         @Override
         int doHashCode() {
-            return Objects.hash(clusterSize, flatIndexThreshold, defaultVisitPercentage, onDiskRescore, rescoreVector, quantizationAuto);
+            return Objects.hash(clusterSize, flatIndexThreshold, defaultVisitPercentage, onDiskRescore, rescoreVector, autoCalibrate);
         }
 
         @Override
@@ -2729,7 +2739,10 @@ public class DenseVectorFieldMapper extends FieldMapper {
             if (rescoreVector != null) {
                 rescoreVector.toXContent(builder, params);
             }
-            builder.field("bits", quantizationAuto ? "auto" : bits);
+            builder.field("bits", bits);
+            if (autoCalibrate) {
+                builder.field("auto_calibrate", true);
+            }
             if (doPrecondition) {
                 builder.field("precondition", doPrecondition);
             }
@@ -3192,7 +3205,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
             // By default utilize the quantized oversample is configured
             // allow the user provided at query time overwrite
             boolean useAutoCalibrationOversample = indexOptions instanceof BBQIVFIndexOptions bbqIvfIndexOptions
-                && bbqIvfIndexOptions.quantizationAuto;
+                && bbqIvfIndexOptions.autoCalibrate;
             Float oversample = queryOversample;
             if (oversample == null
                 && useAutoCalibrationOversample == false
@@ -3219,8 +3232,8 @@ public class DenseVectorFieldMapper extends FieldMapper {
             } else if (indexOptions instanceof BBQIVFIndexOptions bbqIndexOptions) {
                 float defaultVisitRatio = (float) (bbqIndexOptions.defaultVisitPercentage / 100d);
                 float visitRatio = visitPercentage == null ? defaultVisitRatio : (float) (visitPercentage / 100d);
-                // For bits:auto, prefer per-segment calibration oversampling unless the user explicitly requested query-time rescore.
-                boolean useCalibrationOversample = bbqIndexOptions.quantizationAuto && queryOversample == null;
+                // when auto_calibrate, prefer per-segment calibration oversampling unless the user explicitly requested query-time rescore.
+                boolean useCalibrationOversample = bbqIndexOptions.autoCalibrate && queryOversample == null;
                 knnQuery = parentFilter != null
                     ? new DiversifyingChildrenIVFKnnFloatVectorQuery(
                         name(),

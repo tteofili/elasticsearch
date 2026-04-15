@@ -28,11 +28,11 @@ import java.io.IOException;
 import java.util.List;
 
 /**
- * Contract tests for {@link AutoQuantizationSelector}. Precondition selection for
- * {@link CalibratingAutoQuantizationSelector} is covered in
- * {@link CalibratingAutoQuantizationSelectorTests}.
+ * Contract tests for {@link AutoCalibrationSelector}. Precondition selection for
+ * {@link ManifoldErrorCalibrationSelector} is covered in
+ * {@link ManifoldErrorCalibrationSelectorTests}.
  */
-public class AutoQuantizationSelectorTests extends ESTestCase {
+public class AutoCalibrationSelectorTests extends ESTestCase {
 
     public void testDefaultSelectorReturnsValidEncoding() throws IOException {
         int dimension = 4;
@@ -64,7 +64,7 @@ public class AutoQuantizationSelectorTests extends ESTestCase {
 
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension);
 
-        AutoQuantizationSelector.CalibrationResult result = NoOpAutomaticQuantizationSelector.INSTANCE.select(
+        AutoCalibrationSelector.CalibrationResult result = NoOpAutomaticCalibrationSelector.INSTANCE.select(
             fieldInfo,
             fvv,
             supplier,
@@ -74,7 +74,7 @@ public class AutoQuantizationSelectorTests extends ESTestCase {
         );
         assertNotNull(result);
         assertSame(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, result.encoding());
-        assertEquals(AutoQuantizationSelector.NO_CALIBRATED_OVERSAMPLE, result.oversample(), 0.0f);
+        assertEquals(AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE, result.oversample(), 0.0f);
     }
 
     public void testNoOpSelectorAlwaysReportsPreconditionFalse() throws IOException {
@@ -106,7 +106,7 @@ public class AutoQuantizationSelectorTests extends ESTestCase {
         KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(vectorsList, null, dimension);
         FieldInfo fieldInfo = getFieldInfoFromIndex(dimension);
 
-        AutoQuantizationSelector.CalibrationResult result = NoOpAutomaticQuantizationSelector.INSTANCE.select(
+        AutoCalibrationSelector.CalibrationResult result = NoOpAutomaticCalibrationSelector.INSTANCE.select(
             fieldInfo,
             fvv,
             supplier,
