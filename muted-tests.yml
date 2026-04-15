@@ -357,6 +357,18 @@ tests:
 - class: org.elasticsearch.backwards.MixedClusterClientYamlTestSuiteIT
   method: test {p0=indices.resolve_cluster/20_resolve_system_index/Resolve system index via resolve/cluster}
   issue: https://github.com/elastic/elasticsearch/issues/146312
+- class: org.elasticsearch.xpack.esql.CsvIT
+  method: test {csv-spec:text-embedding.text_embedding scores by stable sort}
+  issue: https://github.com/elastic/elasticsearch/issues/146338
+- class: org.elasticsearch.xpack.esql.CsvIT
+  method: test {csv-spec:text-embedding.text_embedding with multiple knn queries in fork}
+  issue: https://github.com/elastic/elasticsearch/issues/146339
+- class: org.elasticsearch.xpack.esql.ccq.MultiClusterSpecIT
+  method: test {csv-spec:text-embedding.text_embedding with multiple knn queries in fork}
+  issue: https://github.com/elastic/elasticsearch/issues/146341
+- class: org.elasticsearch.xpack.esql.ccq.MultiClusterSpecIT
+  method: test {csv-spec:text-embedding.text_embedding scores by stable sort}
+  issue: https://github.com/elastic/elasticsearch/issues/146342
 
 # Examples:
 #
