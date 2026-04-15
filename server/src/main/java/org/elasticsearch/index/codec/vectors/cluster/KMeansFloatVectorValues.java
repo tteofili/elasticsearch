@@ -95,6 +95,11 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
     }
 
     @Override
+    public DocIndexIterator iterator() {
+        return docs == null ? createDenseIterator() : createSparseIterator();
+    }
+
+    @Override
     public int dimension() {
         return vectors.dims();
     }
@@ -106,10 +111,7 @@ public final class KMeansFloatVectorValues extends ClusteringFloatVectorValues {
 
     @Override
     public int ordToDoc(int ord) {
-        if (docs == null) {
-            return ord;
-        }
-        return docs.ordToDoc(ord);
+        return docs == null ? ord : docs.ordToDoc(ord);
     }
 
     private sealed interface VectorSupplier permits OffHeapVectorSupplier, OnHeapVectorSupplier, FloatVectorValuesSupplier {
