@@ -712,7 +712,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int vectorCount = floatVectorValues.size();
         if (mergeState != null && mergeCalibrationContext != null) {
             logger.info(
-                "diskbbq auto-quantization calibration field=[{}] segment=[{}] maxDoc={} vectorCount={} mergeKind={} inputSegments={} mergeMaxNumSegments={} took=[{}] result={}",
+                "diskbbq auto-calibration field=[{}] segment=[{}] maxDoc={} vectorCount={} mergeKind={} inputSegments={} mergeMaxNumSegments={} took=[{}] result={}",
                 fieldInfo.name,
                 mergeState.segmentInfo.name,
                 mergeState.segmentInfo.maxDoc(),
@@ -725,7 +725,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             );
         } else {
             logger.info(
-                "diskbbq auto-quantization calibration field=[{}] vectorCount={} mergeKind=[flush] took=[{}] result={}",
+                "diskbbq auto-calibration field=[{}] vectorCount={} mergeKind=[flush] took=[{}] result={}",
                 fieldInfo.name,
                 vectorCount,
                 TimeValue.timeValueNanos(calibrationNanos),

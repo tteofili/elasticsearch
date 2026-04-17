@@ -15,7 +15,7 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Summarizes Lucene merge metadata used for diskbbq auto-quantization calibration decisions and logging.
+ * Summarizes Lucene merge metadata used for diskbbq auto-calibration decisions and logging.
  * <p>
  * Bounded (force-merge) merges are detected via {@code mergeMaxNumSegments} in the merged segment's
  * diagnostics (see Lucene {@code IndexWriter}): background merges use {@code -1} (unbounded); force
