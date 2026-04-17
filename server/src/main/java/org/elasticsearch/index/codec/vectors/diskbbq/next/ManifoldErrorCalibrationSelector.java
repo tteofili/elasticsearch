@@ -151,10 +151,11 @@ public class ManifoldErrorCalibrationSelector implements AutoCalibrationSelector
                 mergeCtx.inputSegments()
             );
             try {
-                FastCalibrationOutcome fastOutcome = runFastCalibration(floatVectorValues, dim, similarityFunction, numVectors, mergeCtx);
-                if (fastOutcome.metTargetRecall()) {
-                    return fastOutcome.result();
-                }
+                // TODO : use fast if met target recall AND with good quantization error OLS fit
+                //FastCalibrationOutcome fastOutcome = runFastCalibration(floatVectorValues, dim, similarityFunction, numVectors, mergeCtx);
+                //if (fastOutcome.metTargetRecall()) {
+                //    return fastOutcome.result();
+                //}
                 return calibrate(floatVectorValues, dim, similarityFunction, numVectors);
             } catch (IOException e) {
                 logger.warn("calibration failed on bounded force merge, falling back to ONE_BIT_4BIT_QUERY", e);
