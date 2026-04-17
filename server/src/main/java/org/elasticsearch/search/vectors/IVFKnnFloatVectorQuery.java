@@ -32,6 +32,13 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
 
     private boolean isQueryPreconditioned = false;
     private float[] query;
+    /**
+     * Always the original, caller-supplied (un-preconditioned) query vector. Used for segments that
+     * have no stored preconditioner (e.g., flush segments) when a different segment in the same search
+     * has been preconditioned. Keeping this reference avoids using a preconditioned query against data
+     * that was indexed in the original coordinate space.
+     */
+    private final float[] originalQuery;
     private final VectorSimilarityFunction vectorSimilarityFunction;
 
     /**
@@ -54,6 +61,7 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
     ) {
         super(field, visitRatio, k, numCands, filter, doPrecondition);
         this.query = query;
+        this.originalQuery = query;
         this.vectorSimilarityFunction = null;
     }
 
@@ -69,6 +77,7 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
     ) {
         super(field, visitRatio, k, numCands, filter, doPrecondition, useCalibrationOversample);
         this.query = query;
+        this.originalQuery = query;
         this.vectorSimilarityFunction = null;
     }
 
@@ -85,6 +94,7 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
     ) {
         super(field, visitRatio, k, numCands, filter, doPrecondition, useCalibrationOversample);
         this.query = query;
+        this.originalQuery = query;
         this.vectorSimilarityFunction = vectorSimilarityFunction;
     }
 
@@ -144,8 +154,8 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
                 FieldInfo fieldInfo = segmentReader.getFieldInfos().fieldInfo(field);
                 Preconditioner preconditioner = ((VectorPreconditioner) knnVectorsReader).getPreconditioner(fieldInfo);
                 if (preconditioner != null) {
-                    final float[] out = new float[query.length];
-                    preconditioner.applyTransform(query, out);
+                    final float[] out = new float[originalQuery.length];
+                    preconditioner.applyTransform(originalQuery, out);
                     // have to keep the copy to avoid issues with reused arrays by the caller of IVFKnnFloatVectorQuery which expects
                     // a non-preconditioned query vector to still exist
                     query = out;
@@ -153,6 +163,34 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
                 }
             }
         }
+    }
+
+    /**
+     * Returns the effective query vector for the given segment: the preconditioned vector when
+     * the segment has a stored preconditioner (i.e., its data is in preconditioned space), or the
+     * original un-preconditioned vector otherwise (e.g., flush segments that were indexed before
+     * calibration decided to use preconditioning).
+     */
+    private float[] resolveEffectiveQuery(LeafReaderContext context) throws IOException {
+        if (isQueryPreconditioned == false) {
+            return originalQuery;
+        }
+        SegmentReader segmentReader = Lucene.tryUnwrapSegmentReader(context.reader());
+        if (segmentReader != null) {
+            KnnVectorsReader fieldsReader = segmentReader.getVectorReader();
+            if (fieldsReader instanceof PerFieldKnnVectorsFormat.FieldsReader perFieldReader) {
+                KnnVectorsReader knnVectorsReader = perFieldReader.getFieldReader(field);
+                if (knnVectorsReader instanceof VectorPreconditioner vp) {
+                    FieldInfo fieldInfo = segmentReader.getFieldInfos().fieldInfo(field);
+                    if (fieldInfo != null && vp.getPreconditioner(fieldInfo) != null) {
+                        // segment data is in preconditioned space → use preconditioned query
+                        return query;
+                    }
+                }
+            }
+        }
+        // segment has no preconditioner → data is in original space
+        return originalQuery;
     }
 
     @Override
@@ -178,7 +216,7 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
             return NO_RESULTS;
         }
         strategy.setCollector(knnCollector);
-        reader.searchNearestVectors(field, query, knnCollector, acceptDocs);
+        reader.searchNearestVectors(field, resolveEffectiveQuery(context), knnCollector, acceptDocs);
         TopDocs results = knnCollector.topDocs();
         return results != null ? results : NO_RESULTS;
     }
@@ -189,6 +227,6 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
             return null;
         }
         Query topDocsQuery = new KnnScoreDocQuery(topOversampled.scoreDocs, indexSearcher.getIndexReader());
-        return RescoreKnnVectorQuery.fromInnerQuery(field, query, vectorSimilarityFunction, k, effectiveK, topDocsQuery);
+        return RescoreKnnVectorQuery.fromInnerQuery(field, originalQuery, vectorSimilarityFunction, k, effectiveK, topDocsQuery);
     }
 }

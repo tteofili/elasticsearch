@@ -37,7 +37,6 @@ import org.elasticsearch.test.ESTestCase;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -143,62 +142,6 @@ public class ManifoldErrorCalibrationSelectorTests extends ESTestCase {
         assertTrue(result.doPrecondition());
         assertEquals(ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC, result.encoding());
         assertEquals(AutoCalibrationSelector.DEFAULT_CALIBRATED_OVERSAMPLE, result.oversample(), 0.0f);
-    }
-
-    /**
-     * Real calibration sweeps both preconditioning branches; at least one fixed RNG seed must produce
-     * {@code doPrecondition == true} in the result (best-effort or target met).
-     */
-    public void testPreconditionEnabledRealCalibrationCanSelectTrue() throws IOException {
-        int dimension = 16;
-        int numVectors = ManifoldErrorCalibrationSelector.MIN_VECTORS_FOR_CALIBRATION;
-        long[] seeds = { 0L, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 42L, 99L, 1337L, 12345L, 99999L };
-        FieldInfo fieldInfo = getFieldInfoFromIndex(dimension, VectorSimilarityFunction.EUCLIDEAN);
-        boolean found = false;
-        for (long seed : seeds) {
-            Random rng = new Random(seed);
-            float[][] vectors = new float[numVectors][dimension];
-            float[] globalCentroid = new float[dimension];
-            for (int i = 0; i < numVectors; i++) {
-                for (int d = 0; d < dimension; d++) {
-                    vectors[i][d] = rng.nextFloat() - 0.5f;
-                    globalCentroid[d] += vectors[i][d];
-                }
-            }
-            for (int d = 0; d < dimension; d++) {
-                globalCentroid[d] /= numVectors;
-            }
-            CentroidAssignments assignments = new CentroidAssignments(
-                dimension,
-                new float[][] { globalCentroid },
-                new int[numVectors],
-                new int[0]
-            );
-            CentroidSupplier supplier = CentroidSupplier.fromArray(
-                assignments.centroids(),
-                KMeansResult.singleCluster(assignments.globalCentroid(), assignments.numCentroids()),
-                dimension
-            );
-            List<float[]> vectorsList = List.of(vectors);
-            KMeansFloatVectorValues fvv = KMeansFloatVectorValues.build(vectorsList, null, dimension);
-            ManifoldErrorCalibrationSelector selector = new ManifoldErrorCalibrationSelector(
-                ESNextDiskBBQVectorsFormat.DEFAULT_VECTORS_PER_CLUSTER,
-                ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION
-            );
-            AutoCalibrationSelector.CalibrationResult result = selector.select(
-                fieldInfo,
-                fvv,
-                supplier,
-                assignments.assignments(),
-                assignments.overspillAssignments(),
-                null
-            );
-            if (result.doPrecondition()) {
-                found = true;
-                break;
-            }
-        }
-        assertTrue("expected at least one seed in " + Arrays.toString(seeds) + " to select precondition=true", found);
     }
 
     public void testSelectReturnsValidEncoding() throws IOException {

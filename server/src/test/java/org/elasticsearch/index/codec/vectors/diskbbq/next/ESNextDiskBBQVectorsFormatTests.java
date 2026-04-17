@@ -447,7 +447,10 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
     public void testIVFSidecarLengthsConsistentWithOffHeapStats() throws IOException {
         int dimensions = 32;
         int numDocs = 1500;
-        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+        // Disable compound files so that sidecar files (.mivf, .ceni, .clivf) remain as
+        // standalone files in the directory; compound files would pack them into a .cfs
+        // file, making maxFileLengthForExtension return -1.
+        try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig().setUseCompoundFile(false))) {
             for (int i = 0; i < numDocs; i++) {
                 Document doc = new Document();
                 doc.add(new KnnFloatVectorField("f", randomVector(dimensions), VectorSimilarityFunction.DOT_PRODUCT));
@@ -486,7 +489,14 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
                 long metaFileLength = maxFileLengthForExtension(dir, ESNextDiskBBQVectorsFormat.IVF_META_EXTENSION);
                 assertTrue("ivf meta sidecar length must be > 0", metaFileLength > 0);
 
-                assertTrue("centroid sidecar stats length must be <= centroid file length", centroidLengthFromStats <= centroidFileLength);
+                assertTrue(
+                    "centroid sidecar stats length (="
+                        + centroidLengthFromStats
+                        + ") must be <= centroid file length (="
+                        + centroidFileLength
+                        + ")",
+                    centroidLengthFromStats <= centroidFileLength
+                );
                 assertTrue("cluster sidecar stats length must be <= cluster file length", clusterLengthFromStats <= clusterFileLength);
             }
         }

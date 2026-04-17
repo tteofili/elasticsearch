@@ -9,18 +9,22 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.next;
 
+import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
+import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.store.ByteBuffersDataOutput;
+import org.apache.lucene.store.ChecksumIndexInput;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.util.StringHelper;
 import org.apache.lucene.util.hnsw.IntToIntFunction;
 import org.apache.lucene.util.packed.DirectWriter;
 import org.apache.lucene.util.packed.PackedInts;
@@ -66,6 +70,7 @@ import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
 public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     private static final Logger logger = LogManager.getLogger(ESNextDiskBBQVectorsWriter.class);
 
+    private final SegmentWriteState state;
     private final int vectorPerCluster;
     private final int centroidsPerParentCluster;
     private final ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding;
@@ -123,6 +128,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             true,
             flatVectorThreshold
         );
+        this.state = state;
         this.vectorPerCluster = vectorPerCluster;
         this.centroidsPerParentCluster = centroidsPerParentCluster;
         this.quantEncoding = encoding;
@@ -159,7 +165,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     protected Preconditioner inheritPreconditioner(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
-        if (doPrecondition) {
+        if (doPrecondition || quantizationAuto) {
             for (KnnVectorsReader reader : mergeState.knnVectorsReaders) {
                 if (reader instanceof VectorPreconditioner) {
                     Preconditioner preconditioner = ((VectorPreconditioner) reader).getPreconditioner(fieldInfo);
@@ -178,7 +184,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     protected Preconditioner createPreconditioner(int dimension) {
-        if (doPrecondition) {
+        if (doPrecondition || quantizationAuto) {
             Preconditioner p = Preconditioner.createPreconditioner(dimension, blockDimension);
             if (quantizationAuto) {
                 savedPreconditioner = p;
@@ -228,6 +234,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             if (preconditioner != null) {
                 savedPreconditioner = preconditioner;
             }
+            // Defer preconditioning to buildAndWritePostingsLists after calibration has decided;
+            // applying it here would double-precondition when calibration also recommends doPrecondition=true.
+            return vectors;
         }
         if (doPrecondition == false) {
             return vectors;
@@ -733,7 +742,21 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] overspillAssignments,
         MergeState mergeState
     ) {
-        if (quantizationAuto && mergeState != null) {
+        if (quantizationAuto) {
+            if (mergeState == null) {
+                // On flush, try to reuse the calibration result from an already-written segment
+                // for this field rather than re-running calibration every time.
+                AutoCalibrationSelector.CalibrationResult existing = readCalibrationFromExistingSegments(fieldInfo);
+                if (existing != null) {
+                    logger.debug(
+                        "field=[{}] flush: reusing calibration from existing segment (encoding=[{}], doPrecondition=[{}])",
+                        fieldInfo.name,
+                        existing.encoding(),
+                        existing.doPrecondition()
+                    );
+                    return existing;
+                }
+            }
             return autoCalibrationSelector.select(
                 fieldInfo,
                 floatVectorValues,
@@ -744,6 +767,105 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             );
         }
         return new AutoCalibrationSelector.CalibrationResult(quantEncoding, AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE, false);
+    }
+
+    /**
+     * Scans the segment directory for existing {@link ESNextDiskBBQVectorsFormat#IVF_META_EXTENSION} files
+     * that belong to the same format instance (matched by segment suffix) and tries to read the calibration
+     * result for {@code fieldInfo} from the first matching file found.
+     * <p>
+     * This avoids re-running calibration on every flush when a prior calibration result already exists
+     * on disk. The preconditioner itself is deterministic from dimension and block dimension, so only the
+     * encoding, oversample, and doPrecondition values need to be persisted/reused.
+     */
+    private AutoCalibrationSelector.CalibrationResult readCalibrationFromExistingSegments(FieldInfo fieldInfo) {
+        String metaExt = ESNextDiskBBQVectorsFormat.IVF_META_EXTENSION;
+        String suffix = state.segmentSuffix;
+        // Files written by the same format instance for the same field share our segment suffix.
+        String fileSuffix = suffix.isEmpty() ? ("." + metaExt) : ("_" + suffix + "." + metaExt);
+        String currentFile = IndexFileNames.segmentFileName(state.segmentInfo.name, suffix, metaExt);
+
+        String[] files;
+        try {
+            files = state.directory.listAll();
+        } catch (IOException e) {
+            logger.debug("field=[{}] could not list directory to find existing calibration", fieldInfo.name, e);
+            return null;
+        }
+
+        for (String fileName : files) {
+            if (fileName.endsWith(fileSuffix) == false) continue;
+            if (fileName.equals(currentFile)) continue;
+            AutoCalibrationSelector.CalibrationResult result = tryReadCalibrationFromMetaFile(fileName, fieldInfo);
+            if (result != null) {
+                return result;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Opens an existing {@code .mivf} file and reads just the calibration fields (encoding, oversample,
+     * doPrecondition) for the field identified by {@code fieldInfo.number}.
+     * <p>
+     * Only fields whose number matches are returned; if the first field entry in the file does not match
+     * (which should not happen when the file was written by the same format instance for the same field),
+     * the file is skipped to avoid skipping variable-length entries for unknown dimensions.
+     *
+     * @return the calibration result for the field, or {@code null} if not found or on any parse error
+     */
+    private AutoCalibrationSelector.CalibrationResult tryReadCalibrationFromMetaFile(String fileName, FieldInfo fieldInfo) {
+        try (ChecksumIndexInput meta = state.directory.openChecksumInput(fileName)) {
+            CodecUtil.checkHeader(
+                meta,
+                ESNextDiskBBQVectorsFormat.NAME,
+                ESNextDiskBBQVectorsFormat.VERSION_START,
+                ESNextDiskBBQVectorsFormat.VERSION_CURRENT
+            );
+            // skip segment ID and suffix written by writeIndexHeader
+            meta.readBytes(new byte[StringHelper.ID_LENGTH], 0, StringHelper.ID_LENGTH);
+            meta.readString(); // suffix
+
+            int dim = fieldInfo.getVectorDimension();
+            for (int fn = meta.readInt(); fn != -1; fn = meta.readInt()) {
+                meta.readString(); // rawVectorFormat
+                meta.readByte();   // useDirectIOReads (always written by ESNextDiskBBQVectorsWriter)
+                meta.readInt();    // vectorEncoding
+                meta.readInt();    // similarityFunction
+                meta.readInt();    // numCentroids
+                meta.readLong();   // centroidOffset
+                long centroidLength = meta.readLong();
+                if (centroidLength > 0) {
+                    meta.readLong();                          // postingListOffset
+                    meta.readLong();                          // postingListLength
+                    meta.skipBytes((long) dim * Float.BYTES); // globalCentroid floats
+                    meta.readInt();                           // globalCentroidDp
+                }
+                // doWriteMeta fields:
+                meta.readInt();    // bulkSize
+                int encodingId = meta.readInt();
+                float oversample = Float.intBitsToFloat(meta.readInt());
+                boolean doPrecondition = meta.readByte() == 1;
+                long preconditionerLength = meta.readLong();
+                if (preconditionerLength > 0) {
+                    meta.readLong(); // preconditionerOffset
+                }
+
+                if (fn == fieldInfo.number) {
+                    return new AutoCalibrationSelector.CalibrationResult(
+                        ESNextDiskBBQVectorsFormat.QuantEncoding.fromId(encodingId),
+                        oversample,
+                        doPrecondition
+                    );
+                }
+                // If the first entry is not our field, stop: skipping further entries with unknown
+                // dimensions would require reading the .fnm file to find each field's dimension.
+                return null;
+            }
+        } catch (Exception e) {
+            logger.debug("field=[{}] could not read calibration from [{}], skipping", fieldInfo.name, fileName, e);
+        }
+        return null;
     }
 
     /**
