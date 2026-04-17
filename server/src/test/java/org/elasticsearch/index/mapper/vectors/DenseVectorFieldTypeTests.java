@@ -825,7 +825,7 @@ public class DenseVectorFieldTypeTests extends FieldTypeTestCase {
         }
     }
 
-    public void testAutoQuantizationUsesCalibrationOversampleAtQueryTime() {
+    public void testAutoCalibrationOversampleAtQueryTime() {
         float[] queryVector = new float[384];
         for (int i = 0; i < queryVector.length; i++) {
             queryVector[i] = randomFloat();

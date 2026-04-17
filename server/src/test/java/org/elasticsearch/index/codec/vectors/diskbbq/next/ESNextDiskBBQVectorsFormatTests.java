@@ -85,7 +85,7 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         LogConfigurator.configureESLogging(); // native access requires logging to be initialized
     }
 
-    private boolean automaticQuantizationEnabled;
+    private boolean automaticCalibration;
 
     @Override
     protected boolean supportsFloatVectorFallback() {
@@ -102,7 +102,7 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         )];
         boolean disableFlatOnFlush = random().nextBoolean();
         if (rarely()) {
-            automaticQuantizationEnabled = true;
+            automaticCalibration = true;
             format = new ESNextDiskBBQVectorsFormat(
                 true,
                 null,
@@ -207,8 +207,8 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         expectThrows(IllegalArgumentException.class, () -> new ESNextDiskBBQVectorsFormat(128, MAX_CENTROIDS_PER_PARENT_CLUSTER + 1));
     }
 
-    public void testAutoQuantizationFormat() throws IOException {
-        assumeTrue("Automatic Quantization is not enabled", automaticQuantizationEnabled);
+    public void testAutoCalibrationFormat() throws IOException {
+        assumeTrue("Automatic calibration is not enabled", automaticCalibration);
         int dimensions = random().nextInt(12, 128);
         int numDocs = random().nextInt(1000, 20000);
         try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
@@ -229,20 +229,20 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
         }
     }
 
-    public void testCalibratingAutoQuantizationWithEuclidean() throws IOException {
-        doTestCalibratingAutoQuantization(VectorSimilarityFunction.EUCLIDEAN);
+    public void testAutoCalibratingWithEuclidean() throws IOException {
+        doTestCalibration(VectorSimilarityFunction.EUCLIDEAN);
     }
 
-    public void testCalibratingAutoQuantizationWithDotProduct() throws IOException {
-        doTestCalibratingAutoQuantization(VectorSimilarityFunction.DOT_PRODUCT);
+    public void testAutoCalibrationWithDotProduct() throws IOException {
+        doTestCalibration(VectorSimilarityFunction.DOT_PRODUCT);
     }
 
-    public void testCalibratingAutoQuantizationWithMaxInnerProduct() throws IOException {
-        doTestCalibratingAutoQuantization(VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT);
+    public void testCalibrationWithMaxInnerProduct() throws IOException {
+        doTestCalibration(VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT);
     }
 
-    private void doTestCalibratingAutoQuantization(VectorSimilarityFunction similarity) throws IOException {
-        assumeTrue("Automatic Quantization is not enabled", automaticQuantizationEnabled);
+    private void doTestCalibration(VectorSimilarityFunction similarity) throws IOException {
+        assumeTrue("Automatic calibration is not enabled", automaticCalibration);
         int dimensions = random().nextInt(16, 128);
         int numDocs = random().nextInt(1000, 3000);
         try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
@@ -256,14 +256,14 @@ public class ESNextDiskBBQVectorsFormatTests extends BaseKnnVectorsFormatTestCas
             try (IndexReader reader = DirectoryReader.open(w)) {
                 LeafReader r = getOnlyLeafReader(reader);
                 FloatVectorValues fvv = r.getFloatVectorValues("f");
-                assertNotNull("expected float vector values after calibrating auto quantization", fvv);
+                assertNotNull("expected float vector values after auto calobration", fvv);
                 assertEquals("all vectors should be indexed", numDocs, fvv.size());
             }
         }
     }
 
     public void testCalibratedOversampleRoundTrip() throws IOException {
-        assumeTrue("Automatic Quantization is not enabled", automaticQuantizationEnabled);
+        assumeTrue("Automatic calibration is not enabled", automaticCalibration);
         int dimensions = random().nextInt(16, 128);
         int numDocs = random().nextInt(1000, 3000);
         try (Directory dir = newDirectory(); IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {

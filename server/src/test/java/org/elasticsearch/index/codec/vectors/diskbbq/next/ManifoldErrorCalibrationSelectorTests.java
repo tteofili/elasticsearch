@@ -313,7 +313,7 @@ public class ManifoldErrorCalibrationSelectorTests extends ESTestCase {
             assignments.overspillAssignments(),
             null
         );
-        assertSame(ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC, result.encoding());
+        assertSame(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, result.encoding());
         assertEquals(AutoCalibrationSelector.DEFAULT_CALIBRATED_OVERSAMPLE, result.oversample(), 0.0f);
     }
 

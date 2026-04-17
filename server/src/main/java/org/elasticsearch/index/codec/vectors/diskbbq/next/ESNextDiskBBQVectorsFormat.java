@@ -317,10 +317,10 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
     }
 
     /**
-     * Constructor for automatic quantization: encoding is resolved at segment write time via the selector.
+     * Constructor for automatic calibration: encoding is resolved at segment write time via the selector.
      */
     public ESNextDiskBBQVectorsFormat(
-        boolean quantizationAuto,
+        boolean autoCalibration,
         AutoCalibrationSelector autoCalibrationSelector,
         int vectorPerCluster,
         int centroidsPerParentCluster,
@@ -334,7 +334,7 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
     ) {
         this(
             QuantEncoding.ONE_BIT_4BIT_QUERY,
-            quantizationAuto,
+            autoCalibration,
             autoCalibrationSelector,
             vectorPerCluster,
             centroidsPerParentCluster,

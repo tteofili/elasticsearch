@@ -74,7 +74,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     private final int vectorPerCluster;
     private final int centroidsPerParentCluster;
     private final ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding;
-    private final boolean quantizationAuto;
+    private final boolean autoCalibration;
     private final AutoCalibrationSelector autoCalibrationSelector;
     private final TaskExecutor mergeExec;
     private final int numMergeWorkers;
@@ -97,7 +97,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
      * preconditioning can modify it in-place before writeMeta writes it to disk.
      */
     private float[] savedGlobalCentroid;
-    private long autoQuantizationCalibrationNanosThisMergeField;
+    private long autoCalibrationNanosThisMergeField;
 
     public ESNextDiskBBQVectorsWriter(
         SegmentWriteState state,
@@ -105,7 +105,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         boolean useDirectIOReads,
         FlatVectorsWriter rawVectorDelegate,
         ESNextDiskBBQVectorsFormat.QuantEncoding encoding,
-        boolean quantizationAuto,
+        boolean autoCalibration,
         AutoCalibrationSelector autoCalibrationSelector,
         int vectorPerCluster,
         int centroidsPerParentCluster,
@@ -132,7 +132,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         this.vectorPerCluster = vectorPerCluster;
         this.centroidsPerParentCluster = centroidsPerParentCluster;
         this.quantEncoding = encoding;
-        this.quantizationAuto = quantizationAuto;
+        this.autoCalibration = autoCalibration;
         this.autoCalibrationSelector = autoCalibrationSelector != null
             ? autoCalibrationSelector
             : NoOpAutomaticCalibrationSelector.INSTANCE;
@@ -144,13 +144,13 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     protected void mergeIvfStarted(MergeState mergeState) {
-        autoQuantizationCalibrationNanosThisMergeField = 0L;
+        autoCalibrationNanosThisMergeField = 0L;
     }
 
     @Override
     protected void mergeIvfCompleted(MergeState mergeState, FieldInfo fieldInfo, long totalMergeNanos) {
-        if (quantizationAuto) {
-            long calibrationNanos = autoQuantizationCalibrationNanosThisMergeField;
+        if (autoCalibration) {
+            long calibrationNanos = autoCalibrationNanosThisMergeField;
             double calibrationPercent = totalMergeNanos > 0 ? (100.0 * calibrationNanos / totalMergeNanos) : 0.0;
             logger.info(
                 "diskbbq IVF merge timing segment=[{}] field=[{}] total=[{}] calibration=[{}] calibrationPercent=[{}%]",
@@ -165,12 +165,12 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     protected Preconditioner inheritPreconditioner(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
-        if (doPrecondition || quantizationAuto) {
+        if (doPrecondition || autoCalibration) {
             for (KnnVectorsReader reader : mergeState.knnVectorsReaders) {
                 if (reader instanceof VectorPreconditioner) {
                     Preconditioner preconditioner = ((VectorPreconditioner) reader).getPreconditioner(fieldInfo);
                     if (preconditioner != null) {
-                        if (quantizationAuto) {
+                        if (autoCalibration) {
                             savedPreconditioner = preconditioner;
                         }
                         return preconditioner;
@@ -184,9 +184,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     protected Preconditioner createPreconditioner(int dimension) {
-        if (doPrecondition || quantizationAuto) {
+        if (doPrecondition || autoCalibration) {
             Preconditioner p = Preconditioner.createPreconditioner(dimension, blockDimension);
-            if (quantizationAuto) {
+            if (autoCalibration) {
                 savedPreconditioner = p;
             }
             return p;
@@ -196,7 +196,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     protected void writePreconditioner(Preconditioner preconditioner, IndexOutput out) throws IOException {
-        if (quantizationAuto) {
+        if (autoCalibration) {
             if (calibrationResultForCurrentField != null && calibrationResultForCurrentField.doPrecondition() && preconditioner != null) {
                 preconditioner.write(out);
             }
@@ -209,7 +209,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     protected Consumer<List<float[]>> preconditionVectors(Preconditioner preconditioner) {
-        if (quantizationAuto) {
+        if (autoCalibration) {
             return (vectors) -> {};
         }
         return (vectors) -> {
@@ -230,7 +230,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     protected FloatVectorValues preconditionVectors(Preconditioner preconditioner, FloatVectorValues vectors) {
-        if (quantizationAuto) {
+        if (autoCalibration) {
             if (preconditioner != null) {
                 savedPreconditioner = preconditioner;
             }
@@ -307,8 +307,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             overspillAssignments,
             null
         );
-        if (quantizationAuto) {
-            logAutoQuantizationCalibration(
+        if (autoCalibration) {
+            logAutoCalibration(
                 fieldInfo,
                 floatVectorValues,
                 null,
@@ -424,10 +424,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             overspillAssignments,
             mergeState
         );
-        if (quantizationAuto) {
+        if (autoCalibration) {
             final long calibrationNanos = System.nanoTime() - calibrationStartNanos;
-            autoQuantizationCalibrationNanosThisMergeField += calibrationNanos;
-            logAutoQuantizationCalibration(
+            autoCalibrationNanosThisMergeField += calibrationNanos;
+            logAutoCalibration(
                 fieldInfo,
                 floatVectorValues,
                 mergeState,
@@ -638,7 +638,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     @Override
     public CentroidSupplier createCentroidSupplier(IndexInput centroidsInput, int numCentroids, FieldInfo fieldInfo, float[] globalCentroid)
         throws IOException {
-        if (quantizationAuto) {
+        if (autoCalibration) {
             savedGlobalCentroid = globalCentroid;
         }
         CentroidSupplier centroidSupplier = new OffHeapCentroidSupplier(
@@ -656,7 +656,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     public CentroidSupplier createCentroidSupplier(FieldInfo info, float[][] centroids, float[] globalCentroid) throws IOException {
-        if (quantizationAuto) {
+        if (autoCalibration) {
             savedGlobalCentroid = globalCentroid;
         }
         CentroidSupplier centroidSupplier = CentroidSupplier.fromArray(
@@ -682,14 +682,14 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         metaOutput.writeInt(ES940OSQVectorsScorer.BULK_SIZE);
         ESNextDiskBBQVectorsFormat.QuantEncoding encodingToWrite;
         float calibratedOversample;
-        if (quantizationAuto && calibrationResultForCurrentField != null) {
+        if (autoCalibration && calibrationResultForCurrentField != null) {
             encodingToWrite = calibrationResultForCurrentField.encoding();
             calibratedOversample = calibrationResultForCurrentField.oversample();
         } else {
             encodingToWrite = quantEncoding;
             calibratedOversample = AutoCalibrationSelector.NO_CALIBRATED_OVERSAMPLE;
         }
-        boolean calibratedDoPrecondition = quantizationAuto
+        boolean calibratedDoPrecondition = autoCalibration
             && calibrationResultForCurrentField != null
             && calibrationResultForCurrentField.doPrecondition();
         metaOutput.writeInt(encodingToWrite.id());
@@ -701,7 +701,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         }
     }
 
-    private void logAutoQuantizationCalibration(
+    private void logAutoCalibration(
         FieldInfo fieldInfo,
         FloatVectorValues floatVectorValues,
         MergeState mergeState,
@@ -742,7 +742,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] overspillAssignments,
         MergeState mergeState
     ) {
-        if (quantizationAuto) {
+        if (autoCalibration) {
             if (mergeState == null) {
                 // On flush, try to reuse the calibration result from an already-written segment
                 // for this field rather than re-running calibration every time.
@@ -964,7 +964,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     }
 
     private boolean shouldApplyDeferredPreconditioning() {
-        return quantizationAuto
+        return autoCalibration
             && calibrationResultForCurrentField != null
             && calibrationResultForCurrentField.doPrecondition()
             && savedPreconditioner != null;
