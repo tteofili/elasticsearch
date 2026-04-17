@@ -545,15 +545,6 @@ public final class ErrorModel {
             String.format(Locale.ROOT, "%.4f", r2q)
         );
 
-        if (logger.isDebugEnabled()) {
-            logger.debug(
-                "Fit error scaling models: centroid error {} (L/N)^{}, quantization error (L/N)^{}",
-                Math.exp(cparams.beta0()),
-                cparams.beta1(),
-                qparams.beta1()
-            );
-        }
-
         return new RepErrorStdModel(cparams, qparams);
     }
 
@@ -707,10 +698,6 @@ public final class ErrorModel {
             String.format(Locale.ROOT, "%.4f", qparams.beta1()),
             String.format(Locale.ROOT, "%.4f", r2Mag)
         );
-
-        if (logger.isDebugEnabled()) {
-            logger.debug("Fit error magnitude model: quantization error {} (L/N)^{}", Math.exp(qparams.beta0()), qparams.beta1());
-        }
 
         return new RepErrorStdModel(scalingModel.cparams(), qparams);
     }
