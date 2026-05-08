@@ -28,7 +28,43 @@ import org.elasticsearch.index.query.SearchExecutionContext;
  * queries. */
 public final class NestedHelper {
 
+    /**
+     * Synthetic Lucene subfields created by {@link org.elasticsearch.index.mapper.TextFieldMapper} for fast
+     * phrase and prefix search. They are indexed but not registered under their own name in {@code FieldTypeLookup},
+     * so nested join logic must attribute queries on these fields to the parent mapped text field.
+     */
+    private static final String INDEX_PREFIX_SUFFIX = "._index_prefix";
+
+    private static final String INDEX_PHRASE_SUFFIX = "._index_phrase";
+
     private NestedHelper() {}
+
+    /**
+     * Returns the parent logical field name when {@code field} is a synthetic text subfield with a mapped parent,
+     * otherwise null.
+     */
+    private static String parentOfMappedSyntheticTextSubfield(String field, SearchExecutionContext searchExecutionContext) {
+        String parentCandidate = null;
+        if (field.endsWith(INDEX_PREFIX_SUFFIX)) {
+            parentCandidate = field.substring(0, field.length() - INDEX_PREFIX_SUFFIX.length());
+        } else if (field.endsWith(INDEX_PHRASE_SUFFIX)) {
+            parentCandidate = field.substring(0, field.length() - INDEX_PHRASE_SUFFIX.length());
+        }
+        if (parentCandidate == null || parentCandidate.isEmpty()) {
+            return null;
+        }
+        return searchExecutionContext.isFieldMapped(parentCandidate) ? parentCandidate : null;
+    }
+
+    /**
+     * Effective field name for nested parent/child routing when the query targets a Lucene field path.
+     */
+    private static String effectiveFieldForNestedRouting(String field, SearchExecutionContext searchExecutionContext) {
+        if (searchExecutionContext.isFieldMapped(field)) {
+            return field;
+        }
+        return parentOfMappedSyntheticTextSubfield(field, searchExecutionContext);
+    }
 
     /** Returns true if the given query might match nested documents. */
     public static boolean mightMatchNestedDocs(Query query, SearchExecutionContext searchExecutionContext) {
@@ -86,11 +122,12 @@ public final class NestedHelper {
             // we might add a nested filter when it is nor required.
             return true;
         }
-        if (searchExecutionContext.isFieldMapped(field) == false) {
+        String effectiveField = effectiveFieldForNestedRouting(field, searchExecutionContext);
+        if (effectiveField == null) {
             // field does not exist
             return false;
         }
-        return searchExecutionContext.nestedLookup().getNestedParent(field) != null;
+        return searchExecutionContext.nestedLookup().getNestedParent(effectiveField) != null;
     }
 
     /** Returns true if the given query might match parent documents or documents
@@ -147,11 +184,12 @@ public final class NestedHelper {
             // we might add a nested filter when it is nor required.
             return true;
         }
-        if (searchExecutionContext.isFieldMapped(field) == false) {
+        String effectiveField = effectiveFieldForNestedRouting(field, searchExecutionContext);
+        if (effectiveField == null) {
             return false;
         }
         var nestedLookup = searchExecutionContext.nestedLookup();
-        String nestedParent = nestedLookup.getNestedParent(field);
+        String nestedParent = nestedLookup.getNestedParent(effectiveField);
         if (nestedParent == null || nestedParent.startsWith(nestedPath) == false) {
             // the field is not a sub field of the nested path
             return true;

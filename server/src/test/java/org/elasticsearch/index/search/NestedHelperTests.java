@@ -12,6 +12,7 @@ package org.elasticsearch.index.search;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.ConstantScoreQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.join.ScoreMode;
@@ -368,5 +369,40 @@ public class NestedHelperTests extends MapperServiceTestCase {
         assertTrue(NestedHelper.mightMatchNonNestedDocs(query, "nested2", searchExecutionContext));
         assertTrue(NestedHelper.mightMatchNonNestedDocs(query, "nested3", searchExecutionContext));
         assertTrue(NestedHelper.mightMatchNonNestedDocs(query, "nested_missing", searchExecutionContext));
+    }
+
+    /** GitHub issue #148484 — synthetic {@code ._index_prefix} / {@code ._index_phrase} fields must route like their parent text field */
+    public void testSyntheticTextSubfieldResolvesToMappedParent() throws IOException {
+        String mapping = """
+            { "_doc" : {
+              "properties" : {
+                "assignees" : {
+                  "type" : "text",
+                  "index_prefixes" : { "min_chars" : 3, "max_chars" : 6 }
+                },
+                "caption" : {
+                  "type" : "text",
+                  "index_phrases" : true
+                },
+                "nested1" : {
+                  "type" : "nested",
+                  "properties" : { "foo" : { "type" : "keyword" } }
+                }
+              }
+            } }
+            """;
+        MapperService localMapperService = createMapperService(mapping);
+        SearchExecutionContext ctx = createSearchExecutionContext(localMapperService);
+
+        assertFalse(ctx.isFieldMapped("assignees._index_prefix"));
+        assertFalse(ctx.isFieldMapped("caption._index_phrase"));
+
+        Query prefixOnSynthetic = new ConstantScoreQuery(new TermQuery(new Term("assignees._index_prefix", "abc")));
+        assertTrue(NestedHelper.mightMatchNonNestedDocs(prefixOnSynthetic, "nested1", ctx));
+        assertFalse(NestedHelper.mightMatchNestedDocs(prefixOnSynthetic, ctx));
+
+        Query phraseOnSynthetic = new ConstantScoreQuery(new TermQuery(new Term("caption._index_phrase", "hello")));
+        assertTrue(NestedHelper.mightMatchNonNestedDocs(phraseOnSynthetic, "nested1", ctx));
+        assertFalse(NestedHelper.mightMatchNestedDocs(phraseOnSynthetic, ctx));
     }
 }

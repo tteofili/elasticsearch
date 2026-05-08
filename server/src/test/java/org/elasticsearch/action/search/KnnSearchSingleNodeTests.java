@@ -22,6 +22,7 @@ import org.elasticsearch.search.vectors.KnnVectorQueryBuilder;
 import org.elasticsearch.test.ESSingleNodeTestCase;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentFactory;
+import org.elasticsearch.xcontent.XContentType;
 
 import java.io.IOException;
 import java.util.List;
@@ -460,6 +461,84 @@ public class KnnSearchSingleNodeTests extends ESSingleNodeTestCase {
             assertEquals(3, response.getHits().getHits().length);
             assertEquals(4096, response.getHits().getAt(0).field("vector").getValues().size());
         });
+    }
+
+    /** GitHub issue #148484 — prefix on text + index_prefixes must not drop hits when filtering nested top-level knn */
+    public void testKnnNestedPrefixFilterParityWithWildcard() throws IOException {
+        Settings indexSettings = Settings.builder().put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1).build();
+
+        XContentBuilder builder = XContentFactory.jsonBuilder()
+            .startObject()
+            .startObject("properties")
+            .startObject("assignees")
+            .field("type", "text")
+            .startObject("index_prefixes")
+            .field("min_chars", 3)
+            .field("max_chars", 6)
+            .endObject()
+            .endObject()
+            .startObject("publications")
+            .field("type", "nested")
+            .startObject("properties")
+            .startObject("vec")
+            .field("type", "dense_vector")
+            .field("dims", 3)
+            .field("index", true)
+            .field("similarity", "cosine")
+            .endObject()
+            .endObject()
+            .endObject()
+            .endObject()
+            .endObject();
+        createIndex("test_issue_148484", indexSettings, builder);
+
+        prepareIndex("test_issue_148484").setId("1").setSource("""
+            {
+              "assignees": "abcdefgh",
+              "publications": [ { "vec": [0.11, 0.22, 0.33] } ]
+            }""", XContentType.JSON).get();
+        prepareIndex("test_issue_148484").setId("2").setSource("""
+            {
+              "assignees": "zyxwvuts",
+              "publications": [ { "vec": [0.11, 0.22, 0.33] } ]
+            }""", XContentType.JSON).get();
+
+        indicesAdmin().prepareRefresh("test_issue_148484").get();
+
+        float[] queryVector = new float[] { 0.11f, 0.22f, 0.33f };
+        assertResponse(
+            client().prepareSearch("test_issue_148484")
+                .setKnnSearch(
+                    List.of(
+                        new KnnSearchBuilder("publications.vec", queryVector, 10, 50, null, null, null).addFilterQuery(
+                            QueryBuilders.prefixQuery("assignees", "abc")
+                        )
+                    )
+                )
+                .setSize(10)
+                .setTrackTotalHits(true),
+            prefixResponse -> {
+                assertHitCount(prefixResponse, 1);
+                assertEquals("1", prefixResponse.getHits().getHits()[0].getId());
+            }
+        );
+
+        assertResponse(
+            client().prepareSearch("test_issue_148484")
+                .setKnnSearch(
+                    List.of(
+                        new KnnSearchBuilder("publications.vec", queryVector, 10, 50, null, null, null).addFilterQuery(
+                            QueryBuilders.wildcardQuery("assignees", "abc*")
+                        )
+                    )
+                )
+                .setSize(10)
+                .setTrackTotalHits(true),
+            wildcardResponse -> {
+                assertHitCount(wildcardResponse, 1);
+                assertEquals("1", wildcardResponse.getHits().getHits()[0].getId());
+            }
+        );
     }
 
     private float[] randomVector() {
