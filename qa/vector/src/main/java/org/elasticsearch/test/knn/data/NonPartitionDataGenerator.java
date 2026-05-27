@@ -32,7 +32,11 @@ public final class NonPartitionDataGenerator extends DataGenerator {
 
     @Override
     public KnnIndexTester.IndexingSetup createIndexingSetup() throws IOException {
-        return new KnnIndexTester.IndexingSetup(docs(), new KnnIndexer.DefaultDocumentFactory(), numDocs());
+        IndexVectorReader reader = docs();
+        int totalDocs = (reader instanceof IndexVectorReader.MultiFileVectorReader mfr)
+            ? Math.min(numDocs(), mfr.totalDocs())
+            : numDocs();
+        return new KnnIndexTester.IndexingSetup(reader, new KnnIndexer.DefaultDocumentFactory(), totalDocs);
     }
 
     @Override

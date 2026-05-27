@@ -1,0 +1,293 @@
+/*
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the "Elastic License
+ * 2.0", the "GNU Affero General Public License v3.0 only", and the "Server Side
+ * Public License v 1"; you may not use this file except in compliance with, at
+ * your election, the "Elastic License 2.0", the "GNU Affero General Public
+ * License v3.0 only", or the "Server Side Public License, v 1".
+ */
+
+package org.elasticsearch.index.codec.vectors.diskbbq.next.ash;
+
+import org.elasticsearch.test.ESTestCase;
+
+import java.util.Random;
+
+/**
+ * Tests for the core ASH algorithm components: SVD, quantizers, and the full pipeline.
+ */
+public class AsymmetricHashingQuantizerTests extends ESTestCase {
+
+    public void testSvdIdentity() {
+        // SVD of identity should give identity
+        float[][] identity = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+        SvdUtil.SvdResult result = SvdUtil.thinSvd(identity, 3, 3);
+        // All singular values should be 1
+        for (float s : result.s()) {
+            assertEquals(1.0f, s, 1e-5f);
+        }
+    }
+
+    public void testSvdRank1() {
+        // Rank-1 matrix: outer product
+        float[][] a = new float[4][3];
+        float[] u = { 1, 2, 3, 4 };
+        float[] v = { 0.5f, 0.3f, 0.1f };
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 3; j++) {
+                a[i][j] = u[i] * v[j];
+            }
+        }
+        SvdUtil.SvdResult result = SvdUtil.thinSvd(a, 4, 3);
+        // Only first singular value should be non-zero
+        assertTrue(result.s()[0] > 0.1f);
+        assertEquals(0.0f, result.s()[1], 1e-4f);
+        assertEquals(0.0f, result.s()[2], 1e-4f);
+    }
+
+    public void testProcrustesOrthogonal() {
+        // Procrustes of a random matrix should return orthogonal matrix (R^T R = I)
+        Random rng = new Random(42);
+        int k = 5;
+        float[][] m = new float[k][k];
+        for (int i = 0; i < k; i++) {
+            for (int j = 0; j < k; j++) {
+                m[i][j] = (float) rng.nextGaussian();
+            }
+        }
+        float[][] r = SvdUtil.procrustes(m, k);
+        // Check R^T R ≈ I
+        for (int i = 0; i < k; i++) {
+            for (int j = 0; j < k; j++) {
+                double dot = 0;
+                for (int l = 0; l < k; l++) {
+                    dot += (double) r[l][i] * r[l][j];
+                }
+                float expected = (i == j) ? 1.0f : 0.0f;
+                assertEquals(expected, (float) dot, 1e-4f);
+            }
+        }
+    }
+
+    public void testBinaryQuantizer() {
+        AshBinaryQuantizer bq = new AshBinaryQuantizer();
+        float[][] x = { { 1.0f, -2.0f, 0.5f, -0.1f }, { -1.0f, 3.0f, -0.5f, 0.1f } };
+        AshDimQuantizer.QuantizeResult result = bq.encode(x);
+
+        // Signs should be preserved
+        assertEquals(1.0f, result.centeredCodes()[0][0], 0);
+        assertEquals(-1.0f, result.centeredCodes()[0][1], 0);
+        assertEquals(1.0f, result.centeredCodes()[0][2], 0);
+        assertEquals(-1.0f, result.centeredCodes()[0][3], 0);
+
+        // Norm of {1,-1,1,-1} = 2
+        assertEquals(2.0f, result.codeNorms()[0], 1e-5f);
+    }
+
+    public void testSphericalScalarQuantizer2Bit() {
+        AshSphericalScalarQuantizer ssq = new AshSphericalScalarQuantizer(2);
+        float[][] x = { { 0.8f, -0.5f, 0.3f, -0.9f } };
+        AshDimQuantizer.QuantizeResult result = ssq.encode(x);
+
+        // Codes should be centered: sign * (0.5 + level)
+        // With 2 bits, levels are 0 or 1, so magnitudes are 0.5 or 1.5
+        for (float val : result.centeredCodes()[0]) {
+            float absMag = Math.abs(val);
+            assertTrue("Expected magnitude 0.5 or 1.5 but got " + absMag, absMag == 0.5f || absMag == 1.5f);
+        }
+        assertTrue(result.codeNorms()[0] > 0);
+    }
+
+    public void testFullPipelineRandomMethod() {
+        int nVectors = 100;
+        int dim = 16;
+        int totalBits = 36;
+        int bitsPerDim = 1;
+        Random rng = new Random(123);
+
+        float[][] vectors = new float[nVectors][dim];
+        for (int i = 0; i < nVectors; i++) {
+            for (int j = 0; j < dim; j++) {
+                vectors[i][j] = (float) rng.nextGaussian();
+            }
+        }
+
+        // Single centroid (mean)
+        float[][] centroids = new float[1][dim];
+        for (int i = 0; i < nVectors; i++) {
+            for (int j = 0; j < dim; j++) {
+                centroids[0][j] += vectors[i][j];
+            }
+        }
+        for (int j = 0; j < dim; j++) {
+            centroids[0][j] /= nVectors;
+        }
+        int[] assignments = new int[nVectors]; // all zero
+
+        AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(
+            totalBits,
+            bitsPerDim,
+            AsymmetricHashingQuantizer.Method.RANDOM,
+            0,
+            10,
+            42L
+        );
+
+        float[][] w = quantizer.train(vectors, centroids, assignments);
+        assertNotNull(w);
+        assertEquals(dim, w.length);
+
+        int expectedNDims = (totalBits - AsymmetricHashingQuantizer.headerBits(1)) / bitsPerDim;
+        assertEquals(expectedNDims, w[0].length);
+
+        AsymmetricHashingResult result = quantizer.encode(vectors, centroids, assignments, w);
+        assertEquals(nVectors, result.encodedVectors().length);
+        assertEquals(nVectors, result.scales().length);
+        assertEquals(nVectors, result.offsets().length);
+    }
+
+    public void testFullPipelineLearnedMethod() {
+        int nVectors = 200;
+        int dim = 32;
+        int totalBits = 36;
+        int bitsPerDim = 1;
+        Random rng = new Random(456);
+
+        float[][] vectors = new float[nVectors][dim];
+        for (int i = 0; i < nVectors; i++) {
+            for (int j = 0; j < dim; j++) {
+                vectors[i][j] = (float) rng.nextGaussian();
+            }
+        }
+
+        float[][] centroids = new float[1][dim];
+        for (int i = 0; i < nVectors; i++) {
+            for (int j = 0; j < dim; j++) {
+                centroids[0][j] += vectors[i][j];
+            }
+        }
+        for (int j = 0; j < dim; j++) {
+            centroids[0][j] /= nVectors;
+        }
+        int[] assignments = new int[nVectors];
+
+        AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(
+            totalBits,
+            bitsPerDim,
+            AsymmetricHashingQuantizer.Method.LEARNED,
+            5,
+            10,
+            42L
+        );
+
+        float[][] w = quantizer.train(vectors, centroids, assignments);
+        AsymmetricHashingResult result = quantizer.encode(vectors, centroids, assignments, w);
+
+        // Score a query against the encoded vectors
+        float[] query = new float[dim];
+        for (int j = 0; j < dim; j++) {
+            query[j] = (float) rng.nextGaussian();
+        }
+        float[] scores = AsymmetricHashingScorer.score(query, w, centroids, assignments, result.encodedVectors(), result.scales(), result
+            .offsets());
+        assertEquals(nVectors, scores.length);
+
+        // Verify approximate dot products correlate with exact ones
+        double correlation = computeRankCorrelation(vectors, query, scores);
+        // With learned method, expect reasonable correlation
+        assertTrue("Expected positive rank correlation, got " + correlation, correlation > 0.3);
+    }
+
+    public void testScorerSingleVector() {
+        int dim = 4;
+        int nDims = 2;
+        float[] query = { 1.0f, 0.5f, -0.3f, 0.8f };
+        float[][] w = { { 1, 0 }, { 0, 1 }, { 0, 0 }, { 0, 0 } }; // project to first 2 dims
+        float[][] centroids = { { 0, 0, 0, 0 } };
+        float[] encodedVector = { 1.0f, -1.0f };
+        float scale = 1.0f;
+        float offset = 0.0f;
+
+        // queryTransformed = (query - centroid) @ W = [1.0, 0.5]
+        // dot = 1.0*1.0 + 0.5*(-1.0) = 0.5
+        // result = 0.5 * scale + queryDotCentroid + offset = 0.5 + 0 + 0 = 0.5
+        float score = AsymmetricHashingScorer.scoreOneVector(new float[] { 1.0f, 0.5f }, 0.0f, encodedVector, scale, offset);
+        assertEquals(0.5f, score, 1e-5f);
+    }
+
+    public void testBinaryPackAndScore() {
+        // Test bit-packing roundtrip and binary scorer equivalence
+        float[] codes = { 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f };
+        byte[] packed = AsymmetricHashingScorer.packBinaryCodes(codes);
+        assertEquals(2, packed.length); // ceil(10/8) = 2
+
+        // Score with binary scorer should match float scorer
+        float[] qt = { 0.5f, 0.3f, -0.2f, 0.8f, 0.1f, -0.4f, 0.6f, -0.7f, 0.9f, -0.1f };
+        float scale = 1.5f;
+        float offset = 0.2f;
+        float qdc = 0.3f;
+
+        float floatScore = AsymmetricHashingScorer.scoreOneVector(qt, qdc, codes, scale, offset);
+        float binaryScore = AsymmetricHashingScorer.scoreOneVectorBinary(qt, qdc, packed, codes.length, scale, offset);
+        assertEquals(floatScore, binaryScore, 1e-5f);
+    }
+
+    public void testFallbackToRandomWhenTooFewVectors() {
+        // With only 2 vectors and nDims=4, learned method should fall back to random
+        int dim = 16;
+        float[][] vectors = { { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 },
+            { 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1 } };
+        float[][] centroids = { new float[dim] };
+        int[] assignments = { 0, 0 };
+
+        AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(
+            36,
+            1,
+            AsymmetricHashingQuantizer.Method.LEARNED,
+            5,
+            10,
+            42L
+        );
+
+        // Should not throw — falls back to random
+        float[][] w = quantizer.train(vectors, centroids, assignments);
+        assertNotNull(w);
+        assertEquals(dim, w.length);
+    }
+
+    private static double computeRankCorrelation(float[][] vectors, float[] query, float[] approxScores) {
+        int n = vectors.length;
+        float[] exactScores = new float[n];
+        for (int i = 0; i < n; i++) {
+            double dot = 0;
+            for (int j = 0; j < query.length; j++) {
+                dot += (double) vectors[i][j] * query[j];
+            }
+            exactScores[i] = (float) dot;
+        }
+
+        // Spearman rank correlation (simplified)
+        int[] exactRanks = ranks(exactScores);
+        int[] approxRanks = ranks(approxScores);
+        double sumD2 = 0;
+        for (int i = 0; i < n; i++) {
+            double d = exactRanks[i] - approxRanks[i];
+            sumD2 += d * d;
+        }
+        return 1.0 - 6.0 * sumD2 / (n * ((long) n * n - 1));
+    }
+
+    private static int[] ranks(float[] scores) {
+        int n = scores.length;
+        Integer[] indices = new Integer[n];
+        for (int i = 0; i < n; i++) {
+            indices[i] = i;
+        }
+        java.util.Arrays.sort(indices, (a, b) -> Float.compare(scores[b], scores[a]));
+        int[] ranks = new int[n];
+        for (int r = 0; r < n; r++) {
+            ranks[indices[r]] = r;
+        }
+        return ranks;
+    }
+}

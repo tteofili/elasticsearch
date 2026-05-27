@@ -52,6 +52,10 @@ import org.elasticsearch.index.codec.vectors.diskbbq.IntToBooleanFunction;
 import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantizedVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.VectorPreconditioner;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AshProjectionMatrix;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AsymmetricHashingQuantizer;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AsymmetricHashingResult;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AsymmetricHashingScorer;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.simdvec.ES940OSQVectorsScorer;
@@ -89,6 +93,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     private final String sliceField;
     private final IvfFlushConfigSource flushConfigSource;
     private final IvfMergeConfigResolver mergeConfigResolver;
+    // Holds the trained ASH projection matrix between buildAndWritePostingsLists and writePreconditioner
+    // Set during buildAndWriteAshPostingsLists, consumed by writePreconditioner.
+    // Both are called sequentially on the same thread during the flush/merge cycle.
+    private AshProjectionMatrix ashProjectionMatrix;
 
     public ESNextDiskBBQVectorsWriter(
         SegmentWriteState state,
@@ -164,6 +172,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     @Override
     protected Preconditioner inheritPreconditioner(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig fieldWritingContext)
         throws IOException {
+        if (requireSegmentConfig(fieldWritingContext).isAsh()) {
+            // ASH retrains W from scratch; no preconditioner to inherit
+            return null;
+        }
         if (requireSegmentConfig(fieldWritingContext).usePrecondition()) {
             for (KnnVectorsReader reader : mergeState.knnVectorsReaders) {
                 if (reader instanceof VectorPreconditioner) {
@@ -181,6 +193,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     protected Preconditioner createPreconditioner(int dimension, IvfSegmentConfig ivfSegmentConfig) {
+        if (requireSegmentConfig(ivfSegmentConfig).isAsh()) {
+            // ASH replaces the preconditioner with a learned projection matrix W
+            return null;
+        }
         if (requireSegmentConfig(ivfSegmentConfig).usePrecondition()) {
             return Preconditioner.createPreconditioner(dimension, blockDimension);
         } else {
@@ -190,6 +206,12 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     @Override
     protected void writePreconditioner(Preconditioner preconditioner, IndexOutput out) throws IOException {
+        if (ashProjectionMatrix != null) {
+            // Write the ASH projection matrix in place of the preconditioner
+            ashProjectionMatrix.write(out);
+            ashProjectionMatrix = null;
+            return;
+        }
         if (preconditioner != null) {
             preconditioner.write(out);
         }
@@ -198,6 +220,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
     @Override
     protected Consumer<List<float[]>> preconditionVectors(Preconditioner preconditioner, IvfSegmentConfig fieldWritingContext) {
         return (vectors) -> {
+            if (requireSegmentConfig(fieldWritingContext).isAsh()) {
+                return; // ASH does not use preconditioner; projection is applied during encoding
+            }
             if (requireSegmentConfig(fieldWritingContext).usePrecondition() == false || vectors.isEmpty()) {
                 return;
             }
@@ -219,6 +244,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         FloatVectorValues vectors,
         IvfSegmentConfig fieldWritingContext
     ) {
+        if (requireSegmentConfig(fieldWritingContext).isAsh()) {
+            return vectors; // ASH does not use preconditioner
+        }
         if (requireSegmentConfig(fieldWritingContext).usePrecondition() == false) {
             return vectors;
         }
@@ -281,6 +309,18 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         IvfSegmentConfig fieldWritingContext
     ) throws IOException {
         final IvfSegmentConfig segmentConfig = requireSegmentConfig(fieldWritingContext);
+        if (segmentConfig.isAsh()) {
+            return buildAndWriteAshPostingsLists(
+                fieldInfo,
+                centroidSupplier,
+                floatVectorValues,
+                postingsOutput,
+                fileOffset,
+                assignments,
+                overspillAssignments,
+                segmentConfig
+            );
+        }
         final ESNextDiskBBQVectorsFormat.QuantEncoding effectiveQuantEncoding = segmentConfig.quantEncoding();
         KMeansResult centroidClusters = centroidSupplier.secondLevelClusters();
         int[] centroidVectorCount = new int[centroidSupplier.size()];
@@ -384,6 +424,18 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         IvfSegmentConfig fieldWritingContext
     ) throws IOException {
         final IvfSegmentConfig segmentConfig = requireSegmentConfig(fieldWritingContext);
+        if (segmentConfig.isAsh()) {
+            return buildAndWriteAshPostingsLists(
+                fieldInfo,
+                centroidSupplier,
+                floatVectorValues,
+                postingsOutput,
+                fileOffset,
+                assignments,
+                overspillAssignments,
+                segmentConfig
+            );
+        }
         final ESNextDiskBBQVectorsFormat.QuantEncoding effectiveQuantEncoding = segmentConfig.quantEncoding();
         // first, quantize all the vectors into a temporary file
         var vectorSimilarityFunction = fieldInfo.getVectorSimilarityFunction();
@@ -550,6 +602,148 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         } finally {
             org.apache.lucene.util.IOUtils.deleteFilesIgnoringExceptions(mergeState.segmentInfo.dir, quantizedVectorsTempName);
         }
+    }
+
+    /**
+     * ASH-specific posting list builder for both flush and merge paths.
+     * Trains the projection matrix W, encodes vectors via ASH, and writes posting lists.
+     */
+    private CentroidOffsetAndLength buildAndWriteAshPostingsLists(
+        FieldInfo fieldInfo,
+        CentroidSupplier centroidSupplier,
+        FloatVectorValues floatVectorValues,
+        IndexOutput postingsOutput,
+        long fileOffset,
+        int[] assignments,
+        int[] overspillAssignments,
+        IvfSegmentConfig segmentConfig
+    ) throws IOException {
+        int nVectors = assignments.length;
+        int originalDim = fieldInfo.getVectorDimension();
+        int nClusters = centroidSupplier.size();
+
+        // Collect all vectors and centroids into arrays for ASH training
+        float[][] vectors = new float[nVectors][originalDim];
+        for (int i = 0; i < nVectors; i++) {
+            float[] v = floatVectorValues.vectorValue(i);
+            System.arraycopy(v, 0, vectors[i], 0, originalDim);
+        }
+
+        float[][] centroids = new float[nClusters][originalDim];
+        for (int c = 0; c < nClusters; c++) {
+            float[] cent = centroidSupplier.centroid(c);
+            System.arraycopy(cent, 0, centroids[c], 0, originalDim);
+        }
+
+        // Create and train the ASH quantizer
+        AsymmetricHashingQuantizer ashQuantizer = new AsymmetricHashingQuantizer(
+            segmentConfig.ashTotalBits(),
+            segmentConfig.ashBitsPerDim(),
+            segmentConfig.ashMethod(),
+            segmentConfig.ashTrainingIterations(),
+            IvfSegmentConfig.DEFAULT_ASH_TRAINING_FACTOR,
+            42L // seed
+        );
+
+        float[][] w = ashQuantizer.train(vectors, centroids, assignments);
+        AsymmetricHashingResult ashResult = ashQuantizer.encode(vectors, centroids, assignments, w);
+
+        // Store the projection matrix for later writing in the preconditioner slot
+        this.ashProjectionMatrix = new AshProjectionMatrix(w);
+
+        // Build cluster assignments (same logic as OSQ path)
+        int[] centroidVectorCount = new int[nClusters];
+        for (int i = 0; i < nVectors; i++) {
+            centroidVectorCount[assignments[i]]++;
+            if (overspillAssignments.length > i && overspillAssignments[i] != NO_SOAR_ASSIGNMENT) {
+                centroidVectorCount[overspillAssignments[i]]++;
+            }
+        }
+
+        int maxPostingListSize = 0;
+        int[][] assignmentsByCluster = new int[nClusters][];
+        for (int c = 0; c < nClusters; c++) {
+            int size = centroidVectorCount[c];
+            maxPostingListSize = Math.max(maxPostingListSize, size);
+            assignmentsByCluster[c] = new int[size];
+        }
+        Arrays.fill(centroidVectorCount, 0);
+
+        for (int i = 0; i < nVectors; i++) {
+            int c = assignments[i];
+            assignmentsByCluster[c][centroidVectorCount[c]++] = i;
+            if (overspillAssignments.length > i) {
+                int s = overspillAssignments[i];
+                if (s != NO_SOAR_ASSIGNMENT) {
+                    assignmentsByCluster[s][centroidVectorCount[s]++] = i;
+                }
+            }
+        }
+
+        // Write posting lists
+        final PackedLongValues.Builder offsets = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
+        final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
+        final int nDims = ashResult.encodedVectors()[0].length;
+        final int packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims);
+        final int[] docIds = new int[maxPostingListSize];
+        final int[] docDeltas = new int[maxPostingListSize];
+        final int[] clusterOrds = new int[maxPostingListSize];
+        DocIdsWriter idsWriter = new DocIdsWriter();
+        KMeansResult centroidClusters = centroidSupplier.secondLevelClusters();
+
+        for (int c = 0; c < nClusters; c++) {
+            float[] centroid = centroidSupplier.centroid(c);
+            int[] cluster = assignmentsByCluster[c];
+            long offset = postingsOutput.alignFilePointer(Float.BYTES) - fileOffset;
+            offsets.add(offset);
+            // Write parent centroid distance (same as OSQ path)
+            postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroid, centroidClusters.getCentroid(c))));
+            int size = cluster.length;
+            postingsOutput.writeVInt(size);
+
+            // Sort by docId
+            for (int j = 0; j < size; j++) {
+                docIds[j] = floatVectorValues.ordToDoc(cluster[j]);
+                clusterOrds[j] = j;
+            }
+            new IntSorter(clusterOrds, i -> docIds[i]).sort(0, size);
+            for (int j = 0; j < size; j++) {
+                docDeltas[j] = j == 0 ? docIds[clusterOrds[j]] : docIds[clusterOrds[j]] - docIds[clusterOrds[j - 1]];
+            }
+
+            byte encoding = idsWriter.calculateBlockEncoding(i -> docDeltas[i], size, BULK_SIZE);
+            postingsOutput.writeByte(encoding);
+
+            // Write vectors in bulk blocks: docIds first, then ASH encoded vectors
+            int written = 0;
+            while (written < size) {
+                int blockSize = Math.min(BULK_SIZE, size - written);
+                // Write docId deltas for this block first (matches OSQ read order)
+                final int blockStart = written;
+                idsWriter.writeDocIds(d -> docDeltas[blockStart + d], blockSize, encoding, postingsOutput);
+                // Write ASH encoded vectors for this block
+                for (int j = 0; j < blockSize; j++) {
+                    int vectorOrd = cluster[clusterOrds[written + j]];
+                    float[] encVec = ashResult.encodedVectors()[vectorOrd];
+                    float scale = ashResult.scales()[vectorOrd];
+                    float off = ashResult.offsets()[vectorOrd];
+                    // Write: scale (float16 as 2 bytes), offset (float16 as 2 bytes)
+                    postingsOutput.writeShort(Float.floatToFloat16(scale));
+                    postingsOutput.writeShort(Float.floatToFloat16(off));
+                    // Write bit-packed codes (1-bit per dim)
+                    byte[] packed = AsymmetricHashingScorer.packBinaryCodes(encVec);
+                    postingsOutput.writeBytes(packed, packed.length);
+                }
+                written += blockSize;
+            }
+            lengths.add(postingsOutput.getFilePointer() - fileOffset - offset);
+        }
+
+        if (logger.isDebugEnabled()) {
+            printClusterQualityStatistics(assignmentsByCluster);
+        }
+
+        return new CentroidOffsetAndLength(offsets.build(), lengths.build());
     }
 
     private static void printClusterQualityStatistics(int[][] clusters) {

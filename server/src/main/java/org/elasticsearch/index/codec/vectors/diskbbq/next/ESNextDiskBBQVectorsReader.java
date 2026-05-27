@@ -35,6 +35,8 @@ import org.elasticsearch.index.codec.vectors.diskbbq.PostingMetadata;
 import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 import org.elasticsearch.index.codec.vectors.diskbbq.PrefetchingCentroidIterator;
 import org.elasticsearch.index.codec.vectors.diskbbq.VectorPreconditioner;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AshProjectionMatrix;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AsymmetricHashingScorer;
 import org.elasticsearch.search.vectors.BulkKnnCollector;
 import org.elasticsearch.search.vectors.ESAcceptDocs;
 import org.elasticsearch.simdvec.ES92Int7VectorsScorer;
@@ -314,6 +316,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         if (fieldEntry == null) {
             return null;
         }
+        // ASH stores the W matrix in the preconditioner slot; not a traditional preconditioner
+        if (fieldEntry.quantEncoding().isAsymmetricHashing()) {
+            return null;
+        }
         long preconditionerOffset = fieldEntry.preconditionerOffset();
         long preconditionerLength = fieldEntry.preconditionerLength();
         if (preconditionerLength > 0) {
@@ -322,6 +328,24 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 ivfPreconditionerSlice.seek(0);
                 return Preconditioner.read(ivfPreconditionerSlice);
             }
+        }
+        return null;
+    }
+
+    /**
+     * Reads the ASH projection matrix for the given field. Returns null if not an ASH field.
+     */
+    public AshProjectionMatrix getAshProjectionMatrix(FieldInfo fieldInfo) throws IOException {
+        final NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
+        if (fieldEntry == null || fieldEntry.quantEncoding().isAsymmetricHashing() == false) {
+            return null;
+        }
+        long preconditionerOffset = fieldEntry.preconditionerOffset();
+        long preconditionerLength = fieldEntry.preconditionerLength();
+        if (preconditionerLength > 0) {
+            IndexInput slice = ivfCentroids.slice("ash-projection", preconditionerOffset, preconditionerLength);
+            slice.seek(0);
+            return AshProjectionMatrix.read(slice);
         }
         return null;
     }
@@ -718,6 +742,33 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             // skip slice offsets
             centroidSlice.skipBytes((long) entry.numSlices * Integer.BYTES);
         }
+
+        if (quantEncoding.isAsymmetricHashing()) {
+            // ASH path: load W matrix once, create ASH-specific visitor
+            AshProjectionMatrix ashMatrix = getAshProjectionMatrix(fieldInfo);
+            if (ashMatrix == null) {
+                throw new IOException("ASH encoding but no projection matrix found for field " + fieldInfo.name);
+            }
+            IndexInput parentsSlice = null;
+            if (numParents > 0) {
+                int longestPostingList = centroidSlice.readVInt();
+                parentsSlice = centroidSlice.slice(
+                    "parents-slice",
+                    centroidSlice.getFilePointer(),
+                    (long) numParents * fieldInfo.getVectorDimension() * Float.BYTES
+                );
+            }
+            return new AshPostingsVisitor(
+                ashMatrix.w(),
+                target,
+                parentsSlice,
+                entry.globalCentroid(),
+                fieldInfo,
+                indexInput,
+                needsScoring
+            );
+        }
+
         final QueryQuantizer queryQuantizer;
         if (numParents > 0) {
             // unused
@@ -1208,6 +1259,252 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 knnCollector.incVisitedCount(scoredDocs);
             }
             return scoredDocs;
+        }
+    }
+
+    /**
+     * PostingVisitor for ASH-encoded posting lists.
+     * Reads bit-packed 1-bit codes with float16 scale/offset per vector.
+     * The query is projected (not quantized) via W for asymmetric scoring.
+     */
+    private static class AshPostingsVisitor implements PostingVisitor {
+        private final float[][] w;
+        private final float[] query;
+        private final IndexInput parentsSlice;
+        private final float[] globalCentroid;
+        private final FieldInfo fieldInfo;
+        private final IndexInput indexInput;
+        private final Bits acceptDocs;
+        private final int nDims;
+        private final int packedCodeBytes;
+        private final DocIdsWriter idsWriter = new DocIdsWriter();
+        private final int[] docIdsScratch = new int[BULK_SIZE];
+        private final int[] offsetsScratch = new int[BULK_SIZE];
+        private final float[] scores = new float[BULK_SIZE];
+        private final float[] centroidScratch;
+
+        // Per-cluster precomputed values
+        private float[] queryTransformed;
+        private float queryDotCentroid;
+
+        // Per-posting-list state
+        private int vectors;
+        private byte docEncoding;
+        private int docBase;
+        private long slicePos;
+        private float centroidDistance;
+        private final VectorSimilarityFunction similarityFunction;
+
+        AshPostingsVisitor(
+            float[][] w,
+            float[] query,
+            IndexInput parentsSlice,
+            float[] globalCentroid,
+            FieldInfo fieldInfo,
+            IndexInput indexInput,
+            Bits acceptDocs
+        ) {
+            this.w = w;
+            this.query = query;
+            this.parentsSlice = parentsSlice;
+            this.globalCentroid = globalCentroid;
+            this.fieldInfo = fieldInfo;
+            this.indexInput = indexInput;
+            this.acceptDocs = acceptDocs;
+            this.nDims = w[0].length;
+            this.packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims);
+            this.centroidScratch = new float[fieldInfo.getVectorDimension()];
+            this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
+        }
+
+        @Override
+        public int resetPostingsScorer(PostingMetadata metadata) throws IOException {
+            float score = metadata.documentCentroidScore();
+            indexInput.seek(metadata.offset());
+            float centroidToParentSqDist = Float.intBitsToFloat(indexInput.readInt());
+            vectors = indexInput.readVInt();
+            docEncoding = indexInput.readByte();
+            docBase = 0;
+            slicePos = indexInput.getFilePointer();
+
+            centroidDistance = switch (similarityFunction) {
+                case EUCLIDEAN -> ((1 / score) - 1) - centroidToParentSqDist;
+                case COSINE, DOT_PRODUCT -> 2 * score - 1;
+                case MAXIMUM_INNER_PRODUCT -> score - 1;
+            };
+
+            // Read centroid vector for this cluster
+            int centroidOrdinal = metadata.queryCentroidOrdinal();
+            float[] centroid;
+            if (parentsSlice != null && centroidOrdinal >= 0) {
+                parentsSlice.seek((long) centroidOrdinal * centroidScratch.length * Float.BYTES);
+                parentsSlice.readFloats(centroidScratch, 0, centroidScratch.length);
+                centroid = centroidScratch;
+            } else {
+                centroid = globalCentroid;
+            }
+
+            // Precompute queryTransformed = (query - centroid) @ W and queryDotCentroid
+            int originalDim = query.length;
+            queryTransformed = new float[nDims];
+            double dotQC = 0;
+            for (int d = 0; d < originalDim; d++) {
+                dotQC += (double) query[d] * centroid[d];
+            }
+            queryDotCentroid = (float) dotQC;
+
+            for (int j = 0; j < nDims; j++) {
+                double sum = 0;
+                for (int d = 0; d < originalDim; d++) {
+                    sum += (double) (query[d] - centroid[d]) * w[d][j];
+                }
+                queryTransformed[j] = (float) sum;
+            }
+
+            return vectors;
+        }
+
+        @Override
+        public int visit(KnnCollector knnCollector) throws IOException {
+            indexInput.seek(slicePos);
+            int scoredDocs = 0;
+            // Per-vector on disk: [short scale_f16][short offset_f16][byte[packedCodeBytes] packed_codes]
+            int perVectorBytes = Short.BYTES + Short.BYTES + packedCodeBytes;
+            byte[] codeBuf = new byte[packedCodeBytes];
+
+            int limit = vectors - BULK_SIZE + 1;
+            int i = 0;
+            for (; i < limit; i += BULK_SIZE) {
+                // Read docIds first (matches write order)
+                readDocIds(BULK_SIZE);
+                int docsToBulkScore = docToBulkScore(BULK_SIZE);
+                if (docsToBulkScore == 0) {
+                    indexInput.skipBytes((long) perVectorBytes * BULK_SIZE);
+                    continue;
+                }
+                // Score vectors
+                float maxScore = Float.NEGATIVE_INFINITY;
+                for (int j = 0; j < BULK_SIZE; j++) {
+                    if (docIdsScratch[j] != -1) {
+                        float scale = Float.float16ToFloat(indexInput.readShort());
+                        float offset = Float.float16ToFloat(indexInput.readShort());
+                        indexInput.readBytes(codeBuf, 0, packedCodeBytes);
+                        float s = AsymmetricHashingScorer.scoreOneVectorBinary(
+                            queryTransformed,
+                            queryDotCentroid,
+                            codeBuf,
+                            nDims,
+                            scale,
+                            offset
+                        );
+                        scores[j] = convertScore(s);
+                        if (scores[j] > maxScore) {
+                            maxScore = scores[j];
+                        }
+                    } else {
+                        indexInput.skipBytes(perVectorBytes);
+                    }
+                }
+                if (knnCollector.minCompetitiveSimilarity() < maxScore) {
+                    collectBulk(knnCollector, BULK_SIZE, docsToBulkScore, maxScore);
+                }
+                scoredDocs += docsToBulkScore;
+            }
+            // Tail
+            if (i < vectors) {
+                int tailSize = vectors - i;
+                readDocIds(tailSize);
+                int docsToBulkScore = docToBulkScore(tailSize);
+                if (docsToBulkScore > 0) {
+                    float maxScore = Float.NEGATIVE_INFINITY;
+                    for (int j = 0; j < tailSize; j++) {
+                        if (docIdsScratch[j] != -1) {
+                            float scale = Float.float16ToFloat(indexInput.readShort());
+                            float offset = Float.float16ToFloat(indexInput.readShort());
+                            indexInput.readBytes(codeBuf, 0, packedCodeBytes);
+                            float s = AsymmetricHashingScorer.scoreOneVectorBinary(
+                                queryTransformed,
+                                queryDotCentroid,
+                                codeBuf,
+                                nDims,
+                                scale,
+                                offset
+                            );
+                            scores[j] = convertScore(s);
+                            if (scores[j] > maxScore) {
+                                maxScore = scores[j];
+                            }
+                        } else {
+                            indexInput.skipBytes(perVectorBytes);
+                        }
+                    }
+                    if (knnCollector.minCompetitiveSimilarity() < maxScore) {
+                        collectBulk(knnCollector, tailSize, docsToBulkScore, maxScore);
+                    }
+                    scoredDocs += docsToBulkScore;
+                }
+            }
+            if (scoredDocs > 0) {
+                knnCollector.incVisitedCount(scoredDocs);
+            }
+            return scoredDocs;
+        }
+
+        /**
+         * Converts a raw dot product to the Lucene similarity score.
+         */
+        private float convertScore(float rawDotProduct) {
+            return switch (similarityFunction) {
+                case EUCLIDEAN -> 1 / (1 + rawDotProduct);
+                case COSINE, DOT_PRODUCT -> (1 + rawDotProduct) / 2;
+                case MAXIMUM_INNER_PRODUCT -> rawDotProduct >= 0 ? rawDotProduct + 1 : 1 / (1 - rawDotProduct);
+            };
+        }
+
+        private void readDocIds(int count) throws IOException {
+            idsWriter.readInts(indexInput, count, docEncoding, docIdsScratch);
+            for (int j = 0; j < count; j++) {
+                docBase += docIdsScratch[j];
+                docIdsScratch[j] = docBase;
+            }
+        }
+
+        private int docToBulkScore(int bulkSize) {
+            if (acceptDocs == null) {
+                return bulkSize;
+            }
+            int docToScore = 0;
+            for (int ii = 0; ii < bulkSize; ii++) {
+                if (docIdsScratch[ii] == -1 || acceptDocs.get(docIdsScratch[ii]) == false) {
+                    docIdsScratch[ii] = -1;
+                } else {
+                    offsetsScratch[docToScore] = ii;
+                    docToScore++;
+                }
+            }
+            return docToScore;
+        }
+
+        private void collectBulk(KnnCollector knnCollector, int bulkSize, int docsToBulkScore, float maxScore) {
+            if (knnCollector instanceof BulkKnnCollector bulkCollector) {
+                if (docsToBulkScore == bulkSize) {
+                    bulkCollector.bulkCollect(docIdsScratch, scores, bulkSize, maxScore);
+                    return;
+                }
+                for (int ii = 0; ii < docsToBulkScore; ii++) {
+                    int offset = offsetsScratch[ii];
+                    docIdsScratch[ii] = docIdsScratch[offset];
+                    scores[ii] = scores[offset];
+                }
+                bulkCollector.bulkCollect(docIdsScratch, scores, docsToBulkScore, maxScore);
+                return;
+            }
+            for (int ii = 0; ii < bulkSize; ii++) {
+                final int doc = docIdsScratch[ii];
+                if (doc != -1) {
+                    knnCollector.collect(doc, scores[ii]);
+                }
+            }
         }
     }
 

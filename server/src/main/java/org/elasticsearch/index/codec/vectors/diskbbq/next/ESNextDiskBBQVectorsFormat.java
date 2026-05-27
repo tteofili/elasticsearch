@@ -204,6 +204,48 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             public void packQuery(int[] quantized, byte[] destination) {
                 ESVectorUtil.packAsBinary(quantized, destination);
             }
+        },
+        /**
+         * Asymmetric Hashing with 1-bit-per-dimension quantization in the projected latent space.
+         * The pack/packQuery methods are not used for ASH; encoding is handled by
+         * {@link org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AsymmetricHashingQuantizer}.
+         */
+        ASH_1BIT(6, (byte) 1, (byte) 0) {
+            @Override
+            public void pack(int[] quantized, byte[] destination) {
+                // ASH uses its own encoding path; this should not be called directly
+                throw new UnsupportedOperationException("ASH encoding does not use pack()");
+            }
+
+            @Override
+            public void packQuery(int[] quantized, byte[] destination) {
+                // ASH uses asymmetric scoring; queries are not quantized
+                throw new UnsupportedOperationException("ASH uses asymmetric scoring; queries are not quantized");
+            }
+
+            @Override
+            public boolean isAsymmetricHashing() {
+                return true;
+            }
+
+            @Override
+            public int discretizedDimensions(int dimensions) {
+                // For ASH, the "dimensions" in the posting list are the projected nDims, not original dims
+                // This is determined at runtime based on totalBits config
+                return dimensions;
+            }
+
+            @Override
+            public int getDocPackedLength(int dimensions) {
+                // For ASH: body is nDims bits (1 bit per dim), packed into bytes
+                return (dimensions + 7) / 8;
+            }
+
+            @Override
+            public int getQueryPackedLength(int dimensions) {
+                // Queries are not packed in ASH (asymmetric)
+                return 0;
+            }
         };
 
         private static void packAsBytes(int[] quantized, byte[] destination) {
@@ -232,6 +274,13 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
         public abstract void pack(int[] quantized, byte[] destination);
 
         public abstract void packQuery(int[] quantized, byte[] destination);
+
+        /**
+         * Returns true if this encoding uses Asymmetric Hashing (ASH) rather than scalar quantization.
+         */
+        public boolean isAsymmetricHashing() {
+            return false;
+        }
 
         public int id() {
             return id;

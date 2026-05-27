@@ -182,8 +182,10 @@ public class KnnIndexTester {
                             : args.secondaryClusterSize()
                     )
                 );
-                suffix.add(Integer.toString(args.quantizeBits()));
-                if (args.queryQuantizeBits() != null && args.queryQuantizeBits() != defaultQueryQuantizeBits(args.quantizeBits())) {
+                suffix.add("ash".equals(args.quantizationType()) ? "ash" : Integer.toString(args.quantizeBits()));
+                if (!"ash".equals(args.quantizationType())
+                    && args.queryQuantizeBits() != null
+                    && args.queryQuantizeBits() != defaultQueryQuantizeBits(args.quantizeBits())) {
                     suffix.add("q" + args.queryQuantizeBits());
                 }
             }
@@ -207,7 +209,10 @@ public class KnnIndexTester {
 
         format = switch (args.indexType()) {
             case IVF -> {
-                var encoding = resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
+                var encoding = "ash".equals(args.quantizationType())
+                    ? ESNextDiskBBQVectorsFormat.QuantEncoding.ASH_1BIT
+                    : resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
+                boolean doPrecondition = "ash".equals(args.quantizationType()) ? false : args.doPrecondition();
                 // Use flatVectorThreshold from config, or default to -1 (dynamic) if not specified
                 int flatVectorThreshold = args.flatVectorThreshold() >= 0 ? args.flatVectorThreshold() : -1;
                 yield new ESNextDiskBBQVectorsFormat(
@@ -220,7 +225,7 @@ public class KnnIndexTester {
                     args.onDiskRescore(),
                     exec,
                     mergeWorkers,
-                    args.doPrecondition(),
+                    doPrecondition,
                     args.preconditioningBlockDims(),
                     flatVectorThreshold,
                     args.datasetConfig().isSliced() ? KnnIndexer.PARTITION_ID_FIELD : null
@@ -616,6 +621,10 @@ public class KnnIndexTester {
     private static void checkQuantizeBits(TestConfiguration args) {
         switch (args.indexType()) {
             case IVF:
+                if ("ash".equals(args.quantizationType())) {
+                    // ASH mode: quantizeBits is ignored; encoding is determined by quantization_type
+                    break;
+                }
                 if (args.quantizeBits() == null || !Set.of(1, 2, 4, 7).contains(args.quantizeBits())) {
                     throw new IllegalArgumentException(
                         "IVF index type only supports 1, 2, 4 or 7 bits quantization, but got: " + args.quantizeBits()
@@ -1100,7 +1109,9 @@ public class KnnIndexTester {
                             qr.indexType,
                             Integer.toString(qr.numDocs),
                             Integer.toString(qr.numSegments),
-                            config.quantizeBits() != null ? Integer.toString(config.quantizeBits()) : "",
+                            "ash".equals(config.quantizationType())
+                                ? "ash"
+                                : (config.quantizeBits() != null ? Integer.toString(config.quantizeBits()) : ""),
                             config.queryQuantizeBits() != null ? Integer.toString(config.queryQuantizeBits()) : "",
                             config.vectorEncoding().name().toLowerCase(Locale.ROOT),
                             config.vectorSpace() != null ? config.vectorSpace().name().toLowerCase(Locale.ROOT) : "",

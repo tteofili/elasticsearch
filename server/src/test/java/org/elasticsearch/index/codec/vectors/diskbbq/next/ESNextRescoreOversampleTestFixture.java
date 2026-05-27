@@ -94,7 +94,7 @@ public final class ESNextRescoreOversampleTestFixture {
             }
             int seq = flushSequence.getAndIncrement();
             float ov = seq == 0 ? oversampleSegmentA : oversampleSegmentB;
-            return Optional.of(new IvfSegmentConfig(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, ov));
+            return Optional.of(IvfSegmentConfig.withRescore(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, ov));
         };
         Codec codec = createDiskBbqCodec(flushConfig, mergeConfigResolver);
         IndexWriterConfig iwc = new IndexWriterConfig(new StandardAnalyzer()).setCodec(codec).setMergePolicy(NoMergePolicy.INSTANCE);
@@ -125,7 +125,7 @@ public final class ESNextRescoreOversampleTestFixture {
             }
             int seq = flushSequence.getAndIncrement();
             float ov = seq == 0 ? oversampleSegmentA : oversampleSegmentB;
-            return Optional.of(new IvfSegmentConfig(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, ov));
+            return Optional.of(IvfSegmentConfig.withRescore(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY, false, ov));
         };
         Codec codec = createDiskBbqCodec(flushConfig, mergeConfigResolverForBothPhases);
 
