@@ -287,6 +287,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             maxSliceSize = input.readVInt();
         }
         float rescoreOversample = Float.intBitsToFloat(input.readInt());
+        int ashBitsPerDim = input.readVInt();
         return new NextFieldEntry(
             rawVectorFormat,
             useDirectIOReads,
@@ -305,7 +306,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             preconditionerLength,
             numSlices,
             maxSliceSize,
-            rescoreOversample
+            rescoreOversample,
+            ashBitsPerDim
         );
     }
 
@@ -360,6 +362,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         final int numSlices;
         final int maxSliceSize;
         private final float rescoreOversample;
+        private final int ashBitsPerDim;
 
         NextFieldEntry(
             String rawVectorFormat,
@@ -379,7 +382,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             long preconditionerLength,
             int numSlices,
             int maxSliceSize,
-            float rescoreOversample
+            float rescoreOversample,
+            int ashBitsPerDim
         ) {
             super(
                 rawVectorFormat,
@@ -401,6 +405,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             this.numSlices = numSlices;
             this.maxSliceSize = maxSliceSize;
             this.rescoreOversample = rescoreOversample;
+            this.ashBitsPerDim = ashBitsPerDim;
         }
 
         public ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding() {
@@ -417,6 +422,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
 
         public float rescoreOversample() {
             return rescoreOversample;
+        }
+
+        public int ashBitsPerDim() {
+            return ashBitsPerDim;
         }
     }
 
@@ -765,7 +774,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 entry.globalCentroid(),
                 fieldInfo,
                 indexInput,
-                needsScoring
+                needsScoring,
+                entry.ashBitsPerDim()
             );
         }
 
@@ -1276,6 +1286,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         private final IndexInput indexInput;
         private final Bits acceptDocs;
         private final int nDims;
+        private final int bitsPerDim;
         private final int packedCodeBytes;
         private final DocIdsWriter idsWriter = new DocIdsWriter();
         private final int[] docIdsScratch = new int[BULK_SIZE];
@@ -1302,7 +1313,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             float[] globalCentroid,
             FieldInfo fieldInfo,
             IndexInput indexInput,
-            Bits acceptDocs
+            Bits acceptDocs,
+            int bitsPerDim
         ) {
             this.w = w;
             this.query = query;
@@ -1312,7 +1324,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             this.indexInput = indexInput;
             this.acceptDocs = acceptDocs;
             this.nDims = w[0].length;
-            this.packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims);
+            this.bitsPerDim = bitsPerDim;
+            this.packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims, bitsPerDim);
             this.centroidScratch = new float[fieldInfo.getVectorDimension()];
             this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
         }
@@ -1389,14 +1402,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                         float scale = Float.float16ToFloat(indexInput.readShort());
                         float offset = Float.float16ToFloat(indexInput.readShort());
                         indexInput.readBytes(codeBuf, 0, packedCodeBytes);
-                        float s = AsymmetricHashingScorer.scoreOneVectorBinary(
-                            queryTransformed,
-                            queryDotCentroid,
-                            codeBuf,
-                            nDims,
-                            scale,
-                            offset
-                        );
+                        float s = scoreVector(codeBuf, scale, offset);
                         scores[j] = convertScore(s);
                         if (scores[j] > maxScore) {
                             maxScore = scores[j];
@@ -1422,14 +1428,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                             float scale = Float.float16ToFloat(indexInput.readShort());
                             float offset = Float.float16ToFloat(indexInput.readShort());
                             indexInput.readBytes(codeBuf, 0, packedCodeBytes);
-                            float s = AsymmetricHashingScorer.scoreOneVectorBinary(
-                                queryTransformed,
-                                queryDotCentroid,
-                                codeBuf,
-                                nDims,
-                                scale,
-                                offset
-                            );
+                            float s = scoreVector(codeBuf, scale, offset);
                             scores[j] = convertScore(s);
                             if (scores[j] > maxScore) {
                                 maxScore = scores[j];
@@ -1459,6 +1458,14 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 case COSINE, DOT_PRODUCT -> (1 + rawDotProduct) / 2;
                 case MAXIMUM_INNER_PRODUCT -> rawDotProduct >= 0 ? rawDotProduct + 1 : 1 / (1 - rawDotProduct);
             };
+        }
+
+        private float scoreVector(byte[] codeBuf, float scale, float offset) {
+            if (bitsPerDim == 1) {
+                return AsymmetricHashingScorer.scoreOneVectorBinary(queryTransformed, queryDotCentroid, codeBuf, nDims, scale, offset);
+            } else {
+                return AsymmetricHashingScorer.scoreOneVector2Bit(queryTransformed, queryDotCentroid, codeBuf, nDims, scale, offset);
+            }
         }
 
         private void readDocIds(int count) throws IOException {

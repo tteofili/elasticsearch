@@ -681,7 +681,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         final PackedLongValues.Builder offsets = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
         final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
         final int nDims = ashResult.encodedVectors()[0].length;
-        final int packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims);
+        final int bitsPerDim = segmentConfig.ashBitsPerDim();
+        final int packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims, bitsPerDim);
         final int[] docIds = new int[maxPostingListSize];
         final int[] docDeltas = new int[maxPostingListSize];
         final int[] clusterOrds = new int[maxPostingListSize];
@@ -727,8 +728,10 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                     // Write: scale (float16 as 2 bytes), offset (float16 as 2 bytes)
                     postingsOutput.writeShort(Float.floatToFloat16(scale));
                     postingsOutput.writeShort(Float.floatToFloat16(off));
-                    // Write bit-packed codes (1-bit per dim)
-                    byte[] packed = AsymmetricHashingScorer.packBinaryCodes(encVec);
+                    // Write packed codes
+                    byte[] packed = bitsPerDim == 1
+                        ? AsymmetricHashingScorer.packBinaryCodes(encVec)
+                        : AsymmetricHashingScorer.pack2BitCodes(encVec);
                     postingsOutput.writeBytes(packed, packed.length);
                 }
                 written += blockSize;
@@ -859,6 +862,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             }
         }
         metaOutput.writeInt(Float.floatToIntBits(segmentConfig.rescoreOversample()));
+        metaOutput.writeVInt(segmentConfig.ashBitsPerDim());
     }
 
     @Override

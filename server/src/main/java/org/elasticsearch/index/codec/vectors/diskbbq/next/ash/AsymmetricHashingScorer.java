@@ -187,4 +187,92 @@ public final class AsymmetricHashingScorer {
     public static int packedByteLength(int nDims) {
         return (nDims + 7) >>> 3;
     }
+
+    /**
+     * Returns the number of bytes needed to store nDims dimensions at the given bits per dimension.
+     * For bitsPerDim=1: ceil(nDims/8). For bitsPerDim=2: 2*ceil(nDims/8) (low + high bit planes).
+     */
+    public static int packedByteLength(int nDims, int bitsPerDim) {
+        return bitsPerDim * ((nDims + 7) >>> 3);
+    }
+
+    /**
+     * Packs 2-bit quantized codes into a byte array using bit-plane layout.
+     * The input codes come from {@link AshSphericalScalarQuantizer} and have values
+     * in the set {-1.5, -0.5, 0.5, 1.5} (i.e., sign * (0.5 + idx) for idx in {0,1}).
+     * <p>
+     * We map to unsigned levels {0,1,2,3} by adding 1.5 and rounding, then split into
+     * low_bit (LSB) and high_bit (MSB) planes, each packed MSB-first like the 1-bit codes.
+     * Layout: [low_bits: ceil(nDims/8) bytes][high_bits: ceil(nDims/8) bytes]
+     *
+     * @param codes float array of quantized levels from AshSphericalScalarQuantizer
+     * @return packed bytes, length 2*ceil(nDims/8)
+     */
+    public static byte[] pack2BitCodes(float[] codes) {
+        int nDims = codes.length;
+        int planeBytes = (nDims + 7) >>> 3;
+        byte[] packed = new byte[2 * planeBytes];
+        for (int j = 0; j < nDims; j++) {
+            // Map centered level to unsigned: -1.5->0, -0.5->1, 0.5->2, 1.5->3
+            int unsigned = Math.round(codes[j] + 1.5f);
+            // Clamp to be safe
+            if (unsigned < 0) unsigned = 0;
+            if (unsigned > 3) unsigned = 3;
+            int lowBit = unsigned & 1;
+            int highBit = (unsigned >> 1) & 1;
+            int byteIdx = j >>> 3;
+            int bitIdx = 7 - (j & 7); // MSB-first
+            if (lowBit != 0) {
+                packed[byteIdx] |= (byte) (1 << bitIdx);
+            }
+            if (highBit != 0) {
+                packed[planeBytes + byteIdx] |= (byte) (1 << bitIdx);
+            }
+        }
+        return packed;
+    }
+
+    /**
+     * Scores a single 2-bit encoded database vector from packed byte representation.
+     * The packed format is two bit-planes: [low_bits][high_bits], each ceil(nDims/8) bytes, MSB-first.
+     * <p>
+     * Codes represent levels {-1.5, -0.5, 0.5, 1.5} mapped to unsigned {0,1,2,3}.
+     * Dot product with query is: sum_low(q[j]) + 2*sum_high(q[j]) - 1.5*sum_all(q[j])
+     *
+     * @param queryTransformedForCluster precomputed (query - centroid) @ W for this cluster
+     * @param queryDotCentroid precomputed query · centroid for this cluster
+     * @param packedCodes bit-plane packed codes, length 2*ceil(nDims/8)
+     * @param nDims number of projected dimensions
+     * @param scale the scale factor for this vector
+     * @param offset the offset correction for this vector
+     * @return approximate dot product
+     */
+    public static float scoreOneVector2Bit(
+        float[] queryTransformedForCluster,
+        float queryDotCentroid,
+        byte[] packedCodes,
+        int nDims,
+        float scale,
+        float offset
+    ) {
+        int planeBytes = (nDims + 7) >>> 3;
+        double sumAll = 0;
+        double sumLow = 0;
+        double sumHigh = 0;
+        for (int j = 0; j < nDims; j++) {
+            float qt = queryTransformedForCluster[j];
+            sumAll += qt;
+            int byteIdx = j >>> 3;
+            int bitIdx = 7 - (j & 7); // MSB-first
+            if ((packedCodes[byteIdx] & (1 << bitIdx)) != 0) {
+                sumLow += qt;
+            }
+            if ((packedCodes[planeBytes + byteIdx] & (1 << bitIdx)) != 0) {
+                sumHigh += qt;
+            }
+        }
+        // unsigned dot = sumLow + 2*sumHigh; centered dot = unsigned dot - 1.5 * sumAll
+        double dot = sumLow + 2.0 * sumHigh - 1.5 * sumAll;
+        return (float) dot * scale + queryDotCentroid + offset;
+    }
 }

@@ -37,9 +37,9 @@ public record IvfSegmentConfig(
 ) {
 
     /** Default ASH total bits budget. */
-    public static final int DEFAULT_ASH_TOTAL_BITS = 384;
+    public static final int DEFAULT_ASH_TOTAL_BITS = 768;
     /** Default ASH bits per projected dimension. */
-    public static final int DEFAULT_ASH_BITS_PER_DIM = 1;
+    public static final int DEFAULT_ASH_BITS_PER_DIM = 2;
     /** Default ASH training iterations. */
     public static final int DEFAULT_ASH_TRAINING_ITERATIONS = 20;
     /** Default ASH training factor. */
