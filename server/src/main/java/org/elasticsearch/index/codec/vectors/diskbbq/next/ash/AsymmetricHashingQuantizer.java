@@ -77,11 +77,11 @@ public final class AsymmetricHashingQuantizer {
 
     /**
      * Computes the number of header bits for a given cluster count.
-     * Header = 2 × 16 (scale + offset as float16) + ceil(log2(nClusters)).
+     * In IVF layout, cluster assignment is implicit (each posting list belongs to a cluster),
+     * so header is only 2 × 16 bits (scale + offset as float16).
      */
     public static int headerBits(int nClusters) {
-        int clusterBits = nClusters <= 1 ? 0 : (int) Math.ceil(Math.log(nClusters) / Math.log(2));
-        return 32 + clusterBits;
+        return 32; // scale_f16 + offset_f16
     }
 
     /**
@@ -287,16 +287,36 @@ public final class AsymmetricHashingQuantizer {
 
     private float[][] randomOrthogonal(int originalDim, int nDims) {
         Random rng = new Random(seed);
-        float[][] tempMat = new float[originalDim][nDims];
+        // Generate random matrix and orthogonalize columns via modified Gram-Schmidt
+        float[][] q = new float[originalDim][nDims];
         for (int i = 0; i < originalDim; i++) {
             for (int j = 0; j < nDims; j++) {
-                tempMat[i][j] = (float) rng.nextGaussian();
+                q[i][j] = (float) rng.nextGaussian();
             }
         }
-        // QR factorization via thin SVD: U @ Vt gives orthogonal matrix
-        SvdUtil.SvdResult svd = SvdUtil.thinSvd(tempMat, originalDim, nDims);
-        // W = U @ Vt but U is (originalDim × nDims) and Vt is (nDims × nDims)
-        return matMul(svd.u(), svd.vt(), originalDim, nDims, nDims);
+        // Modified Gram-Schmidt: orthogonalize column by column
+        for (int j = 0; j < nDims; j++) {
+            // Subtract projections of previous columns
+            for (int prev = 0; prev < j; prev++) {
+                double dot = 0;
+                for (int i = 0; i < originalDim; i++) {
+                    dot += (double) q[i][j] * q[i][prev];
+                }
+                for (int i = 0; i < originalDim; i++) {
+                    q[i][j] -= (float) dot * q[i][prev];
+                }
+            }
+            // Normalize
+            double normSq = 0;
+            for (int i = 0; i < originalDim; i++) {
+                normSq += (double) q[i][j] * q[i][j];
+            }
+            float invNorm = (float) (1.0 / Math.sqrt(normSq));
+            for (int i = 0; i < originalDim; i++) {
+                q[i][j] *= invNorm;
+            }
+        }
+        return q;
     }
 
     private float[][] sampleRows(float[][] data, int sampleSize) {

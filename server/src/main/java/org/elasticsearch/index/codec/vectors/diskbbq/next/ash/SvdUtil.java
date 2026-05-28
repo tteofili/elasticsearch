@@ -140,23 +140,136 @@ public final class SvdUtil {
     }
 
     /**
-     * Computes U * Vt from the SVD of matrix M (k × k). This is the orthogonal Procrustes solution.
-     * Returns the nearest orthogonal matrix to M.
+     * Computes the nearest orthogonal matrix to M (k × k) using Newton-Schulz iteration
+     * for the polar decomposition. Computes U @ Vt from the exact SVD of M
+     * (the polar factor that minimizes ||M - R||_F over orthogonal R).
+     * <p>
+     * Uses Newton-Schulz iteration in double precision for guaranteed convergence:
+     * X_{k+1} = X_k * (3I - X_k^T X_k) / 2
      */
     public static float[][] procrustes(float[][] m, int k) {
-        SvdResult svd = thinSvd(m, k, k);
-        // R = U * Vt
-        float[][] r = new float[k][k];
+        // Scale M so that all singular values are in (0, sqrt(3)) for Newton-Schulz convergence.
+        float spectralNorm = estimateSpectralNorm(m, k, 50);
+        double scale = 1.0 / Math.max(spectralNorm, 1e-10);
+
+        // Work in double precision to avoid float32 accumulation errors at 352×352
+        double[][] x = new double[k][k];
         for (int i = 0; i < k; i++) {
             for (int j = 0; j < k; j++) {
-                double sum = 0;
-                for (int l = 0; l < k; l++) {
-                    sum += (double) svd.u()[i][l] * svd.vt()[l][j];
-                }
-                r[i][j] = (float) sum;
+                x[i][j] = m[i][j] * scale;
             }
         }
-        return r;
+
+        // Newton-Schulz iteration: X <- X * (3I - X^T X) / 2
+        int maxIter = 100;
+        for (int iter = 0; iter < maxIter; iter++) {
+            // Compute X^T X (k × k)
+            double[][] xtx = new double[k][k];
+            for (int i = 0; i < k; i++) {
+                for (int j = i; j < k; j++) {
+                    double sum = 0;
+                    for (int l = 0; l < k; l++) {
+                        sum += x[l][i] * x[l][j];
+                    }
+                    xtx[i][j] = sum;
+                    xtx[j][i] = sum;
+                }
+            }
+
+            // Check convergence: X^T X should be close to I
+            double maxOff = 0;
+            for (int i = 0; i < k; i++) {
+                for (int j = 0; j < k; j++) {
+                    double expected = (i == j) ? 1.0 : 0.0;
+                    maxOff = Math.max(maxOff, Math.abs(xtx[i][j] - expected));
+                }
+            }
+            if (maxOff < 1e-12) {
+                break;
+            }
+
+            // B = (3I - X^T X) / 2
+            double[][] b = new double[k][k];
+            for (int i = 0; i < k; i++) {
+                for (int j = 0; j < k; j++) {
+                    b[i][j] = -xtx[i][j] / 2.0;
+                }
+                b[i][i] += 1.5;
+            }
+
+            // X_new = X @ B
+            double[][] xNew = new double[k][k];
+            for (int i = 0; i < k; i++) {
+                for (int j = 0; j < k; j++) {
+                    double sum = 0;
+                    for (int l = 0; l < k; l++) {
+                        sum += x[i][l] * b[l][j];
+                    }
+                    xNew[i][j] = sum;
+                }
+            }
+            x = xNew;
+        }
+
+        // Convert back to float
+        float[][] result = new float[k][k];
+        for (int i = 0; i < k; i++) {
+            for (int j = 0; j < k; j++) {
+                result[i][j] = (float) x[i][j];
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Estimates the spectral norm (largest singular value) of a k×k matrix using power iteration on M^T M.
+     */
+    private static float estimateSpectralNorm(float[][] m, int k, int iterations) {
+        // Power iteration on M^T M to find largest eigenvalue (= σ_max²)
+        float[] v = new float[k];
+        // Initialize with uniform vector
+        float initVal = (float) (1.0 / Math.sqrt(k));
+        for (int i = 0; i < k; i++) {
+            v[i] = initVal;
+        }
+        float[] mv = new float[k];
+        float[] mtmv = new float[k];
+        for (int iter = 0; iter < iterations; iter++) {
+            // mv = M @ v
+            for (int i = 0; i < k; i++) {
+                double sum = 0;
+                for (int j = 0; j < k; j++) {
+                    sum += (double) m[i][j] * v[j];
+                }
+                mv[i] = (float) sum;
+            }
+            // mtmv = M^T @ mv
+            double normSq = 0;
+            for (int j = 0; j < k; j++) {
+                double sum = 0;
+                for (int i = 0; i < k; i++) {
+                    sum += (double) m[i][j] * mv[i];
+                }
+                mtmv[j] = (float) sum;
+                normSq += sum * sum;
+            }
+            // Normalize
+            double norm = Math.sqrt(normSq);
+            if (norm < 1e-30) return 0f;
+            for (int j = 0; j < k; j++) {
+                v[j] = (float) (mtmv[j] / norm);
+            }
+        }
+        // Compute ||M @ v|| which approximates σ_max
+        double mvNormSq = 0;
+        for (int i = 0; i < k; i++) {
+            double sum = 0;
+            for (int j = 0; j < k; j++) {
+                sum += (double) m[i][j] * v[j];
+            }
+            mvNormSq += sum * sum;
+        }
+        return (float) Math.sqrt(mvNormSq);
     }
 
     private static void sortDescending(float[][] u, float[] s, float[][] v, int m, int n) {
@@ -244,61 +357,83 @@ public final class SvdUtil {
     }
 
     private static float[][] topKEigenvectorsGram(float[][] a, int m, int n, int k, long seed) {
-        // Power iteration with deflation on A^T A
-        // We don't form A^T A explicitly — instead compute (A^T A) v = A^T (A v) for each iteration
-        float[][] result = new float[k][n];
+        // Block (subspace) power iteration: process all k vectors simultaneously.
+        // V = random (n × k), iterate: V <- A^T (A V), then QR-orthogonalize.
+        // This is O(iterations × m × n × k) total — much faster than deflation for large k.
         java.util.Random rng = new java.util.Random(seed);
+        int iters = 50; // sufficient iterations to separate closely-spaced singular values
 
-        // Deflation vectors already found
-        float[][] deflated = new float[k][];
-        int found = 0;
-
-        for (int vec = 0; vec < k; vec++) {
-            // Random initial vector
-            float[] v = new float[n];
-            for (int i = 0; i < n; i++) {
-                v[i] = (float) rng.nextGaussian();
+        // V: (n × k) — each column is a candidate eigenvector
+        float[][] v = new float[n][k];
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < k; j++) {
+                v[i][j] = (float) rng.nextGaussian();
             }
-            normalize(v);
+        }
+        qrOrthogonalize(v, n, k);
 
-            // Power iteration: v <- A^T (A v) / ||...||
-            for (int iter = 0; iter < 100; iter++) {
-                // w = A v (m-dimensional)
-                float[] w = new float[m];
-                for (int i = 0; i < m; i++) {
-                    double sum = 0;
-                    for (int j = 0; j < n; j++) {
-                        sum += (double) a[i][j] * v[j];
-                    }
-                    w[i] = (float) sum;
-                }
-                // v_new = A^T w (n-dimensional)
-                float[] vNew = new float[n];
-                for (int j = 0; j < n; j++) {
-                    double sum = 0;
-                    for (int i = 0; i < m; i++) {
-                        sum += (double) a[i][j] * w[i];
-                    }
-                    vNew[j] = (float) sum;
-                }
-                // Deflate: remove components along previously found vectors
-                for (int d = 0; d < found; d++) {
-                    double dot = 0;
-                    for (int j = 0; j < n; j++) {
-                        dot += (double) vNew[j] * deflated[d][j];
-                    }
-                    for (int j = 0; j < n; j++) {
-                        vNew[j] -= (float) (dot * deflated[d][j]);
+        for (int iter = 0; iter < iters; iter++) {
+            // W = A @ V (m × k): w[i][j] = sum_d a[i][d] * v[d][j]
+            float[][] w = new float[m][k];
+            for (int i = 0; i < m; i++) {
+                for (int d = 0; d < n; d++) {
+                    float aVal = a[i][d];
+                    for (int j = 0; j < k; j++) {
+                        w[i][j] += aVal * v[d][j];
                     }
                 }
-                normalize(vNew);
-                v = vNew;
             }
-            deflated[found] = v;
-            result[vec] = v;
-            found++;
+            // V_new = A^T @ W (n × k): v_new[d][j] = sum_i a[i][d] * w[i][j]
+            float[][] vNew = new float[n][k];
+            for (int i = 0; i < m; i++) {
+                for (int d = 0; d < n; d++) {
+                    float aVal = a[i][d];
+                    for (int j = 0; j < k; j++) {
+                        vNew[d][j] += aVal * w[i][j];
+                    }
+                }
+            }
+            qrOrthogonalize(vNew, n, k);
+            v = vNew;
+        }
+
+        // Convert columns of V to rows for return format (k × n)
+        float[][] result = new float[k][n];
+        for (int j = 0; j < k; j++) {
+            for (int d = 0; d < n; d++) {
+                result[j][d] = v[d][j];
+            }
         }
         return result;
+    }
+
+    /**
+     * Modified Gram-Schmidt QR orthogonalization in-place on columns of V (n × k).
+     */
+    private static void qrOrthogonalize(float[][] v, int n, int k) {
+        for (int j = 0; j < k; j++) {
+            // Subtract projections of previous columns
+            for (int prev = 0; prev < j; prev++) {
+                double dot = 0;
+                for (int i = 0; i < n; i++) {
+                    dot += (double) v[i][j] * v[i][prev];
+                }
+                for (int i = 0; i < n; i++) {
+                    v[i][j] -= (float) (dot * v[i][prev]);
+                }
+            }
+            // Normalize column j
+            double normSq = 0;
+            for (int i = 0; i < n; i++) {
+                normSq += (double) v[i][j] * v[i][j];
+            }
+            float invNorm = (float) (1.0 / Math.sqrt(normSq));
+            if (Float.isFinite(invNorm)) {
+                for (int i = 0; i < n; i++) {
+                    v[i][j] *= invNorm;
+                }
+            }
+        }
     }
 
     private static float[][] topKEigenvectorsGramTranspose(float[][] a, int m, int n, int k, long seed) {

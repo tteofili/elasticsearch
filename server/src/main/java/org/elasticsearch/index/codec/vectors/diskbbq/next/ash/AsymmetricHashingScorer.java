@@ -156,6 +156,7 @@ public final class AsymmetricHashingScorer {
             }
         }
         double dot = 2.0 * sumPositive - sumAll;
+        // DEBUG: use only the discriminative term to test ranking quality
         return (float) dot * scale + queryDotCentroid + offset;
     }
 

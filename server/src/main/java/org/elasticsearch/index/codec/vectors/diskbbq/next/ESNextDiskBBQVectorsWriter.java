@@ -645,19 +645,22 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             42L // seed
         );
 
+        long t0 = System.currentTimeMillis();
         float[][] w = ashQuantizer.train(vectors, centroids, assignments);
+        long t1 = System.currentTimeMillis();
         AsymmetricHashingResult ashResult = ashQuantizer.encode(vectors, centroids, assignments, w);
+        long t2 = System.currentTimeMillis();
+        logger.info("ASH train: {}ms, encode: {}ms, nDims={}", t1 - t0, t2 - t1, w[0].length);
 
         // Store the projection matrix for later writing in the preconditioner slot
         this.ashProjectionMatrix = new AshProjectionMatrix(w);
 
-        // Build cluster assignments (same logic as OSQ path)
+        // Build cluster assignments — SOAR/overspill is disabled for ASH because
+        // encoded vectors are centroid-relative and cannot be correctly scored against
+        // a different cluster's centroid.
         int[] centroidVectorCount = new int[nClusters];
         for (int i = 0; i < nVectors; i++) {
             centroidVectorCount[assignments[i]]++;
-            if (overspillAssignments.length > i && overspillAssignments[i] != NO_SOAR_ASSIGNMENT) {
-                centroidVectorCount[overspillAssignments[i]]++;
-            }
         }
 
         int maxPostingListSize = 0;
@@ -672,12 +675,6 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         for (int i = 0; i < nVectors; i++) {
             int c = assignments[i];
             assignmentsByCluster[c][centroidVectorCount[c]++] = i;
-            if (overspillAssignments.length > i) {
-                int s = overspillAssignments[i];
-                if (s != NO_SOAR_ASSIGNMENT) {
-                    assignmentsByCluster[s][centroidVectorCount[s]++] = i;
-                }
-            }
         }
 
         // Write posting lists
