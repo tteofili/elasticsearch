@@ -197,82 +197,91 @@ public final class AsymmetricHashingScorer {
     }
 
     /**
-     * Packs 2-bit quantized codes into a byte array using bit-plane layout.
+     * Packs multi-bit quantized codes into a byte array using bit-plane layout.
      * The input codes come from {@link AshSphericalScalarQuantizer} and have values
-     * in the set {-1.5, -0.5, 0.5, 1.5} (i.e., sign * (0.5 + idx) for idx in {0,1}).
+     * sign * (0.5 + idx) for idx in [0, numAbsLevels-1] where numAbsLevels = 2^(bitsPerDim-1).
+     * The full level set is centered at 0 with spacing 1.
      * <p>
-     * We map to unsigned levels {0,1,2,3} by adding 1.5 and rounding, then split into
-     * low_bit (LSB) and high_bit (MSB) planes, each packed MSB-first like the 1-bit codes.
-     * Layout: [low_bits: ceil(nDims/8) bytes][high_bits: ceil(nDims/8) bytes]
+     * We map to unsigned levels [0, 2^bitsPerDim - 1] by adding (numLevels-1)/2.0 and rounding,
+     * then split into bit planes (LSB first), each packed MSB-first.
+     * Layout: [plane0: ceil(nDims/8) bytes][plane1: ceil(nDims/8) bytes]...[plane_{b-1}: ...]
      *
      * @param codes float array of quantized levels from AshSphericalScalarQuantizer
-     * @return packed bytes, length 2*ceil(nDims/8)
+     * @param bitsPerDim number of bits per dimension
+     * @return packed bytes, length bitsPerDim * ceil(nDims/8)
      */
-    public static byte[] pack2BitCodes(float[] codes) {
+    public static byte[] packMultiBitCodes(float[] codes, int bitsPerDim) {
         int nDims = codes.length;
         int planeBytes = (nDims + 7) >>> 3;
-        byte[] packed = new byte[2 * planeBytes];
+        byte[] packed = new byte[bitsPerDim * planeBytes];
+        int numLevels = 1 << bitsPerDim;
+        float offset = (numLevels - 1) / 2.0f;
         for (int j = 0; j < nDims; j++) {
-            // Map centered level to unsigned: -1.5->0, -0.5->1, 0.5->2, 1.5->3
-            int unsigned = Math.round(codes[j] + 1.5f);
-            // Clamp to be safe
+            int unsigned = Math.round(codes[j] + offset);
             if (unsigned < 0) unsigned = 0;
-            if (unsigned > 3) unsigned = 3;
-            int lowBit = unsigned & 1;
-            int highBit = (unsigned >> 1) & 1;
+            if (unsigned >= numLevels) unsigned = numLevels - 1;
             int byteIdx = j >>> 3;
             int bitIdx = 7 - (j & 7); // MSB-first
-            if (lowBit != 0) {
-                packed[byteIdx] |= (byte) (1 << bitIdx);
-            }
-            if (highBit != 0) {
-                packed[planeBytes + byteIdx] |= (byte) (1 << bitIdx);
+            for (int p = 0; p < bitsPerDim; p++) {
+                if ((unsigned & (1 << p)) != 0) {
+                    packed[p * planeBytes + byteIdx] |= (byte) (1 << bitIdx);
+                }
             }
         }
         return packed;
     }
 
     /**
-     * Scores a single 2-bit encoded database vector from packed byte representation.
-     * The packed format is two bit-planes: [low_bits][high_bits], each ceil(nDims/8) bytes, MSB-first.
+     * Scores a single multi-bit encoded database vector from packed bit-plane representation.
+     * The packed format is bitsPerDim bit-planes, each ceil(nDims/8) bytes, MSB-first.
      * <p>
-     * Codes represent levels {-1.5, -0.5, 0.5, 1.5} mapped to unsigned {0,1,2,3}.
-     * Dot product with query is: sum_low(q[j]) + 2*sum_high(q[j]) - 1.5*sum_all(q[j])
+     * Codes represent centered levels. The unsigned code value is reconstructed from bit planes,
+     * then shifted back to centered by subtracting (numLevels-1)/2.
+     * dot = sum_j queryTransformed[j] * centeredCode[j]
+     *     = sum over planes of (2^p * sum_of_qt_where_bit_p_set) - centerOffset * sumAll
      *
      * @param queryTransformedForCluster precomputed (query - centroid) @ W for this cluster
      * @param queryDotCentroid precomputed query · centroid for this cluster
-     * @param packedCodes bit-plane packed codes, length 2*ceil(nDims/8)
+     * @param packedCodes bit-plane packed codes
      * @param nDims number of projected dimensions
+     * @param bitsPerDim bits per dimension
      * @param scale the scale factor for this vector
      * @param offset the offset correction for this vector
      * @return approximate dot product
      */
-    public static float scoreOneVector2Bit(
+    public static float scoreOneVectorMultiBit(
         float[] queryTransformedForCluster,
         float queryDotCentroid,
         byte[] packedCodes,
         int nDims,
+        int bitsPerDim,
         float scale,
         float offset
     ) {
         int planeBytes = (nDims + 7) >>> 3;
+        int numLevels = 1 << bitsPerDim;
+        double centerOffset = (numLevels - 1) / 2.0;
+
         double sumAll = 0;
-        double sumLow = 0;
-        double sumHigh = 0;
+        double[] planeSums = new double[bitsPerDim];
+
         for (int j = 0; j < nDims; j++) {
             float qt = queryTransformedForCluster[j];
             sumAll += qt;
             int byteIdx = j >>> 3;
-            int bitIdx = 7 - (j & 7); // MSB-first
-            if ((packedCodes[byteIdx] & (1 << bitIdx)) != 0) {
-                sumLow += qt;
-            }
-            if ((packedCodes[planeBytes + byteIdx] & (1 << bitIdx)) != 0) {
-                sumHigh += qt;
+            int bitIdx = 7 - (j & 7);
+            for (int p = 0; p < bitsPerDim; p++) {
+                if ((packedCodes[p * planeBytes + byteIdx] & (1 << bitIdx)) != 0) {
+                    planeSums[p] += qt;
+                }
             }
         }
-        // unsigned dot = sumLow + 2*sumHigh; centered dot = unsigned dot - 1.5 * sumAll
-        double dot = sumLow + 2.0 * sumHigh - 1.5 * sumAll;
+
+        // unsigned dot = sum_p (2^p * planeSums[p]); centered dot = unsigned dot - centerOffset * sumAll
+        double dot = -centerOffset * sumAll;
+        for (int p = 0; p < bitsPerDim; p++) {
+            dot += (1 << p) * planeSums[p];
+        }
         return (float) dot * scale + queryDotCentroid + offset;
     }
 }

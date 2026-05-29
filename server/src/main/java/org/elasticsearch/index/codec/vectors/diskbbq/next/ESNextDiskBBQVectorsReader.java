@@ -1464,7 +1464,15 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             if (bitsPerDim == 1) {
                 return AsymmetricHashingScorer.scoreOneVectorBinary(queryTransformed, queryDotCentroid, codeBuf, nDims, scale, offset);
             } else {
-                return AsymmetricHashingScorer.scoreOneVector2Bit(queryTransformed, queryDotCentroid, codeBuf, nDims, scale, offset);
+                return AsymmetricHashingScorer.scoreOneVectorMultiBit(
+                    queryTransformed,
+                    queryDotCentroid,
+                    codeBuf,
+                    nDims,
+                    bitsPerDim,
+                    scale,
+                    offset
+                );
             }
         }
 

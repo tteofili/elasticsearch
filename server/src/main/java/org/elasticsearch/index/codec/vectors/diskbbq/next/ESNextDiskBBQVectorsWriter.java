@@ -731,7 +731,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                     // Write packed codes
                     byte[] packed = bitsPerDim == 1
                         ? AsymmetricHashingScorer.packBinaryCodes(encVec)
-                        : AsymmetricHashingScorer.pack2BitCodes(encVec);
+                        : AsymmetricHashingScorer.packMultiBitCodes(encVec, bitsPerDim);
                     postingsOutput.writeBytes(packed, packed.length);
                 }
                 written += blockSize;
