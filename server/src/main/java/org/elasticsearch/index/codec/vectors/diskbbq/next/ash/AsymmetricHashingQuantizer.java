@@ -378,4 +378,109 @@ public final class AsymmetricHashingQuantizer {
     private static float toFloat16(float value) {
         return Float.float16ToFloat(Float.floatToFloat16(value));
     }
+
+    /**
+     * Result of running ASH-specific k-means clustering.
+     */
+    public record AshKMeansResult(float[][] centroids, int[] assignments) {}
+
+    /**
+     * Runs a simple k-means clustering on the given vectors to produce ASH centering clusters.
+     * This is independent of the IVF clustering used for posting list layout.
+     *
+     * @param vectors all vectors, shape (nVectors, dim)
+     * @param nClusters number of ASH centering clusters (typically 16)
+     * @param maxIterations maximum k-means iterations
+     * @param seed random seed for initialization
+     * @return centroids and per-vector assignments
+     */
+    public static AshKMeansResult runAshKMeans(float[][] vectors, int nClusters, int maxIterations, long seed) {
+        int nVectors = vectors.length;
+        int dim = vectors[0].length;
+        Random rng = new Random(seed);
+
+        // k-means++ initialization
+        float[][] centroids = new float[nClusters][dim];
+        int firstIdx = rng.nextInt(nVectors);
+        System.arraycopy(vectors[firstIdx], 0, centroids[0], 0, dim);
+
+        double[] minDist = new double[nVectors];
+        for (int c = 1; c < nClusters; c++) {
+            // Compute distances to nearest existing centroid
+            double totalDist = 0;
+            for (int i = 0; i < nVectors; i++) {
+                double dist = squaredDistance(vectors[i], centroids[c - 1], dim);
+                if (c == 1 || dist < minDist[i]) {
+                    minDist[i] = dist;
+                }
+                totalDist += minDist[i];
+            }
+            // Sample proportional to distance
+            double threshold = rng.nextDouble() * totalDist;
+            double cumulative = 0;
+            int chosen = nVectors - 1;
+            for (int i = 0; i < nVectors; i++) {
+                cumulative += minDist[i];
+                if (cumulative >= threshold) {
+                    chosen = i;
+                    break;
+                }
+            }
+            System.arraycopy(vectors[chosen], 0, centroids[c], 0, dim);
+        }
+
+        // Lloyd's iterations
+        int[] assignments = new int[nVectors];
+        for (int iter = 0; iter < maxIterations; iter++) {
+            // Assign
+            boolean changed = false;
+            for (int i = 0; i < nVectors; i++) {
+                int bestC = 0;
+                double bestDist = squaredDistance(vectors[i], centroids[0], dim);
+                for (int c = 1; c < nClusters; c++) {
+                    double dist = squaredDistance(vectors[i], centroids[c], dim);
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        bestC = c;
+                    }
+                }
+                if (assignments[i] != bestC) {
+                    assignments[i] = bestC;
+                    changed = true;
+                }
+            }
+            if (!changed) break;
+
+            // Update centroids
+            int[] counts = new int[nClusters];
+            for (int c = 0; c < nClusters; c++) {
+                java.util.Arrays.fill(centroids[c], 0f);
+            }
+            for (int i = 0; i < nVectors; i++) {
+                int c = assignments[i];
+                counts[c]++;
+                for (int d = 0; d < dim; d++) {
+                    centroids[c][d] += vectors[i][d];
+                }
+            }
+            for (int c = 0; c < nClusters; c++) {
+                if (counts[c] > 0) {
+                    float inv = 1.0f / counts[c];
+                    for (int d = 0; d < dim; d++) {
+                        centroids[c][d] *= inv;
+                    }
+                }
+            }
+        }
+        return new AshKMeansResult(centroids, assignments);
+    }
+
+    private static double squaredDistance(float[] a, float[] b, int dim) {
+        double sum = 0;
+        for (int d = 0; d < dim; d++) {
+            double diff = a[d] - b[d];
+            sum += diff * diff;
+        }
+        return sum;
+    }
 }

@@ -645,15 +645,30 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
             42L // seed
         );
 
+        // Run ASH-specific k-means with few clusters (independent of IVF clustering)
+        // Python uses n_clusters=16 by default; the IVF clusters (~2604) are too fine-grained
+        // for effective centroid subtraction in ASH.
+        long tKmeans0 = System.currentTimeMillis();
+        AsymmetricHashingQuantizer.AshKMeansResult ashKMeans = AsymmetricHashingQuantizer.runAshKMeans(
+            vectors,
+            IvfSegmentConfig.DEFAULT_ASH_NUM_CLUSTERS,
+            50, // maxIterations
+            42L
+        );
+        float[][] ashCentroids = ashKMeans.centroids();
+        int[] ashAssignments = ashKMeans.assignments();
+        long tKmeans1 = System.currentTimeMillis();
+        logger.info("ASH k-means: {}ms, {} clusters", tKmeans1 - tKmeans0, ashCentroids.length);
+
         long t0 = System.currentTimeMillis();
-        float[][] w = ashQuantizer.train(vectors, centroids, assignments);
+        float[][] w = ashQuantizer.train(vectors, ashCentroids, ashAssignments);
         long t1 = System.currentTimeMillis();
-        AsymmetricHashingResult ashResult = ashQuantizer.encode(vectors, centroids, assignments, w);
+        AsymmetricHashingResult ashResult = ashQuantizer.encode(vectors, ashCentroids, ashAssignments, w);
         long t2 = System.currentTimeMillis();
         logger.info("ASH train: {}ms, encode: {}ms, nDims={}", t1 - t0, t2 - t1, w[0].length);
 
-        // Store the projection matrix for later writing in the preconditioner slot
-        this.ashProjectionMatrix = new AshProjectionMatrix(w);
+        // Store the projection matrix + ASH centroids for later writing in the preconditioner slot
+        this.ashProjectionMatrix = new AshProjectionMatrix(w, ashCentroids);
 
         // Build cluster assignments — SOAR/overspill is disabled for ASH because
         // encoded vectors are centroid-relative and cannot be correctly scored against
@@ -725,7 +740,8 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
                     float[] encVec = ashResult.encodedVectors()[vectorOrd];
                     float scale = ashResult.scales()[vectorOrd];
                     float off = ashResult.offsets()[vectorOrd];
-                    // Write: scale (float16 as 2 bytes), offset (float16 as 2 bytes)
+                    // Write: ashClusterId (1 byte), scale (float16 as 2 bytes), offset (float16 as 2 bytes)
+                    postingsOutput.writeByte((byte) ashAssignments[vectorOrd]);
                     postingsOutput.writeShort(Float.floatToFloat16(scale));
                     postingsOutput.writeShort(Float.floatToFloat16(off));
                     // Write packed codes

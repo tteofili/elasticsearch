@@ -769,6 +769,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             }
             return new AshPostingsVisitor(
                 ashMatrix.w(),
+                ashMatrix.ashCentroids(),
                 target,
                 parentsSlice,
                 entry.globalCentroid(),
@@ -1274,11 +1275,13 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
 
     /**
      * PostingVisitor for ASH-encoded posting lists.
-     * Reads bit-packed 1-bit codes with float16 scale/offset per vector.
+     * Reads bit-packed codes with float16 scale/offset per vector.
      * The query is projected (not quantized) via W for asymmetric scoring.
+     * Each vector stores its ASH cluster ID (1 byte) so the correct centroid is used for scoring.
      */
     private static class AshPostingsVisitor implements PostingVisitor {
         private final float[][] w;
+        private final float[][] ashCentroids; // ASH centering clusters (may be null for legacy)
         private final float[] query;
         private final IndexInput parentsSlice;
         private final float[] globalCentroid;
@@ -1294,9 +1297,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         private final float[] scores = new float[BULK_SIZE];
         private final float[] centroidScratch;
 
-        // Per-cluster precomputed values
-        private float[] queryTransformed;
-        private float queryDotCentroid;
+        // Per-ASH-cluster precomputed query transforms (lazily populated)
+        private final float[][] queryTransformedByCluster;
+        private final float[] queryDotCentroidByCluster;
+        private boolean clusterTransformsReady;
 
         // Per-posting-list state
         private int vectors;
@@ -1308,6 +1312,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
 
         AshPostingsVisitor(
             float[][] w,
+            float[][] ashCentroids,
             float[] query,
             IndexInput parentsSlice,
             float[] globalCentroid,
@@ -1317,6 +1322,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             int bitsPerDim
         ) {
             this.w = w;
+            this.ashCentroids = ashCentroids;
             this.query = query;
             this.parentsSlice = parentsSlice;
             this.globalCentroid = globalCentroid;
@@ -1328,6 +1334,34 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             this.packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims, bitsPerDim);
             this.centroidScratch = new float[fieldInfo.getVectorDimension()];
             this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
+
+            // Pre-allocate per-ASH-cluster arrays
+            int nAshClusters = ashCentroids != null ? ashCentroids.length : 0;
+            this.queryTransformedByCluster = new float[nAshClusters][nDims];
+            this.queryDotCentroidByCluster = new float[nAshClusters];
+            this.clusterTransformsReady = false;
+        }
+
+        /** Lazily precompute query transforms for all ASH clusters. */
+        private void ensureClusterTransforms() {
+            if (clusterTransformsReady) return;
+            int originalDim = query.length;
+            for (int c = 0; c < ashCentroids.length; c++) {
+                float[] centroid = ashCentroids[c];
+                double dotQC = 0;
+                for (int d = 0; d < originalDim; d++) {
+                    dotQC += (double) query[d] * centroid[d];
+                }
+                queryDotCentroidByCluster[c] = (float) dotQC;
+                for (int j = 0; j < nDims; j++) {
+                    double sum = 0;
+                    for (int d = 0; d < originalDim; d++) {
+                        sum += (double) (query[d] - centroid[d]) * w[d][j];
+                    }
+                    queryTransformedByCluster[c][j] = (float) sum;
+                }
+            }
+            clusterTransformsReady = true;
         }
 
         @Override
@@ -1346,32 +1380,9 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 case MAXIMUM_INNER_PRODUCT -> score - 1;
             };
 
-            // Read centroid vector for this cluster
-            int centroidOrdinal = metadata.queryCentroidOrdinal();
-            float[] centroid;
-            if (parentsSlice != null && centroidOrdinal >= 0) {
-                parentsSlice.seek((long) centroidOrdinal * centroidScratch.length * Float.BYTES);
-                parentsSlice.readFloats(centroidScratch, 0, centroidScratch.length);
-                centroid = centroidScratch;
-            } else {
-                centroid = globalCentroid;
-            }
-
-            // Precompute queryTransformed = (query - centroid) @ W and queryDotCentroid
-            int originalDim = query.length;
-            queryTransformed = new float[nDims];
-            double dotQC = 0;
-            for (int d = 0; d < originalDim; d++) {
-                dotQC += (double) query[d] * centroid[d];
-            }
-            queryDotCentroid = (float) dotQC;
-
-            for (int j = 0; j < nDims; j++) {
-                double sum = 0;
-                for (int d = 0; d < originalDim; d++) {
-                    sum += (double) (query[d] - centroid[d]) * w[d][j];
-                }
-                queryTransformed[j] = (float) sum;
+            // Precompute per-ASH-cluster query transforms (done once per query)
+            if (ashCentroids != null) {
+                ensureClusterTransforms();
             }
 
             return vectors;
@@ -1381,8 +1392,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         public int visit(KnnCollector knnCollector) throws IOException {
             indexInput.seek(slicePos);
             int scoredDocs = 0;
-            // Per-vector on disk: [short scale_f16][short offset_f16][byte[packedCodeBytes] packed_codes]
-            int perVectorBytes = Short.BYTES + Short.BYTES + packedCodeBytes;
+            // Per-vector on disk: [byte ashClusterId][short scale_f16][short offset_f16][byte[packedCodeBytes] packed_codes]
+            int perVectorBytes = Byte.BYTES + Short.BYTES + Short.BYTES + packedCodeBytes;
             byte[] codeBuf = new byte[packedCodeBytes];
 
             int limit = vectors - BULK_SIZE + 1;
@@ -1399,10 +1410,11 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 float maxScore = Float.NEGATIVE_INFINITY;
                 for (int j = 0; j < BULK_SIZE; j++) {
                     if (docIdsScratch[j] != -1) {
+                        int ashClusterId = indexInput.readByte() & 0xFF;
                         float scale = Float.float16ToFloat(indexInput.readShort());
                         float offset = Float.float16ToFloat(indexInput.readShort());
                         indexInput.readBytes(codeBuf, 0, packedCodeBytes);
-                        float s = scoreVector(codeBuf, scale, offset);
+                        float s = scoreVector(codeBuf, scale, offset, ashClusterId);
                         scores[j] = convertScore(s);
                         if (scores[j] > maxScore) {
                             maxScore = scores[j];
@@ -1425,10 +1437,11 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                     float maxScore = Float.NEGATIVE_INFINITY;
                     for (int j = 0; j < tailSize; j++) {
                         if (docIdsScratch[j] != -1) {
+                            int ashClusterId = indexInput.readByte() & 0xFF;
                             float scale = Float.float16ToFloat(indexInput.readShort());
                             float offset = Float.float16ToFloat(indexInput.readShort());
                             indexInput.readBytes(codeBuf, 0, packedCodeBytes);
-                            float s = scoreVector(codeBuf, scale, offset);
+                            float s = scoreVector(codeBuf, scale, offset, ashClusterId);
                             scores[j] = convertScore(s);
                             if (scores[j] > maxScore) {
                                 maxScore = scores[j];
@@ -1460,7 +1473,9 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             };
         }
 
-        private float scoreVector(byte[] codeBuf, float scale, float offset) {
+        private float scoreVector(byte[] codeBuf, float scale, float offset, int ashClusterId) {
+            float[] queryTransformed = queryTransformedByCluster[ashClusterId];
+            float queryDotCentroid = queryDotCentroidByCluster[ashClusterId];
             if (bitsPerDim == 1) {
                 return AsymmetricHashingScorer.scoreOneVectorBinary(queryTransformed, queryDotCentroid, codeBuf, nDims, scale, offset);
             } else {

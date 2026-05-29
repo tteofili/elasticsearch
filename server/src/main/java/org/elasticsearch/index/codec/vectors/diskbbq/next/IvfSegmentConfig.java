@@ -44,6 +44,8 @@ public record IvfSegmentConfig(
     public static final int DEFAULT_ASH_TRAINING_ITERATIONS = 20;
     /** Default ASH training factor. */
     public static final int DEFAULT_ASH_TRAINING_FACTOR = 10;
+    /** Default number of ASH centering clusters (independent of IVF cluster count). */
+    public static final int DEFAULT_ASH_NUM_CLUSTERS = 16;
 
     public static IvfSegmentConfig fromCodecDefaults(ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding, boolean doPrecondition) {
         return new IvfSegmentConfig(
