@@ -22,6 +22,9 @@ public final class AshSphericalScalarQuantizer implements AshDimQuantizer {
 
     private final int bitsPerDim;
 
+    /**
+     * @param bitsPerDim number of bits per projected dimension (must be >= 2)
+     */
     public AshSphericalScalarQuantizer(int bitsPerDim) {
         if (bitsPerDim < 2) {
             throw new IllegalArgumentException("bitsPerDim must be >= 2 for spherical scalar quantizer; use BinaryQuantizer for 1-bit");

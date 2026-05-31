@@ -206,11 +206,12 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
             }
         },
         /**
-         * Asymmetric Hashing with 1-bit-per-dimension quantization in the projected latent space.
-         * The pack/packQuery methods are not used for ASH; encoding is handled by
+         * Asymmetric Hashing (ASH) encoding. Vectors are projected via a learned matrix W into a
+         * lower-dimensional space and quantized (bits-per-dim is configurable via {@link IvfSegmentConfig}).
+         * The pack/packQuery methods are not used; encoding is handled by
          * {@link org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AsymmetricHashingQuantizer}.
          */
-        ASH_1BIT(6, (byte) 1, (byte) 0) {
+        ASH(6, (byte) 0, (byte) 0) {
             @Override
             public void pack(int[] quantized, byte[] destination) {
                 // ASH uses its own encoding path; this should not be called directly

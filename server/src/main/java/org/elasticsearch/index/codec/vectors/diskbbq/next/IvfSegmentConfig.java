@@ -33,7 +33,11 @@ public record IvfSegmentConfig(
     int ashTotalBits,
     int ashBitsPerDim,
     AsymmetricHashingQuantizer.Method ashMethod,
-    int ashTrainingIterations
+    int ashTrainingIterations,
+    int ashTrainingFactor,
+    int ashNumClusters,
+    int ashKMeansMaxIterations,
+    long ashSeed
 ) {
 
     /** Default ASH total bits budget. */
@@ -42,10 +46,14 @@ public record IvfSegmentConfig(
     public static final int DEFAULT_ASH_BITS_PER_DIM = 2;
     /** Default ASH training iterations. */
     public static final int DEFAULT_ASH_TRAINING_ITERATIONS = 20;
-    /** Default ASH training factor. */
+    /** Default ASH training factor (subsample multiplier for training set). */
     public static final int DEFAULT_ASH_TRAINING_FACTOR = 10;
     /** Default number of ASH centering clusters (independent of IVF cluster count). */
     public static final int DEFAULT_ASH_NUM_CLUSTERS = 16;
+    /** Default max iterations for ASH k-means. */
+    public static final int DEFAULT_ASH_KMEANS_MAX_ITERATIONS = 50;
+    /** Default random seed for ASH training reproducibility. */
+    public static final long DEFAULT_ASH_SEED = 42L;
 
     public static IvfSegmentConfig fromCodecDefaults(ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding, boolean doPrecondition) {
         return new IvfSegmentConfig(
@@ -55,7 +63,11 @@ public record IvfSegmentConfig(
             DEFAULT_ASH_TOTAL_BITS,
             DEFAULT_ASH_BITS_PER_DIM,
             AsymmetricHashingQuantizer.Method.LEARNED,
-            DEFAULT_ASH_TRAINING_ITERATIONS
+            DEFAULT_ASH_TRAINING_ITERATIONS,
+            DEFAULT_ASH_TRAINING_FACTOR,
+            DEFAULT_ASH_NUM_CLUSTERS,
+            DEFAULT_ASH_KMEANS_MAX_ITERATIONS,
+            DEFAULT_ASH_SEED
         );
     }
 
@@ -74,7 +86,11 @@ public record IvfSegmentConfig(
             DEFAULT_ASH_TOTAL_BITS,
             DEFAULT_ASH_BITS_PER_DIM,
             AsymmetricHashingQuantizer.Method.LEARNED,
-            DEFAULT_ASH_TRAINING_ITERATIONS
+            DEFAULT_ASH_TRAINING_ITERATIONS,
+            DEFAULT_ASH_TRAINING_FACTOR,
+            DEFAULT_ASH_NUM_CLUSTERS,
+            DEFAULT_ASH_KMEANS_MAX_ITERATIONS,
+            DEFAULT_ASH_SEED
         );
     }
 
@@ -89,7 +105,19 @@ public record IvfSegmentConfig(
         AsymmetricHashingQuantizer.Method ashMethod,
         int ashTrainingIterations
     ) {
-        return new IvfSegmentConfig(quantEncoding, false, rescoreOversample, ashTotalBits, ashBitsPerDim, ashMethod, ashTrainingIterations);
+        return new IvfSegmentConfig(
+            quantEncoding,
+            false,
+            rescoreOversample,
+            ashTotalBits,
+            ashBitsPerDim,
+            ashMethod,
+            ashTrainingIterations,
+            DEFAULT_ASH_TRAINING_FACTOR,
+            DEFAULT_ASH_NUM_CLUSTERS,
+            DEFAULT_ASH_KMEANS_MAX_ITERATIONS,
+            DEFAULT_ASH_SEED
+        );
     }
 
     /**

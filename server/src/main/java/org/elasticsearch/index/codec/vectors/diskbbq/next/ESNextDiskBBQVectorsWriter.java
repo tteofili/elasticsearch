@@ -52,10 +52,8 @@ import org.elasticsearch.index.codec.vectors.diskbbq.IntToBooleanFunction;
 import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantizedVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.VectorPreconditioner;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AshPostingsListWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AshProjectionMatrix;
-import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AsymmetricHashingQuantizer;
-import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AsymmetricHashingResult;
-import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AsymmetricHashingScorer;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.simdvec.ES940OSQVectorsScorer;
@@ -606,7 +604,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
 
     /**
      * ASH-specific posting list builder for both flush and merge paths.
-     * Trains the projection matrix W, encodes vectors via ASH, and writes posting lists.
+     * Delegates to {@link AshPostingsListWriter} for training and encoding.
      */
     private CentroidOffsetAndLength buildAndWriteAshPostingsLists(
         FieldInfo fieldInfo,
@@ -618,148 +616,18 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter {
         int[] overspillAssignments,
         IvfSegmentConfig segmentConfig
     ) throws IOException {
-        int nVectors = assignments.length;
-        int originalDim = fieldInfo.getVectorDimension();
-        int nClusters = centroidSupplier.size();
-
-        // Collect all vectors and centroids into arrays for ASH training
-        float[][] vectors = new float[nVectors][originalDim];
-        for (int i = 0; i < nVectors; i++) {
-            float[] v = floatVectorValues.vectorValue(i);
-            System.arraycopy(v, 0, vectors[i], 0, originalDim);
-        }
-
-        float[][] centroids = new float[nClusters][originalDim];
-        for (int c = 0; c < nClusters; c++) {
-            float[] cent = centroidSupplier.centroid(c);
-            System.arraycopy(cent, 0, centroids[c], 0, originalDim);
-        }
-
-        // Create and train the ASH quantizer
-        AsymmetricHashingQuantizer ashQuantizer = new AsymmetricHashingQuantizer(
-            segmentConfig.ashTotalBits(),
-            segmentConfig.ashBitsPerDim(),
-            segmentConfig.ashMethod(),
-            segmentConfig.ashTrainingIterations(),
-            IvfSegmentConfig.DEFAULT_ASH_TRAINING_FACTOR,
-            42L // seed
+        AshPostingsListWriter ashWriter = new AshPostingsListWriter();
+        AshPostingsListWriter.PostingsOffsetAndLength result = ashWriter.buildAndWrite(
+            fieldInfo,
+            centroidSupplier,
+            floatVectorValues,
+            postingsOutput,
+            fileOffset,
+            assignments,
+            segmentConfig
         );
-
-        // Run ASH-specific k-means with few clusters (independent of IVF clustering)
-        // Python uses n_clusters=16 by default; the IVF clusters (~2604) are too fine-grained
-        // for effective centroid subtraction in ASH.
-        long tKmeans0 = System.currentTimeMillis();
-        AsymmetricHashingQuantizer.AshKMeansResult ashKMeans = AsymmetricHashingQuantizer.runAshKMeans(
-            vectors,
-            IvfSegmentConfig.DEFAULT_ASH_NUM_CLUSTERS,
-            50, // maxIterations
-            42L
-        );
-        float[][] ashCentroids = ashKMeans.centroids();
-        int[] ashAssignments = ashKMeans.assignments();
-        long tKmeans1 = System.currentTimeMillis();
-        logger.info("ASH k-means: {}ms, {} clusters", tKmeans1 - tKmeans0, ashCentroids.length);
-
-        long t0 = System.currentTimeMillis();
-        float[][] w = ashQuantizer.train(vectors, ashCentroids, ashAssignments);
-        long t1 = System.currentTimeMillis();
-        AsymmetricHashingResult ashResult = ashQuantizer.encode(vectors, ashCentroids, ashAssignments, w);
-        long t2 = System.currentTimeMillis();
-        logger.info("ASH train: {}ms, encode: {}ms, nDims={}", t1 - t0, t2 - t1, w[0].length);
-
-        // Store the projection matrix + ASH centroids for later writing in the preconditioner slot
-        this.ashProjectionMatrix = new AshProjectionMatrix(w, ashCentroids);
-
-        // Build cluster assignments — SOAR/overspill is disabled for ASH because
-        // encoded vectors are centroid-relative and cannot be correctly scored against
-        // a different cluster's centroid.
-        int[] centroidVectorCount = new int[nClusters];
-        for (int i = 0; i < nVectors; i++) {
-            centroidVectorCount[assignments[i]]++;
-        }
-
-        int maxPostingListSize = 0;
-        int[][] assignmentsByCluster = new int[nClusters][];
-        for (int c = 0; c < nClusters; c++) {
-            int size = centroidVectorCount[c];
-            maxPostingListSize = Math.max(maxPostingListSize, size);
-            assignmentsByCluster[c] = new int[size];
-        }
-        Arrays.fill(centroidVectorCount, 0);
-
-        for (int i = 0; i < nVectors; i++) {
-            int c = assignments[i];
-            assignmentsByCluster[c][centroidVectorCount[c]++] = i;
-        }
-
-        // Write posting lists
-        final PackedLongValues.Builder offsets = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
-        final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
-        final int nDims = ashResult.encodedVectors()[0].length;
-        final int bitsPerDim = segmentConfig.ashBitsPerDim();
-        final int packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims, bitsPerDim);
-        final int[] docIds = new int[maxPostingListSize];
-        final int[] docDeltas = new int[maxPostingListSize];
-        final int[] clusterOrds = new int[maxPostingListSize];
-        DocIdsWriter idsWriter = new DocIdsWriter();
-        KMeansResult centroidClusters = centroidSupplier.secondLevelClusters();
-
-        for (int c = 0; c < nClusters; c++) {
-            float[] centroid = centroidSupplier.centroid(c);
-            int[] cluster = assignmentsByCluster[c];
-            long offset = postingsOutput.alignFilePointer(Float.BYTES) - fileOffset;
-            offsets.add(offset);
-            // Write parent centroid distance (same as OSQ path)
-            postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroid, centroidClusters.getCentroid(c))));
-            int size = cluster.length;
-            postingsOutput.writeVInt(size);
-
-            // Sort by docId
-            for (int j = 0; j < size; j++) {
-                docIds[j] = floatVectorValues.ordToDoc(cluster[j]);
-                clusterOrds[j] = j;
-            }
-            new IntSorter(clusterOrds, i -> docIds[i]).sort(0, size);
-            for (int j = 0; j < size; j++) {
-                docDeltas[j] = j == 0 ? docIds[clusterOrds[j]] : docIds[clusterOrds[j]] - docIds[clusterOrds[j - 1]];
-            }
-
-            byte encoding = idsWriter.calculateBlockEncoding(i -> docDeltas[i], size, BULK_SIZE);
-            postingsOutput.writeByte(encoding);
-
-            // Write vectors in bulk blocks: docIds first, then ASH encoded vectors
-            int written = 0;
-            while (written < size) {
-                int blockSize = Math.min(BULK_SIZE, size - written);
-                // Write docId deltas for this block first (matches OSQ read order)
-                final int blockStart = written;
-                idsWriter.writeDocIds(d -> docDeltas[blockStart + d], blockSize, encoding, postingsOutput);
-                // Write ASH encoded vectors for this block
-                for (int j = 0; j < blockSize; j++) {
-                    int vectorOrd = cluster[clusterOrds[written + j]];
-                    float[] encVec = ashResult.encodedVectors()[vectorOrd];
-                    float scale = ashResult.scales()[vectorOrd];
-                    float off = ashResult.offsets()[vectorOrd];
-                    // Write: ashClusterId (1 byte), scale (float16 as 2 bytes), offset (float16 as 2 bytes)
-                    postingsOutput.writeByte((byte) ashAssignments[vectorOrd]);
-                    postingsOutput.writeShort(Float.floatToFloat16(scale));
-                    postingsOutput.writeShort(Float.floatToFloat16(off));
-                    // Write packed codes
-                    byte[] packed = bitsPerDim == 1
-                        ? AsymmetricHashingScorer.packBinaryCodes(encVec)
-                        : AsymmetricHashingScorer.packMultiBitCodes(encVec, bitsPerDim);
-                    postingsOutput.writeBytes(packed, packed.length);
-                }
-                written += blockSize;
-            }
-            lengths.add(postingsOutput.getFilePointer() - fileOffset - offset);
-        }
-
-        if (logger.isDebugEnabled()) {
-            printClusterQualityStatistics(assignmentsByCluster);
-        }
-
-        return new CentroidOffsetAndLength(offsets.build(), lengths.build());
+        this.ashProjectionMatrix = ashWriter.getAshProjectionMatrix();
+        return new CentroidOffsetAndLength(result.offsets(), result.lengths());
     }
 
     private static void printClusterQualityStatistics(int[][] clusters) {

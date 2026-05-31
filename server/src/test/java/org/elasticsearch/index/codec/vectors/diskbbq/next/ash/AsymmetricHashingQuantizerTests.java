@@ -9,6 +9,9 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.next.ash;
 
+import org.apache.lucene.store.ByteBuffersDataOutput;
+import org.apache.lucene.store.ByteBuffersIndexInput;
+import org.apache.lucene.store.ByteBuffersIndexOutput;
 import org.elasticsearch.test.ESTestCase;
 
 import java.util.Random;
@@ -188,8 +191,15 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         for (int j = 0; j < dim; j++) {
             query[j] = (float) rng.nextGaussian();
         }
-        float[] scores = AsymmetricHashingScorer.score(query, w, centroids, assignments, result.encodedVectors(), result.scales(), result
-            .offsets());
+        float[] scores = AsymmetricHashingScorer.score(
+            query,
+            w,
+            centroids,
+            assignments,
+            result.encodedVectors(),
+            result.scales(),
+            result.offsets()
+        );
         assertEquals(nVectors, scores.length);
 
         // Verify approximate dot products correlate with exact ones
@@ -235,24 +245,134 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
     public void testFallbackToRandomWhenTooFewVectors() {
         // With only 2 vectors and nDims=4, learned method should fall back to random
         int dim = 16;
-        float[][] vectors = { { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 },
+        float[][] vectors = {
+            { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 },
             { 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1 } };
         float[][] centroids = { new float[dim] };
         int[] assignments = { 0, 0 };
 
-        AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(
-            36,
-            1,
-            AsymmetricHashingQuantizer.Method.LEARNED,
-            5,
-            10,
-            42L
-        );
+        AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(36, 1, AsymmetricHashingQuantizer.Method.LEARNED, 5, 10, 42L);
 
         // Should not throw — falls back to random
         float[][] w = quantizer.train(vectors, centroids, assignments);
         assertNotNull(w);
         assertEquals(dim, w.length);
+    }
+
+    public void testMultiBitPackAndScore() {
+        // 2-bit quantizer: levels are -1.5, -0.5, 0.5, 1.5
+        int bitsPerDim = 2;
+        int nDims = 10;
+        float[] codes = { 0.5f, -1.5f, 1.5f, -0.5f, 0.5f, 1.5f, -0.5f, -1.5f, 0.5f, 1.5f };
+        byte[] packed = AsymmetricHashingScorer.packMultiBitCodes(codes, bitsPerDim);
+        assertEquals(bitsPerDim * ((nDims + 7) >>> 3), packed.length);
+
+        float[] qt = { 0.5f, 0.3f, -0.2f, 0.8f, 0.1f, -0.4f, 0.6f, -0.7f, 0.9f, -0.1f };
+        float scale = 1.2f;
+        float offset = -0.1f;
+        float qdc = 0.4f;
+
+        float floatScore = AsymmetricHashingScorer.scoreOneVector(qt, qdc, codes, scale, offset);
+        float multiBitScore = AsymmetricHashingScorer.scoreOneVectorMultiBit(qt, qdc, packed, nDims, bitsPerDim, scale, offset);
+        assertEquals(floatScore, multiBitScore, 1e-4f);
+    }
+
+    public void testKMeansConverges() {
+        // Generate 2 obvious clusters in 4D
+        Random rng = new Random(99);
+        int nVectors = 200;
+        int dim = 4;
+        float[][] vectors = new float[nVectors][dim];
+        for (int i = 0; i < nVectors; i++) {
+            float base = i < 100 ? 10.0f : -10.0f;
+            for (int d = 0; d < dim; d++) {
+                vectors[i][d] = base + (float) rng.nextGaussian() * 0.5f;
+            }
+        }
+
+        AsymmetricHashingQuantizer.AshKMeansResult result = AsymmetricHashingQuantizer.runAshKMeans(vectors, 2, 50, 42L);
+        assertEquals(2, result.centroids().length);
+        assertEquals(nVectors, result.assignments().length);
+
+        // All first-half vectors should share the same cluster (and differ from second half)
+        int cluster0 = result.assignments()[0];
+        for (int i = 0; i < 100; i++) {
+            assertEquals("Vector " + i + " should be in same cluster as vector 0", cluster0, result.assignments()[i]);
+        }
+        int cluster1 = result.assignments()[100];
+        assertNotEquals(cluster0, cluster1);
+        for (int i = 100; i < 200; i++) {
+            assertEquals("Vector " + i + " should be in same cluster as vector 100", cluster1, result.assignments()[i]);
+        }
+    }
+
+    public void testProjectionMatrixSerializationRoundtrip() throws Exception {
+        Random rng = new Random(77);
+        int originalDim = 8;
+        int nDims = 3;
+        int nClusters = 2;
+
+        float[][] w = new float[originalDim][nDims];
+        for (int i = 0; i < originalDim; i++) {
+            for (int j = 0; j < nDims; j++) {
+                w[i][j] = (float) rng.nextGaussian();
+            }
+        }
+        float[][] centroids = new float[nClusters][originalDim];
+        for (int c = 0; c < nClusters; c++) {
+            for (int d = 0; d < originalDim; d++) {
+                centroids[c][d] = (float) rng.nextGaussian();
+            }
+        }
+
+        AshProjectionMatrix original = new AshProjectionMatrix(w, centroids);
+
+        // Write
+        ByteBuffersDataOutput dataOut = new ByteBuffersDataOutput();
+        try (ByteBuffersIndexOutput out = new ByteBuffersIndexOutput(dataOut, "test", "test")) {
+            original.write(out);
+        }
+
+        // Read
+        ByteBuffersIndexInput in = new ByteBuffersIndexInput(dataOut.toDataInput(), "test");
+        AshProjectionMatrix restored = AshProjectionMatrix.read(in);
+
+        assertEquals(originalDim, restored.originalDim());
+        assertEquals(nDims, restored.nDims());
+        assertNotNull(restored.ashCentroids());
+        assertEquals(nClusters, restored.ashCentroids().length);
+
+        for (int i = 0; i < originalDim; i++) {
+            for (int j = 0; j < nDims; j++) {
+                assertEquals(w[i][j], restored.w()[i][j], 0f);
+            }
+        }
+        for (int c = 0; c < nClusters; c++) {
+            for (int d = 0; d < originalDim; d++) {
+                assertEquals(centroids[c][d], restored.ashCentroids()[c][d], 0f);
+            }
+        }
+    }
+
+    public void testTopKRightSingularVectors() {
+        // Known matrix: diagonal with descending values
+        int m = 6;
+        int n = 4;
+        float[][] a = new float[m][n];
+        a[0][0] = 4.0f;
+        a[1][1] = 3.0f;
+        a[2][2] = 2.0f;
+        a[3][3] = 1.0f;
+
+        // Top-2 right singular vectors should be close to e0 and e1
+        float[][] topK = SvdUtil.topKRightSingularVectors(a, m, n, 2, 42L);
+        assertEquals(2, topK.length);
+        assertEquals(n, topK[0].length);
+
+        // First vector should be dominated by dim 0 (corresponding to singular value 4)
+        assertTrue(Math.abs(topK[0][0]) > 0.9f);
+        // Second vector should be dominated by dim 1 (singular value 3)
+        assertTrue(Math.abs(topK[1][1]) > 0.9f);
     }
 
     private static double computeRankCorrelation(float[][] vectors, float[] query, float[] approxScores) {

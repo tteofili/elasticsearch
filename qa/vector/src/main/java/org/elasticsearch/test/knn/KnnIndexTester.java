@@ -210,7 +210,7 @@ public class KnnIndexTester {
         format = switch (args.indexType()) {
             case IVF -> {
                 var encoding = "ash".equals(args.quantizationType())
-                    ? ESNextDiskBBQVectorsFormat.QuantEncoding.ASH_1BIT
+                    ? ESNextDiskBBQVectorsFormat.QuantEncoding.ASH
                     : resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
                 boolean doPrecondition = "ash".equals(args.quantizationType()) ? false : args.doPrecondition();
                 // Use flatVectorThreshold from config, or default to -1 (dynamic) if not specified

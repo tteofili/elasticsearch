@@ -54,7 +54,14 @@ public final class AsymmetricHashingQuantizer {
      * @param trainingFactor multiplier on dimension for training sample size
      * @param seed random seed
      */
-    public AsymmetricHashingQuantizer(int totalBits, int bitsPerDim, Method method, int nTrainingIterations, int trainingFactor, long seed) {
+    public AsymmetricHashingQuantizer(
+        int totalBits,
+        int bitsPerDim,
+        Method method,
+        int nTrainingIterations,
+        int trainingFactor,
+        long seed
+    ) {
         if (totalBits <= 0) {
             throw new IllegalArgumentException("totalBits must be positive");
         }
