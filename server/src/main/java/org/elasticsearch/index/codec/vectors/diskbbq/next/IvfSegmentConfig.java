@@ -24,13 +24,13 @@ import org.elasticsearch.index.codec.vectors.diskbbq.next.ash.AsymmetricHashingQ
  * When the stored rescore is not finite (e.g. {@code NaN}), query and mapping rescore then apply in the usual order.
  * <p>
  * For ASH-encoded segments, the preconditioner slot stores the learned projection matrix W,
- * and the ASH-specific configuration (totalBits, bitsPerDim, method) controls encoding behavior.
+ * and the ASH-specific configuration (projectedDimsFraction, bitsPerDim, method) controls encoding behavior.
  */
 public record IvfSegmentConfig(
     ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding,
     boolean usePrecondition,
     float rescoreOversample,
-    int ashTotalBits,
+    float ashProjectedDimsFraction,
     int ashBitsPerDim,
     AsymmetricHashingQuantizer.Method ashMethod,
     int ashTrainingIterations,
@@ -40,8 +40,11 @@ public record IvfSegmentConfig(
     long ashSeed
 ) {
 
-    /** Default ASH total bits budget. */
-    public static final int DEFAULT_ASH_TOTAL_BITS = 768;
+    /**
+     * Default fraction of original dimensions to project to.
+     * With 768d input and fraction 0.5: projectedDims = 384 -> 48 bytes per bit plane (SIMD aligned).
+     */
+    public static final float DEFAULT_ASH_PROJECTED_DIMS_FRACTION = 0.5f;
     /** Default ASH bits per projected dimension. */
     public static final int DEFAULT_ASH_BITS_PER_DIM = 2;
     /** Default ASH training iterations. */
@@ -55,12 +58,19 @@ public record IvfSegmentConfig(
     /** Default random seed for ASH training reproducibility. */
     public static final long DEFAULT_ASH_SEED = 42L;
 
+    /**
+     * Computes the number of projected dimensions for ASH given the original vector dimension.
+     */
+    public int ashProjectedDims(int originalDim) {
+        return (int) (originalDim * ashProjectedDimsFraction);
+    }
+
     public static IvfSegmentConfig fromCodecDefaults(ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding, boolean doPrecondition) {
         return new IvfSegmentConfig(
             quantEncoding,
             doPrecondition,
             Float.NaN,
-            DEFAULT_ASH_TOTAL_BITS,
+            DEFAULT_ASH_PROJECTED_DIMS_FRACTION,
             DEFAULT_ASH_BITS_PER_DIM,
             AsymmetricHashingQuantizer.Method.LEARNED,
             DEFAULT_ASH_TRAINING_ITERATIONS,
@@ -83,7 +93,7 @@ public record IvfSegmentConfig(
             quantEncoding,
             doPrecondition,
             rescoreOversample,
-            DEFAULT_ASH_TOTAL_BITS,
+            DEFAULT_ASH_PROJECTED_DIMS_FRACTION,
             DEFAULT_ASH_BITS_PER_DIM,
             AsymmetricHashingQuantizer.Method.LEARNED,
             DEFAULT_ASH_TRAINING_ITERATIONS,
@@ -100,7 +110,7 @@ public record IvfSegmentConfig(
     public static IvfSegmentConfig withAsh(
         ESNextDiskBBQVectorsFormat.QuantEncoding quantEncoding,
         float rescoreOversample,
-        int ashTotalBits,
+        float ashProjectedDimsFraction,
         int ashBitsPerDim,
         AsymmetricHashingQuantizer.Method ashMethod,
         int ashTrainingIterations
@@ -109,7 +119,7 @@ public record IvfSegmentConfig(
             quantEncoding,
             false,
             rescoreOversample,
-            ashTotalBits,
+            ashProjectedDimsFraction,
             ashBitsPerDim,
             ashMethod,
             ashTrainingIterations,

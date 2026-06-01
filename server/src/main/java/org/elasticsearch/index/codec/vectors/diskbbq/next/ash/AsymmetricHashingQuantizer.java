@@ -38,7 +38,7 @@ public final class AsymmetricHashingQuantizer {
         RANDOM
     }
 
-    private final int totalBits;
+    private final float projectedDimsFraction;
     private final int bitsPerDim;
     private final Method method;
     private final int nTrainingIterations;
@@ -47,7 +47,7 @@ public final class AsymmetricHashingQuantizer {
     private final AshDimQuantizer quantizer;
 
     /**
-     * @param totalBits total bits budget per vector (header + body)
+     * @param projectedDimsFraction fraction of original dimensions to project to (e.g. 0.5 for half)
      * @param bitsPerDim bits per projected dimension in the body
      * @param method training method for W
      * @param nTrainingIterations number of Procrustes iterations (for LEARNED)
@@ -55,20 +55,20 @@ public final class AsymmetricHashingQuantizer {
      * @param seed random seed
      */
     public AsymmetricHashingQuantizer(
-        int totalBits,
+        float projectedDimsFraction,
         int bitsPerDim,
         Method method,
         int nTrainingIterations,
         int trainingFactor,
         long seed
     ) {
-        if (totalBits <= 0) {
-            throw new IllegalArgumentException("totalBits must be positive");
+        if (projectedDimsFraction <= 0 || projectedDimsFraction > 1.0f) {
+            throw new IllegalArgumentException("projectedDimsFraction must be in (0, 1]");
         }
         if (bitsPerDim <= 0) {
             throw new IllegalArgumentException("bitsPerDim must be positive");
         }
-        this.totalBits = totalBits;
+        this.projectedDimsFraction = projectedDimsFraction;
         this.bitsPerDim = bitsPerDim;
         this.method = method;
         this.nTrainingIterations = nTrainingIterations;
@@ -83,31 +83,11 @@ public final class AsymmetricHashingQuantizer {
     }
 
     /**
-     * Computes the number of header bits for a given cluster count.
-     * In IVF layout, cluster assignment is implicit (each posting list belongs to a cluster),
-     * so header is only 2 × 16 bits (scale + offset as float16).
+     * Computes the number of projected dimensions for a given original dimension.
      */
-    public static int headerBits(int nClusters) {
-        return 32; // scale_f16 + offset_f16
+    public int nDims(int originalDim) {
+        return (int) (originalDim * projectedDimsFraction);
     }
-
-    /**
-     * Number of projected dimensions given a cluster count.
-     * If the configured totalBits is insufficient for any body bits (header exceeds totalBits),
-     * we auto-expand to guarantee at least {@link #MIN_PROJECTED_DIMS} projected dimensions.
-     */
-    public int nDims(int nClusters) {
-        int header = headerBits(nClusters);
-        int body = totalBits - header;
-        if (body <= 0) {
-            // Auto-expand: totalBits is insufficient for this cluster count
-            body = MIN_PROJECTED_DIMS * bitsPerDim;
-        }
-        return body / bitsPerDim;
-    }
-
-    /** Minimum number of projected dimensions when totalBits is insufficient for the header. */
-    private static final int MIN_PROJECTED_DIMS = 8;
 
     /**
      * Trains the projection matrix W on the given vectors and their cluster assignments.
@@ -118,9 +98,8 @@ public final class AsymmetricHashingQuantizer {
      * @return the learned projection matrix W, shape (originalDim, nDims)
      */
     public float[][] train(float[][] vectors, float[][] centroids, int[] assignments) {
-        int nClusters = centroids.length;
-        int nDims = nDims(nClusters);
         int originalDim = vectors[0].length;
+        int nDims = nDims(originalDim);
 
         // Too few vectors for meaningful PCA training; fall back to random projection
         if (method == Method.LEARNED && vectors.length < nDims * 2) {

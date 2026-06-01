@@ -78,7 +78,7 @@ public class AshPostingsListWriter {
      * @param postingsOutput    output stream for the posting list data
      * @param fileOffset        base offset in the postings file (for relative addressing)
      * @param assignments       IVF cluster assignment per vector ordinal
-     * @param segmentConfig     ASH configuration (totalBits, bitsPerDim, method, training iterations)
+     * @param segmentConfig     ASH configuration (projectedDimsFraction, bitsPerDim, method, training iterations)
      * @return per-cluster offsets and lengths
      */
     public PostingsOffsetAndLength buildAndWrite(
@@ -103,7 +103,7 @@ public class AshPostingsListWriter {
 
         // Create and train the ASH quantizer
         AsymmetricHashingQuantizer ashQuantizer = new AsymmetricHashingQuantizer(
-            segmentConfig.ashTotalBits(),
+            segmentConfig.ashProjectedDimsFraction(),
             segmentConfig.ashBitsPerDim(),
             segmentConfig.ashMethod(),
             segmentConfig.ashTrainingIterations(),

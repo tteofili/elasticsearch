@@ -104,7 +104,7 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
     public void testFullPipelineRandomMethod() {
         int nVectors = 100;
         int dim = 16;
-        int totalBits = 36;
+        float projectedDimsFraction = 0.25f; // 16 * 0.25 = 4 projected dims
         int bitsPerDim = 1;
         Random rng = new Random(123);
 
@@ -128,7 +128,7 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         int[] assignments = new int[nVectors]; // all zero
 
         AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(
-            totalBits,
+            projectedDimsFraction,
             bitsPerDim,
             AsymmetricHashingQuantizer.Method.RANDOM,
             0,
@@ -140,7 +140,7 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         assertNotNull(w);
         assertEquals(dim, w.length);
 
-        int expectedNDims = (totalBits - AsymmetricHashingQuantizer.headerBits(1)) / bitsPerDim;
+        int expectedNDims = (int) (dim * projectedDimsFraction);
         assertEquals(expectedNDims, w[0].length);
 
         AsymmetricHashingResult result = quantizer.encode(vectors, centroids, assignments, w);
@@ -152,7 +152,7 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
     public void testFullPipelineLearnedMethod() {
         int nVectors = 200;
         int dim = 32;
-        int totalBits = 36;
+        float projectedDimsFraction = 0.25f; // 32 * 0.25 = 8 projected dims
         int bitsPerDim = 1;
         Random rng = new Random(456);
 
@@ -175,7 +175,7 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         int[] assignments = new int[nVectors];
 
         AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(
-            totalBits,
+            projectedDimsFraction,
             bitsPerDim,
             AsymmetricHashingQuantizer.Method.LEARNED,
             5,
@@ -251,7 +251,7 @@ public class AsymmetricHashingQuantizerTests extends ESTestCase {
         float[][] centroids = { new float[dim] };
         int[] assignments = { 0, 0 };
 
-        AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(36, 1, AsymmetricHashingQuantizer.Method.LEARNED, 5, 10, 42L);
+        AsymmetricHashingQuantizer quantizer = new AsymmetricHashingQuantizer(0.25f, 1, AsymmetricHashingQuantizer.Method.LEARNED, 5, 10, 42L);
 
         // Should not throw — falls back to random
         float[][] w = quantizer.train(vectors, centroids, assignments);
