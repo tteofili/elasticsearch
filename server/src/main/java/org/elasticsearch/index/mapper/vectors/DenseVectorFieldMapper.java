@@ -89,6 +89,7 @@ import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.aggregations.support.CoreValuesSourceType;
 import org.elasticsearch.search.lookup.Source;
 import org.elasticsearch.search.vectors.DenseVectorQuery;
+import org.elasticsearch.search.vectors.DiversifyingChildrenIVFKnnFloatSlicedVectorQuery;
 import org.elasticsearch.search.vectors.DiversifyingChildrenIVFKnnFloatVectorQuery;
 import org.elasticsearch.search.vectors.DiversifyingParentBlockQuery;
 import org.elasticsearch.search.vectors.ESDiversifyingChildrenByteKnnVectorQuery;
@@ -3392,7 +3393,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     queryOversample
                 );
 
-                final String singleSliceRouting = parentFilter == null ? extractSingleSliceRouting(sliceRouting, sliceEnabled) : null;
+                final String singleSliceRouting = extractSingleSliceRouting(sliceRouting, sliceEnabled);
                 if (singleSliceRouting != null) {
                     knnQuery = new IVFKnnFloatSlicedVectorQuery(
                         name(),
