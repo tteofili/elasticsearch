@@ -256,6 +256,18 @@ public sealed class PanamaESVectorUtilSupport implements ESVectorUtilSupport per
     }
 
     @Override
+    public float ipFloatBit(float[] q, byte[] d, int dOffset) {
+        if (q.length >= 16) {
+            if (VECTOR_BITSIZE >= 512) {
+                return ipFloatBit512Offset(q, d, dOffset);
+            } else if (VECTOR_BITSIZE == 256) {
+                return ipFloatBit256Offset(q, d, dOffset);
+            }
+        }
+        return DefaultESVectorUtilSupport.ipFloatBitOffsetImpl(q, d, dOffset);
+    }
+
+    @Override
     public float ipFloatByte(float[] q, byte[] d) {
         if (BYTE_SPECIES_FOR_PREFFERED_FLOATS != null && q.length >= PREFERRED_FLOAT_SPECIES.length()) {
             return ipFloatByteImpl(q, d);
@@ -1132,6 +1144,108 @@ public sealed class PanamaESVectorUtilSupport implements ESVectorUtilSupport per
         }
 
         // that should have got them all (q.length is a multiple of 8, which fits in a 256-bit vector)
+        assert i == q.length;
+        return sum;
+    }
+
+    static float ipFloatBit512Offset(float[] q, byte[] d, int dOffset) {
+        int i = 0;
+        float sum = 0;
+
+        int sectionLength = FLOAT_SPECIES_512.length() * 4;
+        if (q.length >= sectionLength) {
+            FloatVector acc0 = FloatVector.zero(FLOAT_SPECIES_512);
+            FloatVector acc1 = FloatVector.zero(FLOAT_SPECIES_512);
+            FloatVector acc2 = FloatVector.zero(FLOAT_SPECIES_512);
+            FloatVector acc3 = FloatVector.zero(FLOAT_SPECIES_512);
+            int limit = limit(q.length, sectionLength);
+            for (; i < limit; i += sectionLength) {
+                var floats0 = FloatVector.fromArray(FLOAT_SPECIES_512, q, i);
+                var floats1 = FloatVector.fromArray(FLOAT_SPECIES_512, q, i + FLOAT_SPECIES_512.length());
+                var floats2 = FloatVector.fromArray(FLOAT_SPECIES_512, q, i + FLOAT_SPECIES_512.length() * 2);
+                var floats3 = FloatVector.fromArray(FLOAT_SPECIES_512, q, i + FLOAT_SPECIES_512.length() * 3);
+
+                long maskBits = Long.reverse((long) BitUtil.VH_BE_LONG.get(d, dOffset + i / 8));
+                var mask0 = VectorMask.fromLong(FLOAT_SPECIES_512, maskBits);
+                var mask1 = VectorMask.fromLong(FLOAT_SPECIES_512, maskBits >> 16);
+                var mask2 = VectorMask.fromLong(FLOAT_SPECIES_512, maskBits >> 32);
+                var mask3 = VectorMask.fromLong(FLOAT_SPECIES_512, maskBits >> 48);
+
+                acc0 = acc0.add(floats0, mask0);
+                acc1 = acc1.add(floats1, mask1);
+                acc2 = acc2.add(floats2, mask2);
+                acc3 = acc3.add(floats3, mask3);
+            }
+            sum += acc0.reduceLanes(VectorOperators.ADD) + acc1.reduceLanes(VectorOperators.ADD) + acc2.reduceLanes(VectorOperators.ADD)
+                + acc3.reduceLanes(VectorOperators.ADD);
+        }
+
+        int sectionLength256 = FLOAT_SPECIES_256.length();
+        if (q.length - i >= sectionLength256) {
+            FloatVector acc = FloatVector.zero(FLOAT_SPECIES_256);
+            int limit = limit(q.length, sectionLength256);
+            for (; i < limit; i += sectionLength256) {
+                var floats = FloatVector.fromArray(FLOAT_SPECIES_256, q, i);
+
+                long maskBits = Integer.reverse(d[dOffset + i / 8]) >> 24;
+                var mask = VectorMask.fromLong(FLOAT_SPECIES_256, maskBits);
+
+                acc = acc.add(floats, mask);
+            }
+            sum += acc.reduceLanes(VectorOperators.ADD);
+        }
+
+        assert i == q.length;
+        return sum;
+    }
+
+    static float ipFloatBit256Offset(float[] q, byte[] d, int dOffset) {
+        int i = 0;
+        float sum = 0;
+
+        int sectionLength = FLOAT_SPECIES_256.length() * 4;
+        if (q.length >= sectionLength) {
+            FloatVector acc0 = FloatVector.zero(FLOAT_SPECIES_256);
+            FloatVector acc1 = FloatVector.zero(FLOAT_SPECIES_256);
+            FloatVector acc2 = FloatVector.zero(FLOAT_SPECIES_256);
+            FloatVector acc3 = FloatVector.zero(FLOAT_SPECIES_256);
+            int limit = limit(q.length, sectionLength);
+            for (; i < limit; i += sectionLength) {
+                var floats0 = FloatVector.fromArray(FLOAT_SPECIES_256, q, i);
+                var floats1 = FloatVector.fromArray(FLOAT_SPECIES_256, q, i + FLOAT_SPECIES_256.length());
+                var floats2 = FloatVector.fromArray(FLOAT_SPECIES_256, q, i + FLOAT_SPECIES_256.length() * 2);
+                var floats3 = FloatVector.fromArray(FLOAT_SPECIES_256, q, i + FLOAT_SPECIES_256.length() * 3);
+
+                long maskBits = Integer.reverse((int) BitUtil.VH_BE_INT.get(d, dOffset + i / 8));
+                var mask0 = VectorMask.fromLong(FLOAT_SPECIES_256, maskBits);
+                var mask1 = VectorMask.fromLong(FLOAT_SPECIES_256, maskBits >> 8);
+                var mask2 = VectorMask.fromLong(FLOAT_SPECIES_256, maskBits >> 16);
+                var mask3 = VectorMask.fromLong(FLOAT_SPECIES_256, maskBits >> 24);
+
+                acc0 = acc0.add(floats0, mask0);
+                acc1 = acc1.add(floats1, mask1);
+                acc2 = acc2.add(floats2, mask2);
+                acc3 = acc3.add(floats3, mask3);
+            }
+            sum += acc0.reduceLanes(VectorOperators.ADD) + acc1.reduceLanes(VectorOperators.ADD) + acc2.reduceLanes(VectorOperators.ADD)
+                + acc3.reduceLanes(VectorOperators.ADD);
+        }
+
+        int sectionLength256 = FLOAT_SPECIES_256.length();
+        if (q.length - i >= sectionLength256) {
+            FloatVector acc = FloatVector.zero(FLOAT_SPECIES_256);
+            int limit = limit(q.length, sectionLength256);
+            for (; i < limit; i += sectionLength256) {
+                var floats = FloatVector.fromArray(FLOAT_SPECIES_256, q, i);
+
+                long maskBits = Integer.reverse(d[dOffset + i / 8]) >> 24;
+                var mask = VectorMask.fromLong(FLOAT_SPECIES_256, maskBits);
+
+                acc = acc.add(floats, mask);
+            }
+            sum += acc.reduceLanes(VectorOperators.ADD);
+        }
+
         assert i == q.length;
         return sum;
     }

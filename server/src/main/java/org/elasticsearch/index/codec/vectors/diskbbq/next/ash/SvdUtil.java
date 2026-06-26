@@ -163,16 +163,22 @@ public final class SvdUtil {
         // Newton-Schulz iteration: X <- X * (3I - X^T X) / 2
         int maxIter = 100;
         for (int iter = 0; iter < maxIter; iter++) {
-            // Compute X^T X (k × k)
+            // Compute X^T X (k × k) using row-broadcast for cache efficiency
             double[][] xtx = new double[k][k];
-            for (int i = 0; i < k; i++) {
-                for (int j = i; j < k; j++) {
-                    double sum = 0;
-                    for (int l = 0; l < k; l++) {
-                        sum += x[l][i] * x[l][j];
+            for (int l = 0; l < k; l++) {
+                double[] xRow = x[l];
+                for (int i = 0; i < k; i++) {
+                    double xli = xRow[i];
+                    double[] xtxRow = xtx[i];
+                    for (int j = i; j < k; j++) {
+                        xtxRow[j] += xli * xRow[j];
                     }
-                    xtx[i][j] = sum;
-                    xtx[j][i] = sum;
+                }
+            }
+            // Symmetrize
+            for (int i = 0; i < k; i++) {
+                for (int j = 0; j < i; j++) {
+                    xtx[i][j] = xtx[j][i];
                 }
             }
 
@@ -197,15 +203,17 @@ public final class SvdUtil {
                 b[i][i] += 1.5;
             }
 
-            // X_new = X @ B
+            // X_new = X @ B (row-broadcast for JIT vectorization)
             double[][] xNew = new double[k][k];
             for (int i = 0; i < k; i++) {
-                for (int j = 0; j < k; j++) {
-                    double sum = 0;
-                    for (int l = 0; l < k; l++) {
-                        sum += x[i][l] * b[l][j];
+                double[] xRow = x[i];
+                double[] xNewRow = xNew[i];
+                for (int l = 0; l < k; l++) {
+                    double xVal = xRow[l];
+                    double[] bRow = b[l];
+                    for (int j = 0; j < k; j++) {
+                        xNewRow[j] += xVal * bRow[j];
                     }
-                    xNew[i][j] = sum;
                 }
             }
             x = xNew;
@@ -360,8 +368,11 @@ public final class SvdUtil {
         // Block (subspace) power iteration: process all k vectors simultaneously.
         // V = random (n × k), iterate: V <- A^T (A V), then QR-orthogonalize.
         // This is O(iterations × m × n × k) total — much faster than deflation for large k.
+        //
+        // We store V in column-major form (n × k) for QR, but use a transposed (k × n) copy
+        // for the matmul inner loops to enable row-contiguous access and JIT vectorization.
         java.util.Random rng = new java.util.Random(seed);
-        int iters = 50; // sufficient iterations to separate closely-spaced singular values
+        int iters = 20; // sufficient for PCA init that gets refined by Procrustes
 
         // V: (n × k) — each column is a candidate eigenvector
         float[][] v = new float[n][k];
@@ -373,23 +384,39 @@ public final class SvdUtil {
         qrOrthogonalize(v, n, k);
 
         for (int iter = 0; iter < iters; iter++) {
-            // W = A @ V (m × k): w[i][j] = sum_d a[i][d] * v[d][j]
-            float[][] w = new float[m][k];
-            for (int i = 0; i < m; i++) {
-                for (int d = 0; d < n; d++) {
-                    float aVal = a[i][d];
-                    for (int j = 0; j < k; j++) {
-                        w[i][j] += aVal * v[d][j];
-                    }
+            // Build transposed view vT (k × n) for cache-friendly row access in matmul
+            float[][] vT = new float[k][n];
+            for (int d = 0; d < n; d++) {
+                for (int j = 0; j < k; j++) {
+                    vT[j][d] = v[d][j];
                 }
             }
-            // V_new = A^T @ W (n × k): v_new[d][j] = sum_i a[i][d] * w[i][j]
+
+            // W = A @ V (m × k): w[i][j] = dot(a[i], vT[j])
+            float[][] w = new float[m][k];
+            for (int i = 0; i < m; i++) {
+                float[] aRow = a[i];
+                float[] wRow = w[i];
+                for (int j = 0; j < k; j++) {
+                    float[] vtRow = vT[j];
+                    float sum = 0;
+                    for (int d = 0; d < n; d++) {
+                        sum += aRow[d] * vtRow[d];
+                    }
+                    wRow[j] = sum;
+                }
+            }
+
+            // V_new = A^T @ W (n × k): use row-broadcast accumulation
             float[][] vNew = new float[n][k];
             for (int i = 0; i < m; i++) {
+                float[] aRow = a[i];
+                float[] wRow = w[i];
                 for (int d = 0; d < n; d++) {
-                    float aVal = a[i][d];
+                    float aVal = aRow[d];
+                    float[] vNewRow = vNew[d];
                     for (int j = 0; j < k; j++) {
-                        vNew[d][j] += aVal * w[i][j];
+                        vNewRow[j] += aVal * wRow[j];
                     }
                 }
             }

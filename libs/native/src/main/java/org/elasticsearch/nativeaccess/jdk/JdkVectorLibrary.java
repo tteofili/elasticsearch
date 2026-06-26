@@ -60,6 +60,8 @@ public final class JdkVectorLibrary implements VectorLibrary {
     static final MethodHandle bbqApplyCorrectionsMaxInnerProductBulk$mh;
     static final MethodHandle bbqApplyCorrectionsDotProductBulk$mh;
 
+    static final MethodHandle ashDotProduct2BitFusedBulk$mh;
+
     private static final JdkVectorSimilarityFunctions INSTANCE;
 
     /**
@@ -339,6 +341,27 @@ public final class JdkVectorLibrary implements VectorLibrary {
                 );
                 bbqApplyCorrectionsDotProductBulk$mh = bindFunction("bbq_apply_corrections_dot_product_bulk", finalVecCaps, bbqScore);
 
+                // ASH 2-bit fused bulk scorer
+                FunctionDescriptor ashFusedBulk = FunctionDescriptor.ofVoid(
+                    ADDRESS,    // const f32_t* query
+                    ADDRESS,    // const uint8_t* all_codes
+                    ADDRESS,    // const uint16_t* scales_f16
+                    ADDRESS,    // const uint16_t* offsets_f16
+                    JAVA_INT,   // int32_t packedCodeBytes
+                    JAVA_INT,   // int32_t planeBytes
+                    JAVA_INT,   // int32_t count
+                    JAVA_FLOAT, // f32_t sumAllQt
+                    JAVA_FLOAT, // f32_t queryDotCentroid
+                    ADDRESS     // f32_t* results
+                );
+                MethodHandle ashMh = null;
+                try {
+                    ashMh = bindFunction("vec_dotash2bit_fused_bulk", finalVecCaps, ashFusedBulk);
+                } catch (LinkageError e) {
+                    // ASH native scorer not available in this build of libvec — will use Java fallback
+                }
+                ashDotProduct2BitFusedBulk$mh = ashMh;
+
                 INSTANCE = new JdkVectorSimilarityFunctions();
             } else {
                 if (finalVecCaps < 0) {
@@ -353,6 +376,7 @@ public final class JdkVectorLibrary implements VectorLibrary {
                 bbqApplyCorrectionsEuclideanBulk$mh = null;
                 bbqApplyCorrectionsMaxInnerProductBulk$mh = null;
                 bbqApplyCorrectionsDotProductBulk$mh = null;
+                ashDotProduct2BitFusedBulk$mh = null;
                 INSTANCE = null;
             }
         } catch (Throwable t) {
@@ -1038,6 +1062,36 @@ public final class JdkVectorLibrary implements VectorLibrary {
             }
         }
 
+        private static void ashDotProduct2BitFusedBulk(
+            MemorySegment query,
+            MemorySegment allCodes,
+            MemorySegment scalesF16,
+            MemorySegment offsetsF16,
+            int packedCodeBytes,
+            int planeBytes,
+            int count,
+            float sumAllQt,
+            float queryDotCentroid,
+            MemorySegment results
+        ) {
+            try {
+                ashDotProduct2BitFusedBulk$mh.invokeExact(
+                    query,
+                    allCodes,
+                    scalesF16,
+                    offsetsF16,
+                    packedCodeBytes,
+                    planeBytes,
+                    count,
+                    sumAllQt,
+                    queryDotCentroid,
+                    results
+                );
+            } catch (Throwable t) {
+                throw new AssertionError(t);
+            }
+        }
+
         private static final Map<OperationSignature<?>, MethodHandle> HANDLES_WITH_CHECKS;
 
         static final MethodHandle APPLY_CORRECTIONS_EUCLIDEAN_HANDLE_BULK;
@@ -1047,6 +1101,8 @@ public final class JdkVectorLibrary implements VectorLibrary {
         static final MethodHandle BBQ_APPLY_CORRECTIONS_EUCLIDEAN_HANDLE_BULK;
         static final MethodHandle BBQ_APPLY_CORRECTIONS_MAX_INNER_PRODUCT_HANDLE_BULK;
         static final MethodHandle BBQ_APPLY_CORRECTIONS_DOT_PRODUCT_HANDLE_BULK;
+
+        static final MethodHandle ASH_DOT_PRODUCT_2BIT_FUSED_BULK_HANDLE;
 
         static {
             MethodHandles.Lookup lookup = MethodHandles.lookup();
@@ -1428,6 +1484,23 @@ public final class JdkVectorLibrary implements VectorLibrary {
                     "bbqApplyCorrectionsDotProductBulk",
                     bbqScoringFunction
                 );
+
+                MethodType ashFusedType = MethodType.methodType(
+                    void.class,
+                    MemorySegment.class,
+                    MemorySegment.class,
+                    MemorySegment.class,
+                    MemorySegment.class,
+                    int.class,
+                    int.class,
+                    int.class,
+                    float.class,
+                    float.class,
+                    MemorySegment.class
+                );
+                ASH_DOT_PRODUCT_2BIT_FUSED_BULK_HANDLE = ashDotProduct2BitFusedBulk$mh != null
+                    ? lookup.findStatic(JdkVectorSimilarityFunctions.class, "ashDotProduct2BitFusedBulk", ashFusedType)
+                    : null;
             } catch (ReflectiveOperationException e) {
                 throw new AssertionError(e);
             }
@@ -1485,6 +1558,11 @@ public final class JdkVectorLibrary implements VectorLibrary {
         @Override
         public MethodHandle bbqApplyCorrectionsDotProductBulk() {
             return BBQ_APPLY_CORRECTIONS_DOT_PRODUCT_HANDLE_BULK;
+        }
+
+        @Override
+        public MethodHandle ashDotProduct2BitFusedBulk() {
+            return ASH_DOT_PRODUCT_2BIT_FUSED_BULK_HANDLE;
         }
     }
 }

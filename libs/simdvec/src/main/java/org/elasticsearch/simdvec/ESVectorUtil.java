@@ -252,6 +252,26 @@ public class ESVectorUtil {
     }
 
     /**
+     * Like {@link #ipFloatBit(float[], byte[])} but reads the bit vector from {@code d} starting at byte offset
+     * {@code dOffset}. Returns the sum of the query vector values using the bit vector slice as a mask.
+     * Bits are compared in "big endian" order within each byte (MSB = lowest float index).
+     * @param q the query vector (length must be a multiple of 8)
+     * @param d the byte array containing the bit vector data
+     * @param dOffset starting byte offset into d; processes q.length/8 bytes from d[dOffset..]
+     * @return the inner product (sum of q[i] where corresponding bit is set)
+     */
+    public static float ipFloatBit(float[] q, byte[] d, int dOffset) {
+        int numBytes = q.length / Byte.SIZE;
+        if (q.length % Byte.SIZE != 0) {
+            throw new IllegalArgumentException("q.length must be a multiple of 8, got " + q.length);
+        }
+        if (dOffset + numBytes > d.length) {
+            throw new IllegalArgumentException("d too short: need " + (dOffset + numBytes) + " bytes but d.length=" + d.length);
+        }
+        return IMPL.ipFloatBit(q, d, dOffset);
+    }
+
+    /**
      * Compute the inner product of two vectors, where the query vector is a float vector and the document vector is a byte vector.
      * @param q the query vector
      * @param d the document vector
@@ -888,5 +908,76 @@ public class ESVectorUtil {
      */
     public static void inRangeBitmask(long[] values, long lowerValue, long upperValue, long[] matches) {
         IMPL.inRangeBitmask(values, lowerValue, upperValue, matches);
+    }
+
+    private static final java.lang.invoke.MethodHandle ASH_NATIVE_SCORER;
+
+    static {
+        java.lang.invoke.MethodHandle h = null;
+        try {
+            var vsf = org.elasticsearch.nativeaccess.NativeAccess.instance().getVectorSimilarityFunctions();
+            if (vsf.isPresent()) {
+                h = vsf.get().ashDotProduct2BitFusedBulk();
+            }
+        } catch (Throwable t) {
+            // Native not available — fall through to null
+        }
+        ASH_NATIVE_SCORER = h;
+    }
+
+    /**
+     * Bulk scores 2-bit ASH vectors. Dispatches to native scorer if available, otherwise
+     * falls back to Panama {@link #ipFloatBit}-based scoring.
+     *
+     * @param queryTransformedPadded padded query vector (planeBytes * 8 floats)
+     * @param allCodes packed codes for all vectors (structure-of-arrays)
+     * @param scalesF16 raw float16-encoded scale values per vector
+     * @param offsetsF16 raw float16-encoded offset values per vector
+     * @param packedCodeBytes total packed bytes per vector
+     * @param planeBytes bytes per bit-plane
+     * @param count number of vectors to score
+     * @param sumAllQt precomputed sum of queryTransformed
+     * @param queryDotCentroid dot(query, centroid) for this posting list
+     * @param scores output score array (length >= count)
+     */
+    public static void ashScoreBulk2Bit(
+        float[] queryTransformedPadded,
+        byte[] allCodes,
+        short[] scalesF16,
+        short[] offsetsF16,
+        int packedCodeBytes,
+        int planeBytes,
+        int count,
+        float sumAllQt,
+        float queryDotCentroid,
+        float[] scores
+    ) {
+        if (ASH_NATIVE_SCORER != null) {
+            try {
+                ASH_NATIVE_SCORER.invokeExact(
+                    java.lang.foreign.MemorySegment.ofArray(queryTransformedPadded),
+                    java.lang.foreign.MemorySegment.ofArray(allCodes),
+                    java.lang.foreign.MemorySegment.ofArray(scalesF16),
+                    java.lang.foreign.MemorySegment.ofArray(offsetsF16),
+                    packedCodeBytes,
+                    planeBytes,
+                    count,
+                    sumAllQt,
+                    queryDotCentroid,
+                    java.lang.foreign.MemorySegment.ofArray(scores)
+                );
+                return;
+            } catch (Throwable t) {
+                throw new AssertionError(t);
+            }
+        }
+        // Java fallback: use ipFloatBit per plane per vector
+        for (int v = 0; v < count; v++) {
+            int codeStart = v * packedCodeBytes;
+            float planeSum0 = ipFloatBit(queryTransformedPadded, allCodes, codeStart);
+            float planeSum1 = ipFloatBit(queryTransformedPadded, allCodes, codeStart + planeBytes);
+            float dot = planeSum0 + 2.0f * planeSum1 - 1.5f * sumAllQt;
+            scores[v] = dot * Float.float16ToFloat(scalesF16[v]) + queryDotCentroid + Float.float16ToFloat(offsetsF16[v]);
+        }
     }
 }

@@ -41,4 +41,15 @@ public final class AshBinaryQuantizer implements AshDimQuantizer {
         }
         return new QuantizeResult(centeredCodes, codeNorms);
     }
+
+    @Override
+    public SingleQuantizeResult encodeOne(float[] xLatent) {
+        int nDims = xLatent.length;
+        float[] out = new float[nDims];
+        for (int j = 0; j < nDims; j++) {
+            out[j] = xLatent[j] >= 0 ? 1.0f : -1.0f;
+        }
+        // For binary codes, norm = sqrt(nDims) since all values are ±1
+        return new SingleQuantizeResult(out, (float) Math.sqrt(nDims));
+    }
 }

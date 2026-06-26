@@ -161,6 +161,11 @@ public final class DefaultESVectorUtilSupport implements ESVectorUtilSupport {
     }
 
     @Override
+    public float ipFloatBit(float[] q, byte[] d, int dOffset) {
+        return ipFloatBitOffsetImpl(q, d, dOffset);
+    }
+
+    @Override
     public float ipFloatByte(float[] q, byte[] d) {
         return ipFloatByteImpl(q, d);
     }
@@ -377,6 +382,31 @@ public final class DefaultESVectorUtilSupport implements ESVectorUtilSupport {
         // now combine the two vectors, summing the byte dimensions where the bit in d is `1`
         for (int i = start; i < d.length; i++) {
             byte mask = d[i];
+            acc0 = fma(q[i * Byte.SIZE + 0], (mask >> 7) & 1, acc0);
+            acc1 = fma(q[i * Byte.SIZE + 1], (mask >> 6) & 1, acc1);
+            acc2 = fma(q[i * Byte.SIZE + 2], (mask >> 5) & 1, acc2);
+            acc3 = fma(q[i * Byte.SIZE + 3], (mask >> 4) & 1, acc3);
+
+            acc0 = fma(q[i * Byte.SIZE + 4], (mask >> 3) & 1, acc0);
+            acc1 = fma(q[i * Byte.SIZE + 5], (mask >> 2) & 1, acc1);
+            acc2 = fma(q[i * Byte.SIZE + 6], (mask >> 1) & 1, acc2);
+            acc3 = fma(q[i * Byte.SIZE + 7], (mask >> 0) & 1, acc3);
+        }
+        return acc0 + acc1 + acc2 + acc3;
+    }
+
+    /**
+     * Offset-based variant of {@link #ipFloatBitImpl(float[], byte[])}. Reads the bit vector from
+     * {@code d} starting at byte {@code dOffset}, processing {@code q.length/8} bytes.
+     */
+    static float ipFloatBitOffsetImpl(float[] q, byte[] d, int dOffset) {
+        int numBytes = q.length / Byte.SIZE;
+        float acc0 = 0;
+        float acc1 = 0;
+        float acc2 = 0;
+        float acc3 = 0;
+        for (int i = 0; i < numBytes; i++) {
+            byte mask = d[dOffset + i];
             acc0 = fma(q[i * Byte.SIZE + 0], (mask >> 7) & 1, acc0);
             acc1 = fma(q[i * Byte.SIZE + 1], (mask >> 6) & 1, acc1);
             acc2 = fma(q[i * Byte.SIZE + 2], (mask >> 5) & 1, acc2);

@@ -9,6 +9,8 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.next.ash;
 
+import org.elasticsearch.simdvec.ESVectorUtil;
+
 /**
  * Non-SIMD default implementation of asymmetric hashing scoring.
  * <p>
@@ -283,5 +285,77 @@ public final class AsymmetricHashingScorer {
             dot += (1 << p) * planeSums[p];
         }
         return (float) dot * scale + queryDotCentroid + offset;
+    }
+
+    /**
+     * SIMD-accelerated scoring for 2-bit ASH codes using {@link ESVectorUtil#ipFloatBit(float[], byte[], int)}.
+     * Scores each bit-plane independently via vectorized masked float accumulation, then combines
+     * with power-of-two weights. Produces identical results to {@link #scoreOneVectorMultiBit}
+     * (modulo float vs double accumulation order).
+     *
+     * @param queryTransformedPadded query projected through W, zero-padded to planeBytes*8 length
+     * @param queryDotCentroid precomputed dot(query, centroid) for this posting list
+     * @param packedCodes byte array containing the packed codes (both planes contiguous)
+     * @param codeOffset starting byte offset in packedCodes for this vector's data
+     * @param planeBytes bytes per bit-plane (= ceil(nDims/8))
+     * @param scale per-vector scale factor
+     * @param offset per-vector offset correction
+     * @param sumAllQt precomputed sum of all queryTransformed values
+     * @return approximate dot product score
+     */
+    public static float scoreMultiBitSIMD2Planes(
+        float[] queryTransformedPadded,
+        float queryDotCentroid,
+        byte[] packedCodes,
+        int codeOffset,
+        int planeBytes,
+        float scale,
+        float offset,
+        float sumAllQt
+    ) {
+        // For 2-bit: numLevels=4, centerOffset=1.5
+        // dot = 1 * planeSum0 + 2 * planeSum1 - 1.5 * sumAll
+        float planeSum0 = ESVectorUtil.ipFloatBit(queryTransformedPadded, packedCodes, codeOffset);
+        float planeSum1 = ESVectorUtil.ipFloatBit(queryTransformedPadded, packedCodes, codeOffset + planeBytes);
+        float dot = planeSum0 + 2.0f * planeSum1 - 1.5f * sumAllQt;
+        return dot * scale + queryDotCentroid + offset;
+    }
+
+    /**
+     * Bulk scoring for 2-bit ASH codes. Scores {@code count} vectors stored contiguously in
+     * structure-of-arrays layout within a single bulk block.
+     *
+     * @param queryTransformedPadded padded query vector (planeBytes * 8 floats)
+     * @param allCodes contiguous packed codes for all vectors in the block
+     * @param codesOffset starting byte offset in allCodes
+     * @param packedCodeBytes total packed bytes per vector (bitsPerDim * planeBytes)
+     * @param planeBytes bytes per bit-plane
+     * @param scales float16-decoded scale per vector
+     * @param offsets float16-decoded offset per vector
+     * @param sumAllQt precomputed sum of queryTransformed
+     * @param queryDotCentroid dot(query, centroid) for this posting list
+     * @param scores output score array (length >= count)
+     * @param count number of vectors to score
+     */
+    public static void scoreBulk2Bit(
+        float[] queryTransformedPadded,
+        byte[] allCodes,
+        int codesOffset,
+        int packedCodeBytes,
+        int planeBytes,
+        float[] scales,
+        float[] offsets,
+        float sumAllQt,
+        float queryDotCentroid,
+        float[] scores,
+        int count
+    ) {
+        for (int v = 0; v < count; v++) {
+            int codeStart = codesOffset + v * packedCodeBytes;
+            float planeSum0 = ESVectorUtil.ipFloatBit(queryTransformedPadded, allCodes, codeStart);
+            float planeSum1 = ESVectorUtil.ipFloatBit(queryTransformedPadded, allCodes, codeStart + planeBytes);
+            float dot = planeSum0 + 2.0f * planeSum1 - 1.5f * sumAllQt;
+            scores[v] = dot * scales[v] + queryDotCentroid + offsets[v];
+        }
     }
 }

@@ -17,6 +17,7 @@ import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader;
 import org.elasticsearch.index.codec.vectors.diskbbq.PostingMetadata;
 import org.elasticsearch.search.vectors.BulkKnnCollector;
+import org.elasticsearch.simdvec.ESVectorUtil;
 
 import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
 
@@ -32,6 +33,7 @@ import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
  * {@code [byte ashClusterId][short scale_f16][short offset_f16][byte[packedCodeBytes] packed_codes]}
  */
 public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
+
     private final float[][] w;
     private final float[][] ashCentroids;
     private final float[] query;
@@ -47,12 +49,24 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private final int[] docIdsScratch = new int[BULK_SIZE];
     private final int[] offsetsScratch = new int[BULK_SIZE];
     private final float[] scores = new float[BULK_SIZE];
-    private final float[] centroidScratch;
+
+    // SIMD scoring support: precomputed values and scratch buffers
+    private final float[] queryTransformedPadded; // zero-padded to planeBytes * 8
+    private final float sumAllQt; // sum of all queryTransformed values
+    private final int planeBytes; // bytes per bit-plane = ceil(nDims/8)
+    // Bulk read buffers for structure-of-arrays layout
+    private final byte[] bulkCodeBuf; // BULK_SIZE * packedCodeBytes
+    private final float[] bulkScales; // decoded scales for one block (Java fallback path)
+    private final float[] bulkOffsets; // decoded offsets for one block (Java fallback path)
+    // Native scorer buffers (raw fp16 — no Java-side decode needed)
+    private final short[] bulkScalesF16; // raw fp16 scales for native path
+    private final short[] bulkOffsetsF16; // raw fp16 offsets for native path
 
     // Per-ASH-cluster precomputed query transforms (lazily populated)
-    private final float[][] queryTransformedByCluster;
+    private final float[] queryTransformed;
     private final float[] queryDotCentroidByCluster;
     private boolean clusterTransformsReady;
+    private float currentQueryDotCentroid;
 
     // Per-posting-list state
     private int vectors;
@@ -61,6 +75,7 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private long slicePos;
     private float centroidDistance;
     private final org.apache.lucene.index.VectorSimilarityFunction similarityFunction;
+    private final float[] currentCentroid;
 
     public AshPostingsVisitor(
         float[][] w,
@@ -84,40 +99,41 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         this.nDims = w[0].length;
         this.bitsPerDim = bitsPerDim;
         this.packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims, bitsPerDim);
-        this.centroidScratch = new float[fieldInfo.getVectorDimension()];
         this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
+        this.currentCentroid = new float[fieldInfo.getVectorDimension()];
 
         // Pre-allocate per-ASH-cluster arrays
         int nAshClusters = ashCentroids != null ? ashCentroids.length : 0;
-        this.queryTransformedByCluster = new float[nAshClusters][nDims];
+        this.queryTransformed = new float[nDims];
         this.queryDotCentroidByCluster = new float[nAshClusters];
         this.clusterTransformsReady = false;
-    }
 
-    /**
-     * Precomputes the transformed query vector for each ASH cluster.
-     * For cluster c: queryTransformed[c] = (query - ashCentroid[c]) @ W
-     * and queryDotCentroid[c] = dot(query, ashCentroid[c]).
-     */
-    private void ensureClusterTransforms() {
-        if (clusterTransformsReady) return;
-        int originalDim = query.length;
-        for (int c = 0; c < ashCentroids.length; c++) {
-            float[] centroid = ashCentroids[c];
-            double dotQC = 0;
-            for (int d = 0; d < originalDim; d++) {
-                dotQC += (double) query[d] * centroid[d];
+        for (int j = 0; j < nDims; j++) {
+            double sum = 0;
+            for (int d = 0; d < query.length; d++) {
+                sum += (double) query[d] * w[d][j];
             }
-            queryDotCentroidByCluster[c] = (float) dotQC;
-            for (int j = 0; j < nDims; j++) {
-                double sum = 0;
-                for (int d = 0; d < originalDim; d++) {
-                    sum += (double) (query[d] - centroid[d]) * w[d][j];
-                }
-                queryTransformedByCluster[c][j] = (float) sum;
-            }
+            queryTransformed[j] = (float) sum;
         }
-        clusterTransformsReady = true;
+
+        // SIMD scoring setup: padded query, precomputed sum, plane scratch buffers
+        this.planeBytes = (nDims + 7) >>> 3;
+        int paddedLen = planeBytes * Byte.SIZE;
+        this.queryTransformedPadded = new float[paddedLen];
+        System.arraycopy(queryTransformed, 0, queryTransformedPadded, 0, nDims);
+        // remaining positions stay 0 (zero-padded for nDims not multiple of 8)
+
+        float sumQt = 0;
+        for (int j = 0; j < nDims; j++) {
+            sumQt += queryTransformed[j];
+        }
+        this.sumAllQt = sumQt;
+
+        this.bulkCodeBuf = new byte[BULK_SIZE * packedCodeBytes];
+        this.bulkScales = new float[BULK_SIZE];
+        this.bulkOffsets = new float[BULK_SIZE];
+        this.bulkScalesF16 = new short[BULK_SIZE];
+        this.bulkOffsetsF16 = new short[BULK_SIZE];
     }
 
     @Override
@@ -125,6 +141,7 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         float score = metadata.documentCentroidScore();
         indexInput.seek(metadata.offset());
         float centroidToParentSqDist = Float.intBitsToFloat(indexInput.readInt());
+        indexInput.readFloats(currentCentroid, 0, currentCentroid.length);
         vectors = indexInput.readVInt();
         docEncoding = indexInput.readByte();
         docBase = 0;
@@ -136,10 +153,8 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
             case MAXIMUM_INNER_PRODUCT -> score - 1;
         };
 
-        // Precompute per-ASH-cluster query transforms (done once per query)
-        if (ashCentroids != null) {
-            ensureClusterTransforms();
-        }
+        // Compute exact queryDotCentroid using SIMD dot product
+        currentQueryDotCentroid = ESVectorUtil.dotProduct(query, currentCentroid);
 
         return vectors;
     }
@@ -148,8 +163,6 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     public int visit(KnnCollector knnCollector) throws java.io.IOException {
         indexInput.seek(slicePos);
         int scoredDocs = 0;
-        int perVectorBytes = Byte.BYTES + Short.BYTES + Short.BYTES + packedCodeBytes;
-        byte[] codeBuf = new byte[packedCodeBytes];
 
         int limit = vectors - BULK_SIZE + 1;
         int i = 0;
@@ -157,23 +170,40 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
             readDocIds(BULK_SIZE);
             int docsToBulkScore = docToBulkScore(BULK_SIZE);
             if (docsToBulkScore == 0) {
-                indexInput.skipBytes((long) perVectorBytes * BULK_SIZE);
+                // Skip the entire block: codes + scales + offsets
+                indexInput.skipBytes((long) BULK_SIZE * packedCodeBytes + (long) BULK_SIZE * Short.BYTES * 2);
                 continue;
             }
-            float maxScore = Float.NEGATIVE_INFINITY;
+            // Read structure-of-arrays: all codes, then all scales, then all offsets
+            indexInput.readBytes(bulkCodeBuf, 0, BULK_SIZE * packedCodeBytes);
             for (int j = 0; j < BULK_SIZE; j++) {
-                if (docIdsScratch[j] != -1) {
-                    int ashClusterId = indexInput.readByte() & 0xFF;
-                    float scale = Float.float16ToFloat(indexInput.readShort());
-                    float offset = Float.float16ToFloat(indexInput.readShort());
-                    indexInput.readBytes(codeBuf, 0, packedCodeBytes);
-                    float s = scoreVector(codeBuf, scale, offset, ashClusterId);
-                    scores[j] = convertScore(s);
-                    if (scores[j] > maxScore) {
-                        maxScore = scores[j];
+                bulkScalesF16[j] = indexInput.readShort();
+            }
+            for (int j = 0; j < BULK_SIZE; j++) {
+                bulkOffsetsF16[j] = indexInput.readShort();
+            }
+
+            float maxScore = Float.NEGATIVE_INFINITY;
+            if (bitsPerDim == 2) {
+                scoreBulk2BitBlock(BULK_SIZE);
+                for (int j = 0; j < BULK_SIZE; j++) {
+                    if (docIdsScratch[j] != -1) {
+                        scores[j] = convertScore(scores[j]);
+                        if (scores[j] > maxScore) {
+                            maxScore = scores[j];
+                        }
                     }
-                } else {
-                    indexInput.skipBytes(perVectorBytes);
+                }
+            } else {
+                decodeBulkScalesOffsets(BULK_SIZE);
+                for (int j = 0; j < BULK_SIZE; j++) {
+                    if (docIdsScratch[j] != -1) {
+                        float s = scoreVector(bulkCodeBuf, j * packedCodeBytes, bulkScales[j], bulkOffsets[j]);
+                        scores[j] = convertScore(s);
+                        if (scores[j] > maxScore) {
+                            maxScore = scores[j];
+                        }
+                    }
                 }
             }
             if (knnCollector.minCompetitiveSimilarity() < maxScore) {
@@ -187,26 +217,45 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
             readDocIds(tailSize);
             int docsToBulkScore = docToBulkScore(tailSize);
             if (docsToBulkScore > 0) {
-                float maxScore = Float.NEGATIVE_INFINITY;
+                // Read tail block in structure-of-arrays format
+                indexInput.readBytes(bulkCodeBuf, 0, tailSize * packedCodeBytes);
                 for (int j = 0; j < tailSize; j++) {
-                    if (docIdsScratch[j] != -1) {
-                        int ashClusterId = indexInput.readByte() & 0xFF;
-                        float scale = Float.float16ToFloat(indexInput.readShort());
-                        float offset = Float.float16ToFloat(indexInput.readShort());
-                        indexInput.readBytes(codeBuf, 0, packedCodeBytes);
-                        float s = scoreVector(codeBuf, scale, offset, ashClusterId);
-                        scores[j] = convertScore(s);
-                        if (scores[j] > maxScore) {
-                            maxScore = scores[j];
+                    bulkScalesF16[j] = indexInput.readShort();
+                }
+                for (int j = 0; j < tailSize; j++) {
+                    bulkOffsetsF16[j] = indexInput.readShort();
+                }
+
+                float maxScore = Float.NEGATIVE_INFINITY;
+                if (bitsPerDim == 2) {
+                    scoreBulk2BitBlock(tailSize);
+                    for (int j = 0; j < tailSize; j++) {
+                        if (docIdsScratch[j] != -1) {
+                            scores[j] = convertScore(scores[j]);
+                            if (scores[j] > maxScore) {
+                                maxScore = scores[j];
+                            }
                         }
-                    } else {
-                        indexInput.skipBytes(perVectorBytes);
+                    }
+                } else {
+                    decodeBulkScalesOffsets(tailSize);
+                    for (int j = 0; j < tailSize; j++) {
+                        if (docIdsScratch[j] != -1) {
+                            float s = scoreVector(bulkCodeBuf, j * packedCodeBytes, bulkScales[j], bulkOffsets[j]);
+                            scores[j] = convertScore(s);
+                            if (scores[j] > maxScore) {
+                                maxScore = scores[j];
+                            }
+                        }
                     }
                 }
                 if (knnCollector.minCompetitiveSimilarity() < maxScore) {
                     collectBulk(knnCollector, tailSize, docsToBulkScore, maxScore);
                 }
                 scoredDocs += docsToBulkScore;
+            } else {
+                // Skip the tail block
+                indexInput.skipBytes((long) tailSize * packedCodeBytes + (long) tailSize * Short.BYTES * 2);
             }
         }
         if (scoredDocs > 0) {
@@ -223,21 +272,63 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         };
     }
 
-    private float scoreVector(byte[] codeBuf, float scale, float offset, int ashClusterId) {
-        float[] queryTransformed = queryTransformedByCluster[ashClusterId];
-        float queryDotCentroid = queryDotCentroidByCluster[ashClusterId];
+    private float scoreVector(byte[] codeBuf, int codeOffset, float scale, float offset) {
         if (bitsPerDim == 1) {
-            return AsymmetricHashingScorer.scoreOneVectorBinary(queryTransformed, queryDotCentroid, codeBuf, nDims, scale, offset);
+            // For 1-bit, extract the plane into a temp buffer (1-bit is not the default path)
+            byte[] planeBuf = new byte[planeBytes];
+            System.arraycopy(codeBuf, codeOffset, planeBuf, 0, planeBytes);
+            return AsymmetricHashingScorer.scoreOneVectorBinary(queryTransformed, currentQueryDotCentroid, planeBuf, nDims, scale, offset);
+        } else if (bitsPerDim == 2) {
+            return AsymmetricHashingScorer.scoreMultiBitSIMD2Planes(
+                queryTransformedPadded,
+                currentQueryDotCentroid,
+                codeBuf,
+                codeOffset,
+                planeBytes,
+                scale,
+                offset,
+                sumAllQt
+            );
         } else {
+            // General multi-bit fallback: extract codes into temp buffer
+            byte[] tempCodes = new byte[packedCodeBytes];
+            System.arraycopy(codeBuf, codeOffset, tempCodes, 0, packedCodeBytes);
             return AsymmetricHashingScorer.scoreOneVectorMultiBit(
                 queryTransformed,
-                queryDotCentroid,
-                codeBuf,
+                currentQueryDotCentroid,
+                tempCodes,
                 nDims,
                 bitsPerDim,
                 scale,
                 offset
             );
+        }
+    }
+
+    /**
+     * Scores a bulk block of 2-bit ASH vectors using native NEON or Panama ipFloatBit.
+     * Reads from bulkCodeBuf and bulkScalesF16/bulkOffsetsF16, writes to scores[].
+     */
+    private void scoreBulk2BitBlock(int count) {
+        ESVectorUtil.ashScoreBulk2Bit(
+            queryTransformedPadded,
+            bulkCodeBuf,
+            bulkScalesF16,
+            bulkOffsetsF16,
+            packedCodeBytes,
+            planeBytes,
+            count,
+            sumAllQt,
+            currentQueryDotCentroid,
+            scores
+        );
+    }
+
+    /** Decodes fp16 scales/offsets to float for the Java scoring path. */
+    private void decodeBulkScalesOffsets(int count) {
+        for (int j = 0; j < count; j++) {
+            bulkScales[j] = Float.float16ToFloat(bulkScalesF16[j]);
+            bulkOffsets[j] = Float.float16ToFloat(bulkOffsetsF16[j]);
         }
     }
 

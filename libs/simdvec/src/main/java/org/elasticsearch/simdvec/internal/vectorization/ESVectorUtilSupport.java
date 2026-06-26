@@ -64,6 +64,13 @@ public interface ESVectorUtilSupport {
 
     float ipFloatBit(float[] q, byte[] d);
 
+    /**
+     * Like {@link #ipFloatBit(float[], byte[])} but reads the bit vector from {@code d} starting at byte offset
+     * {@code dOffset}. Processes {@code q.length} floats against {@code q.length/8} bytes from
+     * {@code d[dOffset..dOffset+q.length/8)}.
+     */
+    float ipFloatBit(float[] q, byte[] d, int dOffset);
+
     float ipFloatByte(float[] q, byte[] d);
 
     float calculateOSQLoss(

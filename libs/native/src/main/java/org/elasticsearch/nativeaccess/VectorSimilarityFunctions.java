@@ -252,4 +252,13 @@ public interface VectorSimilarityFunctions {
     MethodHandle bbqApplyCorrectionsMaxInnerProductBulk();
 
     MethodHandle bbqApplyCorrectionsDotProductBulk();
+
+    /**
+     * Returns a MethodHandle for the native ASH 2-bit fused bulk scorer.
+     * Signature: {@code void(MemorySegment query, MemorySegment allCodes,
+     *   MemorySegment scalesF16, MemorySegment offsetsF16,
+     *   int packedCodeBytes, int planeBytes, int count,
+     *   float sumAllQt, float queryDotCentroid, MemorySegment results)}
+     */
+    MethodHandle ashDotProduct2BitFusedBulk();
 }

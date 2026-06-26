@@ -28,6 +28,25 @@ public sealed interface AshDimQuantizer permits AshBinaryQuantizer, AshSpherical
     QuantizeResult encode(float[][] x);
 
     /**
+     * Result of quantization for a single vector.
+     *
+     * @param centeredCode code centered around zero, length nDims
+     * @param codeNorm L2 norm of the code vector
+     */
+    record SingleQuantizeResult(float[] centeredCode, float codeNorm) {}
+
+    /**
+     * Encodes a single projected vector. Default delegates to batch encode.
+     *
+     * @param xLatent projected vector, length nDims
+     * @return centered code and its norm
+     */
+    default SingleQuantizeResult encodeOne(float[] xLatent) {
+        QuantizeResult qr = encode(new float[][] { xLatent });
+        return new SingleQuantizeResult(qr.centeredCodes()[0], qr.codeNorms()[0]);
+    }
+
+    /**
      * Result of quantization.
      *
      * @param centeredCodes codes centered around zero, shape (n, nDims)

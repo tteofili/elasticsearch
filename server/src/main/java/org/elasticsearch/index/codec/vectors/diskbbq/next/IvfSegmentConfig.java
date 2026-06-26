@@ -48,7 +48,7 @@ public record IvfSegmentConfig(
     /** Default ASH bits per projected dimension. */
     public static final int DEFAULT_ASH_BITS_PER_DIM = 2;
     /** Default ASH training iterations. */
-    public static final int DEFAULT_ASH_TRAINING_ITERATIONS = 20;
+    public static final int DEFAULT_ASH_TRAINING_ITERATIONS = 10;
     /** Default ASH training factor (subsample multiplier for training set). */
     public static final int DEFAULT_ASH_TRAINING_FACTOR = 10;
     /** Default number of ASH centering clusters (independent of IVF cluster count). */
