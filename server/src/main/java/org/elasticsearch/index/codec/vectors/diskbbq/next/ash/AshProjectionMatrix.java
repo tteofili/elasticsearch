@@ -35,6 +35,7 @@ public final class AshProjectionMatrix {
     private final float[][] ashCentroids; // may be null for legacy
     private final int originalDim;
     private final int nDims;
+    private float[][] wT; // lazily computed transposed W (nDims × originalDim) for SIMD dot products
 
     public AshProjectionMatrix(float[][] w) {
         this(w, null);
@@ -49,6 +50,18 @@ public final class AshProjectionMatrix {
 
     public float[][] w() {
         return w;
+    }
+
+    /**
+     * Returns the transposed projection matrix W^T (nDims × originalDim).
+     * Each row of wT is a contiguous float array suitable for SIMD dot products.
+     * Computed lazily on first access.
+     */
+    public float[][] wT() {
+        if (wT == null) {
+            wT = AsymmetricHashingQuantizer.transposeW(w);
+        }
+        return wT;
     }
 
     public float[][] ashCentroids() {

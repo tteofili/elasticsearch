@@ -980,4 +980,100 @@ public class ESVectorUtil {
             scores[v] = dot * Float.float16ToFloat(scalesF16[v]) + queryDotCentroid + Float.float16ToFloat(offsetsF16[v]);
         }
     }
+
+    private static final java.lang.invoke.MethodHandle D2Q4_BULK_HANDLE;
+
+    static {
+        java.lang.invoke.MethodHandle h = null;
+        try {
+            var vsf = org.elasticsearch.nativeaccess.NativeAccess.instance().getVectorSimilarityFunctions();
+            if (vsf.isPresent()) {
+                h = vsf.get()
+                    .getHandle(
+                        org.elasticsearch.nativeaccess.VectorSimilarityFunctions.Function.DOT_PRODUCT,
+                        org.elasticsearch.nativeaccess.VectorSimilarityFunctions.BBQType.D2Q4,
+                        org.elasticsearch.nativeaccess.VectorSimilarityFunctions.Operation.BULK
+                    );
+            }
+        } catch (Throwable t) {
+            // Native D2Q4 not available
+        }
+        D2Q4_BULK_HANDLE = h;
+    }
+
+    /**
+     * Bulk scores 2-bit ASH vectors using D2Q4 integer scoring (4-bit quantized query)
+     * with precomputed docSum for O(1) per-vector correction. Uses the existing native
+     * D2Q4 scorer (AND+popcount) for the core dot product.
+     *
+     * @param queryQuantized4Bit 4-bit quantized query in striped format (4 planes × planeBytes)
+     * @param allCodes packed codes for all vectors (structure-of-arrays, 2 planes per vector)
+     * @param packedCodeBytes bytes per vector (2 * planeBytes)
+     * @param planeBytes bytes per single bit-plane
+     * @param scalesF16 raw fp16 scales per vector
+     * @param offsetsF16 raw fp16 offsets per vector
+     * @param docSums precomputed sum of unsigned code values per vector (stored at index time)
+     * @param count number of vectors to score
+     * @param queryDotCentroid dot(query, centroid) for this posting list
+     * @param invQScale inverse of query quantization scale
+     * @param qOffset query quantization offset
+     * @param constantCorrection precomputed 1.5*(queryUnsignedSum*invQScale + qOffset*nDims)
+     * @param scores output score array (length >= count)
+     */
+    public static void ashScoreBulk2BitD2Q4(
+        byte[] queryQuantized4Bit,
+        byte[] allCodes,
+        int packedCodeBytes,
+        int planeBytes,
+        short[] scalesF16,
+        short[] offsetsF16,
+        short[] docSums,
+        int count,
+        float queryDotCentroid,
+        float invQScale,
+        float qOffset,
+        float constantCorrection,
+        float[] scores
+    ) {
+        // Phase 1: Compute raw integer dot products using native D2Q4 scorer
+        if (D2Q4_BULK_HANDLE != null) {
+            try {
+                java.lang.foreign.MemorySegment docSeg = java.lang.foreign.MemorySegment.ofArray(allCodes);
+                java.lang.foreign.MemorySegment querySeg = java.lang.foreign.MemorySegment.ofArray(queryQuantized4Bit);
+                java.lang.foreign.MemorySegment scoresSeg = java.lang.foreign.MemorySegment.ofArray(scores);
+                D2Q4_BULK_HANDLE.invokeExact(docSeg, querySeg, packedCodeBytes, count, scoresSeg);
+            } catch (Throwable t) {
+                throw new AssertionError(t);
+            }
+        } else {
+            // Java fallback: AND + popcount per byte
+            for (int v = 0; v < count; v++) {
+                int codeStart = v * packedCodeBytes;
+                int lowerScore = 0;
+                int upperScore = 0;
+                for (int p = 0; p < 4; p++) {
+                    int qPlaneOffset = p * planeBytes;
+                    int weight = 1 << p;
+                    int lpc = 0;
+                    int upc = 0;
+                    for (int b = 0; b < planeBytes; b++) {
+                        lpc += Integer.bitCount((queryQuantized4Bit[qPlaneOffset + b] & allCodes[codeStart + b]) & 0xFF);
+                        upc += Integer.bitCount((queryQuantized4Bit[qPlaneOffset + b] & allCodes[codeStart + planeBytes + b]) & 0xFF);
+                    }
+                    lowerScore += weight * lpc;
+                    upperScore += weight * upc;
+                }
+                scores[v] = (float) (lowerScore + 2L * upperScore);
+            }
+        }
+
+        // Phase 2: O(1) correction per vector using stored docSum
+        for (int v = 0; v < count; v++) {
+            float intDot = scores[v];
+            float floatDot = invQScale * intDot + qOffset * docSums[v] - constantCorrection;
+            float scale = Float.float16ToFloat(scalesF16[v]);
+            float offset = Float.float16ToFloat(offsetsF16[v]);
+            scores[v] = floatDot * scale + queryDotCentroid + offset;
+        }
+    }
 }

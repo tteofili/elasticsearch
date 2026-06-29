@@ -769,6 +769,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             }
             return new AshPostingsVisitor(
                 ashMatrix.w(),
+                ashMatrix.wT(),
                 ashMatrix.ashCentroids(),
                 target,
                 parentsSlice,
@@ -776,7 +777,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 fieldInfo,
                 indexInput,
                 needsScoring,
-                entry.ashBitsPerDim()
+                entry.ashBitsPerDim(),
+                Boolean.getBoolean("es.ash.d2q4_scoring")
             );
         }
 

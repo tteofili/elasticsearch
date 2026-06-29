@@ -192,8 +192,9 @@ public class AshPostingsListWriter {
             offsets.add(offset);
             // Header: parent-centroid distance, centroid floats, size
             postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroid, centroidClusters.getCentroid(c))));
-            for (float f : centroid)
+            for (float f : centroid) {
                 postingsOutput.writeInt(Float.floatToIntBits(f));
+            }
             int size = cluster.length;
             postingsOutput.writeVInt(size);
 
@@ -211,7 +212,7 @@ public class AshPostingsListWriter {
             postingsOutput.writeByte(encoding);
 
             // Write vectors in bulk blocks using structure-of-arrays layout:
-            // [docIds][all packed_codes][all scales][all offsets]
+            // [docIds][all packed_codes][all scales][all offsets][all docSums]
             int written = 0;
             while (written < size) {
                 int blockSize = Math.min(BULK_SIZE, size - written);
@@ -222,6 +223,7 @@ public class AshPostingsListWriter {
                 byte[][] packedCodes = new byte[blockSize][];
                 short[] blockScales = new short[blockSize];
                 short[] blockOffsets = new short[blockSize];
+                short[] blockDocSums = new short[blockSize];
                 for (int j = 0; j < blockSize; j++) {
                     int vectorOrd = cluster[clusterOrds[written + j]];
                     long e0 = System.nanoTime();
@@ -237,6 +239,15 @@ public class AshPostingsListWriter {
                         : AsymmetricHashingScorer.packMultiBitCodes(enc.xEnc(), bitsPerDim);
                     blockScales[j] = Float.floatToFloat16(enc.scale());
                     blockOffsets[j] = Float.floatToFloat16(enc.offset());
+                    // Compute docSum: sum of unsigned 2-bit code values from the packed bit-planes
+                    int docSum = 0;
+                    int pb = packedCodes[j].length / bitsPerDim; // planeBytes
+                    for (int b = 0; b < pb; b++) {
+                        for (int p = 0; p < bitsPerDim; p++) {
+                            docSum += (1 << p) * Integer.bitCount(packedCodes[j][p * pb + b] & 0xFF);
+                        }
+                    }
+                    blockDocSums[j] = (short) docSum;
                 }
                 // Write all packed codes contiguously
                 for (int j = 0; j < blockSize; j++) {
@@ -249,6 +260,10 @@ public class AshPostingsListWriter {
                 // Write all offsets
                 for (int j = 0; j < blockSize; j++) {
                     postingsOutput.writeShort(blockOffsets[j]);
+                }
+                // Write all docSums (sum of unsigned code values, for D2Q4 correction)
+                for (int j = 0; j < blockSize; j++) {
+                    postingsOutput.writeShort(blockDocSums[j]);
                 }
                 written += blockSize;
             }
