@@ -1003,77 +1003,95 @@ public class ESVectorUtil {
 
     /**
      * Bulk scores 2-bit ASH vectors using D2Q4 integer scoring (4-bit quantized query)
-     * with precomputed docSum for O(1) per-vector correction. Uses the existing native
-     * D2Q4 scorer (AND+popcount) for the core dot product.
+     * with zero-copy memory-mapped access via {@code IndexInputUtils.withSlice}.
+     * The IndexInput must be positioned at the start of the block data (codes section).
+     * After this call, the IndexInput is advanced past the full block (codes + scales + offsets + docSums).
      *
+     * @param in IndexInput positioned at start of codes for this block
+     * @param blockSize number of vectors in this block
      * @param queryQuantized4Bit 4-bit quantized query in striped format (4 planes × planeBytes)
-     * @param allCodes packed codes for all vectors (structure-of-arrays, 2 planes per vector)
      * @param packedCodeBytes bytes per vector (2 * planeBytes)
      * @param planeBytes bytes per single bit-plane
-     * @param scalesF16 raw fp16 scales per vector
-     * @param offsetsF16 raw fp16 offsets per vector
-     * @param docSums precomputed sum of unsigned code values per vector (stored at index time)
-     * @param count number of vectors to score
      * @param queryDotCentroid dot(query, centroid) for this posting list
      * @param invQScale inverse of query quantization scale
      * @param qOffset query quantization offset
      * @param constantCorrection precomputed 1.5*(queryUnsignedSum*invQScale + qOffset*nDims)
-     * @param scores output score array (length >= count)
+     * @param scores output score array (length >= blockSize)
      */
     public static void ashScoreBulk2BitD2Q4(
+        org.apache.lucene.store.IndexInput in,
+        int blockSize,
         byte[] queryQuantized4Bit,
-        byte[] allCodes,
         int packedCodeBytes,
         int planeBytes,
-        short[] scalesF16,
-        short[] offsetsF16,
-        short[] docSums,
-        int count,
         float queryDotCentroid,
         float invQScale,
         float qOffset,
         float constantCorrection,
         float[] scores
-    ) {
-        // Phase 1: Compute raw integer dot products using native D2Q4 scorer
-        if (D2Q4_BULK_HANDLE != null) {
-            try {
-                java.lang.foreign.MemorySegment docSeg = java.lang.foreign.MemorySegment.ofArray(allCodes);
-                java.lang.foreign.MemorySegment querySeg = java.lang.foreign.MemorySegment.ofArray(queryQuantized4Bit);
-                java.lang.foreign.MemorySegment scoresSeg = java.lang.foreign.MemorySegment.ofArray(scores);
-                D2Q4_BULK_HANDLE.invokeExact(docSeg, querySeg, packedCodeBytes, count, scoresSeg);
-            } catch (Throwable t) {
-                throw new AssertionError(t);
-            }
-        } else {
-            // Java fallback: AND + popcount per byte
-            for (int v = 0; v < count; v++) {
-                int codeStart = v * packedCodeBytes;
-                int lowerScore = 0;
-                int upperScore = 0;
-                for (int p = 0; p < 4; p++) {
-                    int qPlaneOffset = p * planeBytes;
-                    int weight = 1 << p;
-                    int lpc = 0;
-                    int upc = 0;
-                    for (int b = 0; b < planeBytes; b++) {
-                        lpc += Integer.bitCount((queryQuantized4Bit[qPlaneOffset + b] & allCodes[codeStart + b]) & 0xFF);
-                        upc += Integer.bitCount((queryQuantized4Bit[qPlaneOffset + b] & allCodes[codeStart + planeBytes + b]) & 0xFF);
-                    }
-                    lowerScore += weight * lpc;
-                    upperScore += weight * upc;
-                }
-                scores[v] = (float) (lowerScore + 2L * upperScore);
-            }
-        }
+    ) throws java.io.IOException {
+        long blockBytes = (long) blockSize * packedCodeBytes + (long) blockSize * Short.BYTES * 3;
+        org.elasticsearch.simdvec.internal.IndexInputUtils.withSlice(in, blockBytes, ESVectorUtil::getD2Q4Scratch, seg -> {
+            // Phase 1: Native D2Q4 bulk scoring — zero copy from mmap when available
+            java.lang.foreign.MemorySegment codesSeg = seg.asSlice(0, (long) blockSize * packedCodeBytes);
+            java.lang.foreign.MemorySegment querySeg = java.lang.foreign.MemorySegment.ofArray(queryQuantized4Bit);
+            java.lang.foreign.MemorySegment scoresSeg = java.lang.foreign.MemorySegment.ofArray(scores);
 
-        // Phase 2: O(1) correction per vector using stored docSum
-        for (int v = 0; v < count; v++) {
-            float intDot = scores[v];
-            float floatDot = invQScale * intDot + qOffset * docSums[v] - constantCorrection;
-            float scale = Float.float16ToFloat(scalesF16[v]);
-            float offset = Float.float16ToFloat(offsetsF16[v]);
-            scores[v] = floatDot * scale + queryDotCentroid + offset;
+            if (D2Q4_BULK_HANDLE != null) {
+                try {
+                    D2Q4_BULK_HANDLE.invokeExact(codesSeg, querySeg, packedCodeBytes, blockSize, scoresSeg);
+                } catch (Throwable t) {
+                    throw new AssertionError(t);
+                }
+            } else {
+                // Java fallback: AND + popcount per byte reading from MemorySegment
+                for (int v = 0; v < blockSize; v++) {
+                    long codeStart = (long) v * packedCodeBytes;
+                    int lowerScore = 0;
+                    int upperScore = 0;
+                    for (int p = 0; p < 4; p++) {
+                        int qPlaneOffset = p * planeBytes;
+                        int weight = 1 << p;
+                        int lpc = 0;
+                        int upc = 0;
+                        for (int b = 0; b < planeBytes; b++) {
+                            byte qByte = queryQuantized4Bit[qPlaneOffset + b];
+                            byte dLow = seg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, codeStart + b);
+                            byte dHigh = seg.get(java.lang.foreign.ValueLayout.JAVA_BYTE, codeStart + planeBytes + b);
+                            lpc += Integer.bitCount((qByte & dLow) & 0xFF);
+                            upc += Integer.bitCount((qByte & dHigh) & 0xFF);
+                        }
+                        lowerScore += weight * lpc;
+                        upperScore += weight * upc;
+                    }
+                    scores[v] = (float) (lowerScore + 2L * upperScore);
+                }
+            }
+
+            // Phase 2: O(1) correction per vector reading scales/offsets/docSums from segment
+            long scalesOff = (long) blockSize * packedCodeBytes;
+            long offsetsOff = scalesOff + (long) blockSize * Short.BYTES;
+            long docSumsOff = offsetsOff + (long) blockSize * Short.BYTES;
+            for (int v = 0; v < blockSize; v++) {
+                float intDot = scores[v];
+                short docSum = seg.get(java.lang.foreign.ValueLayout.JAVA_SHORT_UNALIGNED, docSumsOff + (long) v * Short.BYTES);
+                short scaleF16 = seg.get(java.lang.foreign.ValueLayout.JAVA_SHORT_UNALIGNED, scalesOff + (long) v * Short.BYTES);
+                short offsetF16 = seg.get(java.lang.foreign.ValueLayout.JAVA_SHORT_UNALIGNED, offsetsOff + (long) v * Short.BYTES);
+                float floatDot = invQScale * intDot + qOffset * docSum - constantCorrection;
+                scores[v] = floatDot * Float.float16ToFloat(scaleF16) + queryDotCentroid + Float.float16ToFloat(offsetF16);
+            }
+            return null;
+        });
+    }
+
+    private static final ThreadLocal<byte[]> D2Q4_SCRATCH = new ThreadLocal<>();
+
+    private static byte[] getD2Q4Scratch(int size) {
+        byte[] s = D2Q4_SCRATCH.get();
+        if (s == null || s.length < size) {
+            s = new byte[size];
+            D2Q4_SCRATCH.set(s);
         }
+        return s;
     }
 }

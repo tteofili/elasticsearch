@@ -83,7 +83,6 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private long slicePos;
     private float centroidDistance;
     private final org.apache.lucene.index.VectorSimilarityFunction similarityFunction;
-    private final float[] currentCentroid;
 
     public AshPostingsVisitor(
         float[][] w,
@@ -110,7 +109,6 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         this.bitsPerDim = bitsPerDim;
         this.packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims, bitsPerDim);
         this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
-        this.currentCentroid = new float[fieldInfo.getVectorDimension()];
 
         // Pre-allocate per-ASH-cluster arrays
         int nAshClusters = ashCentroids != null ? ashCentroids.length : 0;
@@ -184,7 +182,8 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         float score = metadata.documentCentroidScore();
         indexInput.seek(metadata.offset());
         float centroidToParentSqDist = Float.intBitsToFloat(indexInput.readInt());
-        indexInput.readFloats(currentCentroid, 0, currentCentroid.length);
+        // Skip centroid floats — use approximate queryDotCentroid from quantized centroid scoring
+        indexInput.skipBytes((long) fieldInfo.getVectorDimension() * Float.BYTES);
         vectors = indexInput.readVInt();
         docEncoding = indexInput.readByte();
         docBase = 0;
@@ -196,12 +195,9 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
             case MAXIMUM_INNER_PRODUCT -> score - 1;
         };
 
-        // Use precomputed queryDotCentroid from PostingMetadata if available, otherwise compute
-        if (Float.isNaN(metadata.queryDotCentroid()) == false) {
-            currentQueryDotCentroid = metadata.queryDotCentroid();
-        } else {
-            currentQueryDotCentroid = ESVectorUtil.dotProduct(query, currentCentroid);
-        }
+        // Use approximate centroid dot product derived from quantized centroid scoring.
+        // This avoids reading 3KB of centroid floats + O(D) dot product per posting list.
+        currentQueryDotCentroid = centroidDistance;
 
         return vectors;
     }
@@ -221,20 +217,10 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
                 indexInput.skipBytes((long) BULK_SIZE * packedCodeBytes + (long) BULK_SIZE * Short.BYTES * 3);
                 continue;
             }
-            // Read structure-of-arrays: all codes, then all scales, then all offsets
-            indexInput.readBytes(bulkCodeBuf, 0, BULK_SIZE * packedCodeBytes);
-            for (int j = 0; j < BULK_SIZE; j++) {
-                bulkScalesF16[j] = indexInput.readShort();
-            }
-            for (int j = 0; j < BULK_SIZE; j++) {
-                bulkOffsetsF16[j] = indexInput.readShort();
-            }
-            for (int j = 0; j < BULK_SIZE; j++) {
-                bulkDocSums[j] = indexInput.readShort();
-            }
 
             float maxScore = Float.NEGATIVE_INFINITY;
-            if (bitsPerDim == 2) {
+            if (bitsPerDim == 2 && useD2Q4Scoring) {
+                // D2Q4 path: withSlice reads codes+scales+offsets+docSums directly from IndexInput
                 scoreBulk2BitBlock(BULK_SIZE);
                 for (int j = 0; j < BULK_SIZE; j++) {
                     if (docIdsScratch[j] != -1) {
@@ -245,13 +231,37 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
                     }
                 }
             } else {
-                decodeBulkScalesOffsets(BULK_SIZE);
+                // Float path / non-2-bit: read into arrays first
+                indexInput.readBytes(bulkCodeBuf, 0, BULK_SIZE * packedCodeBytes);
                 for (int j = 0; j < BULK_SIZE; j++) {
-                    if (docIdsScratch[j] != -1) {
-                        float s = scoreVector(bulkCodeBuf, j * packedCodeBytes, bulkScales[j], bulkOffsets[j]);
-                        scores[j] = convertScore(s);
-                        if (scores[j] > maxScore) {
-                            maxScore = scores[j];
+                    bulkScalesF16[j] = indexInput.readShort();
+                }
+                for (int j = 0; j < BULK_SIZE; j++) {
+                    bulkOffsetsF16[j] = indexInput.readShort();
+                }
+                for (int j = 0; j < BULK_SIZE; j++) {
+                    bulkDocSums[j] = indexInput.readShort();
+                }
+
+                if (bitsPerDim == 2) {
+                    scoreBulk2BitBlock(BULK_SIZE);
+                    for (int j = 0; j < BULK_SIZE; j++) {
+                        if (docIdsScratch[j] != -1) {
+                            scores[j] = convertScore(scores[j]);
+                            if (scores[j] > maxScore) {
+                                maxScore = scores[j];
+                            }
+                        }
+                    }
+                } else {
+                    decodeBulkScalesOffsets(BULK_SIZE);
+                    for (int j = 0; j < BULK_SIZE; j++) {
+                        if (docIdsScratch[j] != -1) {
+                            float s = scoreVector(bulkCodeBuf, j * packedCodeBytes, bulkScales[j], bulkOffsets[j]);
+                            scores[j] = convertScore(s);
+                            if (scores[j] > maxScore) {
+                                maxScore = scores[j];
+                            }
                         }
                     }
                 }
@@ -267,20 +277,9 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
             readDocIds(tailSize);
             int docsToBulkScore = docToBulkScore(tailSize);
             if (docsToBulkScore > 0) {
-                // Read tail block in structure-of-arrays format
-                indexInput.readBytes(bulkCodeBuf, 0, tailSize * packedCodeBytes);
-                for (int j = 0; j < tailSize; j++) {
-                    bulkScalesF16[j] = indexInput.readShort();
-                }
-                for (int j = 0; j < tailSize; j++) {
-                    bulkOffsetsF16[j] = indexInput.readShort();
-                }
-                for (int j = 0; j < tailSize; j++) {
-                    bulkDocSums[j] = indexInput.readShort();
-                }
-
                 float maxScore = Float.NEGATIVE_INFINITY;
-                if (bitsPerDim == 2) {
+                if (bitsPerDim == 2 && useD2Q4Scoring) {
+                    // D2Q4 path: withSlice reads directly from IndexInput
                     scoreBulk2BitBlock(tailSize);
                     for (int j = 0; j < tailSize; j++) {
                         if (docIdsScratch[j] != -1) {
@@ -291,13 +290,37 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
                         }
                     }
                 } else {
-                    decodeBulkScalesOffsets(tailSize);
+                    // Float path / non-2-bit: read into arrays first
+                    indexInput.readBytes(bulkCodeBuf, 0, tailSize * packedCodeBytes);
                     for (int j = 0; j < tailSize; j++) {
-                        if (docIdsScratch[j] != -1) {
-                            float s = scoreVector(bulkCodeBuf, j * packedCodeBytes, bulkScales[j], bulkOffsets[j]);
-                            scores[j] = convertScore(s);
-                            if (scores[j] > maxScore) {
-                                maxScore = scores[j];
+                        bulkScalesF16[j] = indexInput.readShort();
+                    }
+                    for (int j = 0; j < tailSize; j++) {
+                        bulkOffsetsF16[j] = indexInput.readShort();
+                    }
+                    for (int j = 0; j < tailSize; j++) {
+                        bulkDocSums[j] = indexInput.readShort();
+                    }
+
+                    if (bitsPerDim == 2) {
+                        scoreBulk2BitBlock(tailSize);
+                        for (int j = 0; j < tailSize; j++) {
+                            if (docIdsScratch[j] != -1) {
+                                scores[j] = convertScore(scores[j]);
+                                if (scores[j] > maxScore) {
+                                    maxScore = scores[j];
+                                }
+                            }
+                        }
+                    } else {
+                        decodeBulkScalesOffsets(tailSize);
+                        for (int j = 0; j < tailSize; j++) {
+                            if (docIdsScratch[j] != -1) {
+                                float s = scoreVector(bulkCodeBuf, j * packedCodeBytes, bulkScales[j], bulkOffsets[j]);
+                                scores[j] = convertScore(s);
+                                if (scores[j] > maxScore) {
+                                    maxScore = scores[j];
+                                }
                             }
                         }
                     }
@@ -363,17 +386,14 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
      * - D2Q4 integer path (AND+popcount with 4-bit quantized query, O(1) correction via stored docSum)
      * - Float path (native NEON or Panama ipFloatBit)
      */
-    private void scoreBulk2BitBlock(int count) {
+    private void scoreBulk2BitBlock(int count) throws java.io.IOException {
         if (useD2Q4Scoring) {
             ESVectorUtil.ashScoreBulk2BitD2Q4(
+                indexInput,
+                count,
                 queryQuantized4Bit,
-                bulkCodeBuf,
                 packedCodeBytes,
                 planeBytes,
-                bulkScalesF16,
-                bulkOffsetsF16,
-                bulkDocSums,
-                count,
                 currentQueryDotCentroid,
                 invQScale,
                 qOffset,
