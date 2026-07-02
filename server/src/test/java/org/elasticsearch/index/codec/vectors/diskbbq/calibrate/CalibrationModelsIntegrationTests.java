@@ -152,35 +152,11 @@ public class CalibrationModelsIntegrationTests extends ESTestCase {
     }
 
     private static double[] estimateManifold(CalibrationFixture fixture, VectorSimilarityFunction similarityFunction) throws IOException {
-        return ManifoldModel.estimateManifoldParameters(
-            similarityFunction,
-            fixture.dim(),
-            fixture.fvv(),
-            fixture.queryOrdinals(),
-            fixture.dim(),
-            false,
-            false,
-            fixture.fvv(),
-            fixture.corpusOrdinals(),
-            CALIBRATION_K
-        );
+        return ManifoldModel.estimateManifoldParameters(toSource(fixture, similarityFunction));
     }
 
     private static ErrorScalingFit estimateErrorScalingFit(CalibrationFixture fixture, VectorSimilarityFunction similarityFunction) {
-        return ErrorModel.estimateErrorScalingFit(
-            similarityFunction,
-            fixture.dim(),
-            fixture.fvv(),
-            fixture.queryOrdinals(),
-            fixture.dim(),
-            false,
-            false,
-            null,
-            fixture.fvv(),
-            fixture.corpusOrdinals(),
-            CALIBRATION_K,
-            VECTORS_PER_CLUSTER
-        );
+        return ErrorModel.estimateErrorScalingFit(toSource(fixture, similarityFunction), VECTORS_PER_CLUSTER);
     }
 
     private static QuantizationErrorStdModel estimateErrorMagnitude(
@@ -192,6 +168,16 @@ public class CalibrationModelsIntegrationTests extends ESTestCase {
     ) {
         return ErrorModel.estimateMagnitudeModel(
             scalingFit,
+            toSource(fixture, similarityFunction),
+            false,
+            qbits,
+            dbits,
+            VECTORS_PER_CLUSTER
+        );
+    }
+
+    private static CalibrationSource toSource(CalibrationFixture fixture, VectorSimilarityFunction similarityFunction) {
+        return new CalibrationSource(
             similarityFunction,
             fixture.dim(),
             fixture.fvv(),
@@ -200,13 +186,8 @@ public class CalibrationModelsIntegrationTests extends ESTestCase {
             false,
             false,
             null,
-            false,
-            fixture.fvv(),
             fixture.corpusOrdinals(),
-            CALIBRATION_K,
-            qbits,
-            dbits,
-            VECTORS_PER_CLUSTER
+            CALIBRATION_K
         );
     }
 

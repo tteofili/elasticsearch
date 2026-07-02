@@ -56,6 +56,44 @@ public abstract class AbstractHierarchicalKMeansTestCase<V> extends ESTestCase {
         assertEquals(cold.assignments().length, warm.assignments().length);
     }
 
+    /**
+     * Verifies that passing warm-start centroids to {@link HierarchicalKMeans#cluster} does not
+     * mutate the caller's arrays. Lloyd passes update centroids in place, so
+     * {@code HierarchicalKMeans#initialCentroidsForClustering} must deep-copy the warm-start
+     * contents rather than copying references.
+     */
+    public void testWarmStartCentroidsAreNotMutated() throws IOException {
+        float[][] rows = {
+            { 1f, 0f, 0f, 0f },
+            { 0.9f, 0.1f, 0f, 0f },
+            { 0.8f, 0.2f, 0f, 0f },
+            { 0.7f, 0.3f, 0f, 0f },
+            { 0.6f, 0.4f, 0f, 0f },
+            { 0.5f, 0.5f, 0f, 0f },
+            { 0.4f, 0.6f, 0f, 0f },
+            { 0.3f, 0.7f, 0f, 0f },
+            { 0.2f, 0.8f, 0f, 0f },
+            { 0.1f, 0.9f, 0f, 0f },
+            { 0f, 1f, 0f, 0f },
+            { -0.1f, 0.9f, 0f, 0f } };
+        KMeansFloatVectorValues vectors = KMeansFloatVectorValues.build(List.of(rows), null, 4);
+        HierarchicalKMeans<float[]> kmeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, 4);
+        KMeansWithOverspill<float[]> first = kmeans.cluster(vectors, 4);
+        float[][] warmStart = first.centroids();
+
+        // snapshot contents before the warm-start call
+        float[][] snapshot = new float[warmStart.length][4];
+        for (int i = 0; i < warmStart.length; i++) {
+            System.arraycopy(warmStart[i], 0, snapshot[i], 0, 4);
+        }
+
+        kmeans.cluster(vectors, 4, warmStart);
+
+        for (int i = 0; i < warmStart.length; i++) {
+            assertArrayEquals("warmStart[" + i + "] was mutated by cluster()", snapshot[i], warmStart[i], 0f);
+        }
+    }
+
     public void testGrowingWarmStartMatchesColdStartClusterCount() throws IOException {
         int dim = 4;
         int targetSize = 128;

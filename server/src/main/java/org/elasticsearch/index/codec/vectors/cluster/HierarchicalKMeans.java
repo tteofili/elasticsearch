@@ -148,8 +148,9 @@ public class HierarchicalKMeans<V> {
     /**
      * Like {@link #cluster(ClusteringVectorValues, int)} but seeds the top-level Lloyd pass with
      * {@code warmStartCentroids}. When the warm-start length equals the computed cluster count, all
-     * centroids are copied. When it is smaller, remaining centroids are picked from {@code vectors};
-     * when it is larger, only the first {@code k} centroids are used.
+     * centroid <em>contents</em> are deep-copied into fresh arrays. When it is smaller, remaining
+     * centroids are picked from {@code vectors}; when it is larger, only the first {@code k}
+     * centroids are used. The caller's {@code warmStartCentroids} arrays are never mutated.
      */
     public KMeansWithOverspill<V> cluster(ClusteringVectorValues<V> vectors, int targetSize, V[] warmStartCentroids) throws IOException {
         if (vectors.size() == 0) {
@@ -253,12 +254,16 @@ public class HierarchicalKMeans<V> {
         }
         V[] centroids = ops.newCentroidArray(k, vectors.dimension());
         if (warmStartCentroids.length >= k) {
-            ops.arrayCopy(warmStartCentroids, 0, centroids, 0, k);
+            // deep copy: Lloyd passes mutate centroid arrays in place; the caller must retain
+            // ownership of warmStartCentroids for subsequent iterations
+            ops.arrayCopyDeep(warmStartCentroids, 0, centroids, 0, k);
             return centroids;
         }
         int warm = warmStartCentroids.length;
-        ops.arrayCopy(warmStartCentroids, 0, centroids, 0, warm);
+        // same ownership reason as above for the warm-start prefix
+        ops.arrayCopyDeep(warmStartCentroids, 0, centroids, 0, warm);
         V[] additional = KMeansLocal.pickInitialCentroids(vectors, k - warm, ops);
+        // additional inner arrays are freshly allocated by pickInitialCentroids, safe to copy by reference
         ops.arrayCopy(additional, 0, centroids, warm, k - warm);
         return centroids;
     }

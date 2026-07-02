@@ -9,7 +9,6 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.calibrate;
 
-import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.util.IntroSorter;
 import org.elasticsearch.core.WelfordVariance;
@@ -18,20 +17,19 @@ import org.elasticsearch.index.codec.vectors.cluster.CentroidOps;
 import org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansWithOverspill;
-import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
 import org.elasticsearch.simdvec.ESVectorUtil;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.Locale;
+
+import static org.elasticsearch.core.Strings.format;
 
 /**
  * Error model for error in scalar quantization.
  * Estimates the standard deviation of the error in distance/similarity after quantizing
  * queries and documents. Used by calibration to predict recall.
- * <p>
  * Fitting is two-stage: {@link #estimateErrorScalingFit} sweeps sample sizes at fixed
  * 4q/1d encoding to fit the slope of {@code log(error_std)} vs {@code log(L/N)}; then
  * {@link #estimateMagnitudeModel} sweeps at a target (qbits, dbits) pair and fits magnitude
@@ -58,50 +56,27 @@ public final class ErrorModel {
     }
 
     /**
-     * Exact similarity between two vectors, consistent with the metric convention
-     * where higher values indicate greater similarity.
-     */
-    static double simExact(VectorSimilarityFunction sim, float[] y, float[] x) {
-        if (sim == VectorSimilarityFunction.EUCLIDEAN) {
-            return 2.0 * ESVectorUtil.dotProduct(y, x) - ESVectorUtil.dotProduct(x, x);
-        }
-        return ESVectorUtil.dotProduct(y, x);
-    }
-
-    private static void packQuantizedAsBytes(int[] quantized, byte[] destination, int dim) {
-        for (int d = 0; d < dim; d++) {
-            destination[d] = (byte) quantized[d];
-        }
-    }
-
-    /**
      * Quantized representation error standard deviation. Quantizes doc residuals and
      * query residuals using OSQ, estimates dot products, and compares to exact
      * similarities for the top-5k ranked documents per query.
      */
     static QuantizedQueryErrorResult quantizedRepErrorStd(
-        VectorSimilarityFunction sim,
-        int dim,
-        FloatVectorValues querySource,
-        int[] queryOrdinals,
-        int baseDim,
-        boolean cosine,
-        boolean neyshabur,
-        Preconditioner preconditioner,
+        CalibrationSource source,
         boolean usePreconditioned,
-        FloatVectorValues fvv,
-        int[] corpusOrdinals,
         int nDocs,
         int[] docAssignments,
         float[][] docCentroids,
         int nQueryClusters,
         int qbits,
         int dbits,
-        int k,
         HierarchicalKMeans<float[]> kmeans,
         float[][] warmStartQueryCentroids,
         QuantizedErrorScratch scratch
     ) throws IOException {
+        VectorSimilarityFunction sim = source.similarityFunction();
+        int dim = source.dim();
+        boolean cosine = source.cosine();
+
         int nDocClusters = docCentroids.length;
         if (nDocClusters == 0 || nDocs == 0) {
             return new QuantizedQueryErrorResult(1.0, docCentroids.length > 0 ? new float[][] { docCentroids[0].clone() } : new float[0][]);
@@ -140,14 +115,14 @@ public final class ErrorModel {
         double[] docDotDoc = scratch.docDotDoc;
 
         for (int i = 0; i < nDocs; i++) {
-            float[] doc = fvv.vectorValue(corpusOrdinals[i]);
+            float[] doc = source.vectors().vectorValue(source.corpusOrdinals()[i]);
             if (cosine) {
                 doc = CalibrationUtils.copyAndNormalize(doc, normScratch);
             }
             int qc = docCentroidAssignments[docAssignments[i]];
             corpusDotCentroid[i] = ESVectorUtil.dotProduct(queryCentroids[qc], doc);
             var qr = quantizer.scalarQuantize(doc, residualScratch, quantizeScratch, (byte) dbits, docCentroids[docAssignments[i]]);
-            packQuantizedAsBytes(quantizeScratch, docQuantized[i], dim);
+            ESVectorUtil.packAsBytes(quantizeScratch, docQuantized[i], dim);
             docLower[i] = qr.lowerInterval();
             docUpper[i] = qr.upperInterval();
             docL1[i] = qr.quantizedComponentSum();
@@ -172,22 +147,22 @@ public final class ErrorModel {
         double[] simOsq = scratch.simOsq;
         int[] order = scratch.order;
 
-        for (int queryOrdinal : queryOrdinals) {
+        for (int queryOrdinal : source.queryOrdinals()) {
             CalibrationUtils.materializeCalibrationQuery(
-                querySource,
+                source.vectors(),
                 queryOrdinal,
-                baseDim,
+                source.baseDim(),
                 dim,
                 cosine,
-                neyshabur,
-                preconditioner,
+                source.neyshabur(),
+                source.preconditioner(),
                 usePreconditioned,
                 queryScratch,
                 preconditionScratch
             );
             for (int qc = 0; qc < actualQueryClusters; qc++) {
                 var qr = quantizer.scalarQuantize(queryScratch, residualScratch, quantizeScratch, (byte) qbits, queryCentroids[qc]);
-                packQuantizedAsBytes(quantizeScratch, queryQuantized[qc], dim);
+                ESVectorUtil.packAsBytes(quantizeScratch, queryQuantized[qc], dim);
                 queryLower[qc] = qr.lowerInterval();
                 queryUpper[qc] = qr.upperInterval();
                 queryL1[qc] = qr.quantizedComponentSum();
@@ -212,21 +187,26 @@ public final class ErrorModel {
                 dotEst += corpusDotCentroid[i] + queryDotCentroid[dc] - centroidDotCentroid[dc];
 
                 if (sim == VectorSimilarityFunction.EUCLIDEAN) {
-                    dotEst = 2.0 * dotEst - docDotDoc[i];
+                    dotEst = 2.0 * dotEst;
+                    if (docDotDoc != null) {
+                        dotEst -= docDotDoc[i];
+                    }
                 }
                 simOsq[i] = dotEst;
             }
 
             sortIndicesByKeysDescending(simOsq, order, nDocs);
 
-            int topN = Math.min(5 * k, nDocs);
+            int topN = Math.min(5 * source.k(), nDocs);
             for (int i = 0; i < topN; i++) {
                 int docIdx = order[i];
-                float[] doc = fvv.vectorValue(corpusOrdinals[docIdx]);
+                float[] doc = source.vectors().vectorValue(source.corpusOrdinals()[docIdx]);
                 if (cosine) {
                     doc = CalibrationUtils.copyAndNormalize(doc, normScratch);
                 }
-                double exact = simExact(sim, queryScratch, doc);
+                double exact = sim == VectorSimilarityFunction.EUCLIDEAN
+                    ? 2.0 * ESVectorUtil.dotProduct(queryScratch, doc) - docDotDoc[docIdx]
+                    : ESVectorUtil.dotProduct(queryScratch, doc);
                 moments.add(exact - simOsq[docIdx]);
             }
         }
@@ -240,157 +220,78 @@ public final class ErrorModel {
      * Clusters the corpus prefix and measures quantized representation error standard deviation.
      */
     static QuantizedErrorComputeResult quantizedRepErrorStdWithCentroids(
-        VectorSimilarityFunction sim,
-        int dim,
-        FloatVectorValues querySource,
-        int[] queryOrdinals,
-        int baseDim,
-        boolean cosine,
-        boolean neyshabur,
-        Preconditioner preconditioner,
+        CalibrationSource source,
         boolean usePreconditioned,
-        FloatVectorValues fvv,
-        int[] corpusOrdinals,
         int nDocs,
         int nDocsPerCluster,
         int qbits,
         int dbits,
-        int k,
         HierarchicalKMeans<float[]> kmeans,
         float[][] warmStartDocCentroids,
         float[][] warmStartQueryCentroids,
         QuantizedErrorScratch scratch
     ) throws IOException {
-        KMeansFloatVectorValues corpusVectors = KMeansFloatVectorValues.wrap(fvv, corpusOrdinals, nDocs);
+        KMeansFloatVectorValues corpusVectors = KMeansFloatVectorValues.wrap(source.vectors(), source.corpusOrdinals(), nDocs);
         KMeansWithOverspill<float[]> docClusters = kmeans.cluster(corpusVectors, nDocsPerCluster, warmStartDocCentroids);
 
-        float[][] centroids = docClusters.centroids();
+        float[][] docCentroids = docClusters.centroids();
         int[] flatAssignments = docClusters.assignments();
-        if (centroids.length == 0) {
-            return new QuantizedErrorComputeResult(1.0, centroids, warmStartQueryCentroids);
+        if (docCentroids.length == 0) {
+            return new QuantizedErrorComputeResult(1.0, docCentroids, warmStartQueryCentroids);
         }
 
         QuantizedQueryErrorResult queryError = quantizedRepErrorStd(
-            sim,
-            dim,
-            querySource,
-            queryOrdinals,
-            baseDim,
-            cosine,
-            neyshabur,
-            preconditioner,
+            source,
             usePreconditioned,
-            fvv,
-            corpusOrdinals,
             nDocs,
             flatAssignments,
-            centroids,
+            docCentroids,
             ErrorModel.N_QUERY_CLUSTERS,
             qbits,
             dbits,
-            k,
             kmeans,
             warmStartQueryCentroids,
             scratch
         );
 
-        return new QuantizedErrorComputeResult(queryError.std(), centroids, queryError.queryCentroids());
+        return new QuantizedErrorComputeResult(queryError.std(), docCentroids, queryError.queryCentroids());
     }
 
     record QuantizedErrorComputeResult(double std, float[][] docCentroids, float[][] queryCentroids) {}
 
-    /**
-     * Estimate the scaling of quantization error by sweeping sample sizes at fixed
-     * {@code nDocsPerCluster}, fitting {@code log(error_std) ~ beta0 + beta1 * (log(L) - log(N))}.
-     * Always uses 4 query bits and 1 document bit.
-     */
-    public static QuantizationErrorStdModel estimateQuantizationErrorStdModel(
-        VectorSimilarityFunction similarityFunction,
-        int dim,
-        FloatVectorValues querySource,
-        int[] queryOrdinals,
-        int baseDim,
-        boolean cosine,
-        boolean neyshabur,
-        Preconditioner preconditioner,
-        FloatVectorValues fvv,
-        int[] corpusOrdinals,
-        int k,
-        int nDocsPerCluster
-    ) {
-        return estimateErrorScalingFit(
-            similarityFunction,
-            dim,
-            querySource,
-            queryOrdinals,
-            baseDim,
-            cosine,
-            neyshabur,
-            preconditioner,
-            fvv,
-            corpusOrdinals,
-            k,
-            nDocsPerCluster
-        ).scalingModel();
-    }
-
-    public static ErrorScalingFit estimateErrorScalingFit(
-        VectorSimilarityFunction similarityFunction,
-        int dim,
-        FloatVectorValues querySource,
-        int[] queryOrdinals,
-        int baseDim,
-        boolean cosine,
-        boolean neyshabur,
-        Preconditioner preconditioner,
-        FloatVectorValues fvv,
-        int[] corpusOrdinals,
-        int k,
-        int nDocsPerCluster
-    ) {
+    public static ErrorScalingFit estimateErrorScalingFit(CalibrationSource source, int nDocsPerCluster) {
         logger.debug("Fitting error scaling model");
         long scalingStartNanos = System.nanoTime();
 
         double logNDocsPerCluster = Math.log(nDocsPerCluster);
         Regression.OLSAccumulator state = new Regression.OLSAccumulator();
-        HierarchicalKMeans<float[]> kmeans = calibrationKMeans(dim);
+        HierarchicalKMeans<float[]> kmeans = calibrationKMeans(source.dim());
         float[][] warmStartDocCentroids = null;
         float[][] warmStartQueryCentroids = null;
-        int corpusLength = 0;
+        int corpusLength;
 
-        int maxNDocs = Math.min(SAMPLE_SIZES_SCALING[SAMPLE_SIZES_SCALING.length - 1], corpusOrdinals.length);
+        int maxNDocs = Math.min(SAMPLE_SIZES_SCALING[SAMPLE_SIZES_SCALING.length - 1], source.corpusOrdinals().length);
         QuantizedErrorScratch scratch = new QuantizedErrorScratch(
             maxNDocs,
-            dim,
-            cosine,
-            similarityFunction == VectorSimilarityFunction.EUCLIDEAN,
-            preconditioner != null
+            source.dim(),
+            source.cosine(),
+            source.similarityFunction() == VectorSimilarityFunction.EUCLIDEAN,
+            source.preconditioner() != null
         );
-
         for (int i = 0; i < SAMPLE_SIZES_SCALING.length; i++) {
             int sampleSize = SAMPLE_SIZES_SCALING[i];
-            if (sampleSize > corpusOrdinals.length) {
+            if (sampleSize > source.corpusOrdinals().length) {
                 break;
             }
             corpusLength = sampleSize;
             try {
                 QuantizedErrorComputeResult computed = quantizedRepErrorStdWithCentroids(
-                    similarityFunction,
-                    dim,
-                    querySource,
-                    queryOrdinals,
-                    baseDim,
-                    cosine,
-                    neyshabur,
-                    preconditioner,
+                    source,
                     true,
-                    fvv,
-                    corpusOrdinals,
                     corpusLength,
                     nDocsPerCluster,
                     SCALING_QBITS,
                     SCALING_DBITS,
-                    k,
                     kmeans,
                     warmStartDocCentroids,
                     warmStartQueryCentroids,
@@ -420,34 +321,29 @@ public final class ErrorModel {
 
         double scalingSeconds = (System.nanoTime() - scalingStartNanos) / 1_000_000_000.0;
         logger.debug(
-            "Fit error scaling model in {}s\nquantization error ∝ (L/N)^{} (R² = {})",
-            String.format(Locale.ROOT, "%.5f", scalingSeconds),
-            String.format(Locale.ROOT, "%.4f", params.beta1()),
-            String.format(Locale.ROOT, "%.4f", state.r2(params))
+            () -> format(
+                "Fit error scaling model in %.5fs\nquantization error ∝ (L/N)^%.4f (R² = %.4f)",
+                scalingSeconds,
+                params.beta1(),
+                state.r2(params)
+            )
         );
 
         return new ErrorScalingFit(new QuantizationErrorStdModel(params), warmStartDocCentroids, warmStartQueryCentroids);
     }
 
     /**
-     * Estimate the magnitude of quantization error for a specific (qbits, dbits) pair.
+     * Estimate the magnitude of quantization error for a specific (qbits, dbits) quantization.
      * Sweeps sample sizes at fixed {@code nDocsPerCluster} and fits a plug-in regression
      * that reuses the slope from {@link ErrorScalingFit#scalingModel()}.
+     *
+     * @param qbits query-side quantization bit width
+     * @param dbits document-side quantization bit width
      */
     public static QuantizationErrorStdModel estimateMagnitudeModel(
         ErrorScalingFit scalingFit,
-        VectorSimilarityFunction similarityFunction,
-        int dim,
-        FloatVectorValues querySource,
-        int[] queryOrdinals,
-        int baseDim,
-        boolean cosine,
-        boolean neyshabur,
-        Preconditioner preconditioner,
+        CalibrationSource source,
         boolean usePreconditionedQueries,
-        FloatVectorValues fvv,
-        int[] corpusOrdinals,
-        int k,
         int qbits,
         int dbits,
         int nDocsPerCluster
@@ -457,41 +353,31 @@ public final class ErrorModel {
 
         double logNDocsPerCluster = Math.log(nDocsPerCluster);
         Regression.OLSAccumulator state = new Regression.OLSAccumulator();
-        HierarchicalKMeans<float[]> kmeans = calibrationKMeans(dim);
+        HierarchicalKMeans<float[]> kmeans = calibrationKMeans(source.dim());
         float[][] docWarmStart = scalingFit.lastDocCentroids;
         float[][] queryWarmStart = scalingFit.lastQueryCentroids;
 
-        int maxNDocs = Math.min(SAMPLE_SIZES_MAGNITUDE[SAMPLE_SIZES_MAGNITUDE.length - 1], corpusOrdinals.length);
+        int maxNDocs = Math.min(SAMPLE_SIZES_MAGNITUDE[SAMPLE_SIZES_MAGNITUDE.length - 1], source.corpusOrdinals().length);
         QuantizedErrorScratch scratch = new QuantizedErrorScratch(
             maxNDocs,
-            dim,
-            cosine,
-            similarityFunction == VectorSimilarityFunction.EUCLIDEAN,
-            preconditioner != null
+            source.dim(),
+            source.cosine(),
+            source.similarityFunction() == VectorSimilarityFunction.EUCLIDEAN,
+            source.preconditioner() != null
         );
 
         for (int sampleSize : SAMPLE_SIZES_MAGNITUDE) {
-            if (sampleSize > corpusOrdinals.length) {
+            if (sampleSize > source.corpusOrdinals().length) {
                 break;
             }
             try {
                 QuantizedErrorComputeResult computed = quantizedRepErrorStdWithCentroids(
-                    similarityFunction,
-                    dim,
-                    querySource,
-                    queryOrdinals,
-                    baseDim,
-                    cosine,
-                    neyshabur,
-                    preconditioner,
+                    source,
                     usePreconditionedQueries,
-                    fvv,
-                    corpusOrdinals,
                     sampleSize,
                     nDocsPerCluster,
                     qbits,
                     dbits,
-                    k,
                     kmeans,
                     docWarmStart,
                     queryWarmStart,
@@ -501,7 +387,7 @@ public final class ErrorModel {
                 queryWarmStart = computed.queryCentroids();
                 double x = logNDocsPerCluster - Math.log(sampleSize);
                 double y = Math.log(Math.max(computed.std(), 1e-38));
-                state.update(new double[]{x}, new double[]{y});
+                state.update(new double[] { x }, new double[] { y });
             } catch (IOException e) {
                 logger.warn("failed to compute quantization error std for magnitude sample size [{}]", sampleSize, e);
             }
@@ -514,11 +400,13 @@ public final class ErrorModel {
 
         double magnitudeSeconds = (System.nanoTime() - magnitudeStartNanos) / 1_000_000_000.0;
         logger.debug(
-            "Fit error magnitude model in {}s\nquantization error {} (L/N)^{} (R² = {})",
-            String.format(Locale.ROOT, "%.2f", magnitudeSeconds),
-            String.format(Locale.ROOT, "%.4f", Math.exp(params.beta0())),
-            String.format(Locale.ROOT, "%.4f", params.beta1()),
-            String.format(Locale.ROOT, "%.4f", state.r2(params))
+            () -> format(
+                "Fit error magnitude model in %.2fs\nquantization error %.4f (L/N)^%.4f (R² = %.4f)",
+                magnitudeSeconds,
+                Math.exp(params.beta0()),
+                params.beta1(),
+                state.r2(params)
+            )
         );
 
         return new QuantizationErrorStdModel(params);
