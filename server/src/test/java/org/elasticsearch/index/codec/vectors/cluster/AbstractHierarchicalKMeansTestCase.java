@@ -152,7 +152,6 @@ public abstract class AbstractHierarchicalKMeansTestCase<V> extends ESTestCase {
     /** Wraps an array of centroids into a ClusteringVectorValues view for testing. */
     protected abstract ClusteringVectorValues<V> wrapAsView(V[] centroids, int dim);
 
-
     public void testHKmeans() throws IOException {
         int nClusters = random().nextInt(1, 10);
         int nVectors = random().nextInt(nClusters, nClusters * 200);
