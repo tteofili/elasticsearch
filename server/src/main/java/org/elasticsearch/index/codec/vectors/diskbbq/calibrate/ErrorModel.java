@@ -200,9 +200,13 @@ public final class ErrorModel {
                 if (cosine) {
                     doc = CalibrationUtils.copyAndNormalize(doc, normScratch);
                 }
-                double exact = sim == VectorSimilarityFunction.EUCLIDEAN
-                    ? 2.0 * ESVectorUtil.dotProduct(queryScratch, doc) - docDotDoc[docIdx]
-                    : ESVectorUtil.dotProduct(queryScratch, doc);
+                double exact;
+                if (sim == VectorSimilarityFunction.EUCLIDEAN) {
+                    assert docDotDoc != null;
+                    exact = 2.0 * ESVectorUtil.dotProduct(queryScratch, doc) - docDotDoc[docIdx];
+                } else {
+                    exact = ESVectorUtil.dotProduct(queryScratch, doc);
+                }
                 moments.add(exact - simOsq[docIdx]);
             }
         }

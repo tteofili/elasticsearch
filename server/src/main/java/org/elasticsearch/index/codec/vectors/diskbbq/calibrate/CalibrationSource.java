@@ -27,10 +27,6 @@ import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
  * for KMeans, scratch allocation, and quantization: equal to {@code baseDim} normally, or
  * {@code baseDim + 1} when {@code neyshabur} is {@code true} (Neyshabur lift appends a zero
  * component to each query before preconditioner application).
- *
- * <p>{@code preconditioner} is honoured by {@link ErrorModel} (applied to query vectors when
- * {@code usePreconditioned=true}) but intentionally ignored by {@link ManifoldModel}, which
- * always works with raw query vectors.
  */
 public record CalibrationSource(
     VectorSimilarityFunction similarityFunction,
