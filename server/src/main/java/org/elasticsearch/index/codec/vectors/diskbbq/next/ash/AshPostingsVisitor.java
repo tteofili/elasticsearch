@@ -182,8 +182,6 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         float score = metadata.documentCentroidScore();
         indexInput.seek(metadata.offset());
         float centroidToParentSqDist = Float.intBitsToFloat(indexInput.readInt());
-        // Skip centroid floats — use approximate queryDotCentroid from quantized centroid scoring
-        indexInput.skipBytes((long) fieldInfo.getVectorDimension() * Float.BYTES);
         vectors = indexInput.readVInt();
         docEncoding = indexInput.readByte();
         docBase = 0;

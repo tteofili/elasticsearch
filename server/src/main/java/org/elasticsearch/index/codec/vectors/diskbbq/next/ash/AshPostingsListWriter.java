@@ -190,11 +190,8 @@ public class AshPostingsListWriter {
             int[] cluster = assignmentsByCluster[c];
             long offset = postingsOutput.alignFilePointer(Float.BYTES) - fileOffset;
             offsets.add(offset);
-            // Header: parent-centroid distance, centroid floats, size
+            // Header: parent-centroid distance, size
             postingsOutput.writeInt(Float.floatToIntBits(ESVectorUtil.squareDistance(centroid, centroidClusters.getCentroid(c))));
-            for (float f : centroid) {
-                postingsOutput.writeInt(Float.floatToIntBits(f));
-            }
             int size = cluster.length;
             postingsOutput.writeVInt(size);
 
