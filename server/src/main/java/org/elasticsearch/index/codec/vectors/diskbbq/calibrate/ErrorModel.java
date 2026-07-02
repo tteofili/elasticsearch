@@ -51,10 +51,6 @@ public final class ErrorModel {
 
     private ErrorModel() {}
 
-    private static HierarchicalKMeans<float[]> calibrationKMeans(int dim) {
-        return HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, dim);
-    }
-
     /**
      * Quantized representation error standard deviation. Quantizes doc residuals and
      * query residuals using OSQ, estimates dot products, and compares to exact
@@ -265,7 +261,7 @@ public final class ErrorModel {
 
         double logNDocsPerCluster = Math.log(nDocsPerCluster);
         Regression.OLSAccumulator state = new Regression.OLSAccumulator();
-        HierarchicalKMeans<float[]> kmeans = calibrationKMeans(source.dim());
+        HierarchicalKMeans<float[]> kmeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, source.dim());
         float[][] warmStartDocCentroids = null;
         float[][] warmStartQueryCentroids = null;
         int corpusLength;
@@ -353,7 +349,7 @@ public final class ErrorModel {
 
         double logNDocsPerCluster = Math.log(nDocsPerCluster);
         Regression.OLSAccumulator state = new Regression.OLSAccumulator();
-        HierarchicalKMeans<float[]> kmeans = calibrationKMeans(source.dim());
+        HierarchicalKMeans<float[]> kmeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, source.dim());
         float[][] docWarmStart = scalingFit.lastDocCentroids;
         float[][] queryWarmStart = scalingFit.lastQueryCentroids;
 
