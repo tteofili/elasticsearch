@@ -61,6 +61,9 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
     implements
         VectorPreconditioner {
 
+    // Cache ASH projection matrices per field (read once from disk, reused across queries)
+    private final java.util.HashMap<Integer, AshProjectionMatrix> ashMatrixCache = new java.util.HashMap<>();
+
     public ESNextDiskBBQVectorsReader(SegmentReadState state, GenericFlatVectorReaders.LoadFlatVectorsReader getFormatReader)
         throws IOException {
         super(
@@ -338,6 +341,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
      * Reads the ASH projection matrix for the given field. Returns null if not an ASH field.
      */
     public AshProjectionMatrix getAshProjectionMatrix(FieldInfo fieldInfo) throws IOException {
+        AshProjectionMatrix cached = ashMatrixCache.get(fieldInfo.number);
+        if (cached != null) {
+            return cached;
+        }
         final NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
         if (fieldEntry == null || fieldEntry.quantEncoding().isAsymmetricHashing() == false) {
             return null;
@@ -347,7 +354,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         if (preconditionerLength > 0) {
             IndexInput slice = ivfCentroids.slice("ash-projection", preconditionerOffset, preconditionerLength);
             slice.seek(0);
-            return AshProjectionMatrix.read(slice);
+            AshProjectionMatrix matrix = AshProjectionMatrix.read(slice);
+            matrix.wT(); // eagerly compute transpose so it's ready for all queries
+            ashMatrixCache.put(fieldInfo.number, matrix);
+            return matrix;
         }
         return null;
     }
