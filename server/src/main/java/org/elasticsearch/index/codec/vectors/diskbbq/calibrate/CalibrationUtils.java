@@ -205,36 +205,6 @@ public final class CalibrationUtils {
         return new SampledData(queryOrdinals, corpusOrdinals);
     }
 
-    /**
-     * Builds a reader-backed {@link FloatVectorValues} view over all input segments being merged.
-     * Vector data is not copied to the heap; callers sample via {@link #sampleData(FloatVectorValues)}.
-     */
-    public static FloatVectorValues build(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
-        Objects.requireNonNull(fieldInfo, "fieldInfo");
-        Objects.requireNonNull(mergeState, "mergeState");
-        List<FloatVectorValues> parts = loadSegmentVectorValues(fieldInfo, mergeState);
-        if (parts.isEmpty()) {
-            return KMeansFloatVectorValues.build(List.of(), null, fieldInfo.getVectorDimension());
-        }
-        if (parts.size() == 1) {
-            return parts.getFirst();
-        }
-        return new ConcatenatedFloatVectorValues(parts.toArray(FloatVectorValues[]::new));
-    }
-
-    private static List<FloatVectorValues> loadSegmentVectorValues(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
-        List<FloatVectorValues> segments = new ArrayList<>();
-        if (mergeState.knnVectorsReaders == null) {
-            return segments;
-        }
-        for (int i = 0; i < mergeState.knnVectorsReaders.length; i++) {
-            FloatVectorValues segmentVectors = segmentFloatVectorValues(fieldInfo, mergeState, i);
-            if (segmentVectors != null && segmentVectors.size() > 0) {
-                segments.add(segmentVectors);
-            }
-        }
-        return segments;
-    }
 
     private static FloatVectorValues segmentFloatVectorValues(FieldInfo fieldInfo, MergeState mergeState, int segmentIndex)
         throws IOException {
@@ -280,7 +250,7 @@ public final class CalibrationUtils {
 
     /**
      * Samples up to {@code totalSample} vectors from the merge inputs using stride-based direct
-     * ordinal access — one segment at a time, no full scan.
+     * ordinal access, one segment at a time.
      *
      * <p>Each segment contributes a quota proportional to its size
      * ({@code segQuota = segSize × totalSample / totalVectors}). Within the segment, vectors
@@ -325,133 +295,4 @@ public final class CalibrationUtils {
         return KMeansFloatVectorValues.build(result, null, dim);
     }
 
-    /**
-     * Concatenation of multiple {@link FloatVectorValues} into a single logical view for calibration
-     * sampling during merge. Vectors are addressed by a global ordinal; lookups dispatch to the
-     * underlying segment reader via a prefix-sum offset table without copying vector data to the heap.
-     *
-     * <p>{@link #vectorValue(int)} forwards to the owning part, which may return a reused scratch
-     * buffer; callers that need to retain a vector across subsequent calls must copy it. Doc IDs
-     * exposed by {@link #iterator()} remain segment-local, not merged-global.
-     */
-    private static final class ConcatenatedFloatVectorValues extends FloatVectorValues {
-
-        private final FloatVectorValues[] parts;
-        private final int[] offsets;
-        private final int totalSize;
-        private final int dims;
-
-        ConcatenatedFloatVectorValues(FloatVectorValues[] parts) {
-            if (parts.length == 0) {
-                throw new IllegalArgumentException("parts must not be empty");
-            }
-            this.parts = parts;
-            // offsets[i] = global ordinal of the first vector in parts[i].
-            // The sentinel at offsets[parts.length] is never read because partFor()
-            // searches lo..hi with hi = parts.length-1.
-            this.offsets = new int[parts.length];
-            this.dims = parts[0].dimension();
-            int running = 0;
-            for (int i = 0; i < parts.length; i++) {
-                if (parts[i].dimension() != dims) {
-                    throw new IllegalArgumentException("all parts must share dimension");
-                }
-                offsets[i] = running;
-                running += parts[i].size();
-            }
-            this.totalSize = running;
-        }
-
-        private int partFor(int ord) {
-            int lo = 0;
-            int hi = parts.length - 1;
-            while (lo < hi) {
-                int mid = (lo + hi + 1) >>> 1;
-                if (offsets[mid] <= ord) {
-                    lo = mid;
-                } else {
-                    hi = mid - 1;
-                }
-            }
-            return lo;
-        }
-
-        @Override
-        public float[] vectorValue(int ord) throws IOException {
-            int p = partFor(ord);
-            return parts[p].vectorValue(ord - offsets[p]);
-        }
-
-        @Override
-        public int dimension() {
-            return dims;
-        }
-
-        @Override
-        public int size() {
-            return totalSize;
-        }
-
-        @Override
-        public DocIndexIterator iterator() {
-            return new ConcatenatedDocIndexIterator(Arrays.stream(parts).map(FloatVectorValues::iterator).toArray(DocIndexIterator[]::new));
-        }
-
-        @Override
-        public ConcatenatedFloatVectorValues copy() throws IOException {
-            FloatVectorValues[] copies = new FloatVectorValues[parts.length];
-            for (int i = 0; i < parts.length; i++) {
-                copies[i] = parts[i].copy();
-            }
-            return new ConcatenatedFloatVectorValues(copies);
-        }
-
-        private static final class ConcatenatedDocIndexIterator extends DocIndexIterator {
-            private final DocIndexIterator[] partIterators;
-            private int partIndex;
-            private int globalOrd = -1;
-
-            private ConcatenatedDocIndexIterator(DocIndexIterator[] partIterators) {
-                this.partIterators = partIterators;
-                this.partIndex = 0;
-            }
-
-            @Override
-            public int docID() {
-                return partIterators[partIndex].docID();
-            }
-
-            @Override
-            public int nextDoc() throws IOException {
-                while (partIndex < partIterators.length) {
-                    int doc = partIterators[partIndex].nextDoc();
-                    if (doc != DocIdSetIterator.NO_MORE_DOCS) {
-                        globalOrd++;
-                        return doc;
-                    }
-                    partIndex++;
-                }
-                return DocIdSetIterator.NO_MORE_DOCS;
-            }
-
-            @Override
-            public int advance(int target) {
-                throw new UnsupportedOperationException();
-            }
-
-            @Override
-            public long cost() {
-                long cost = 0;
-                for (DocIndexIterator it : partIterators) {
-                    cost += it.cost();
-                }
-                return cost;
-            }
-
-            @Override
-            public int index() {
-                return globalOrd;
-            }
-        }
-    }
 }
