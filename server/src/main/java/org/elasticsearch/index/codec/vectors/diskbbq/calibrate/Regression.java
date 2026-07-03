@@ -105,6 +105,16 @@ public final class Regression {
             this.sumY2 = sumY2;
         }
 
+        /** Add a single (x, y) observation without array allocation. */
+        public void update(double x, double y) {
+            weight += 1;
+            sumX += x;
+            sumY += y;
+            sumX2 += x * x;
+            sumXY += x * y;
+            sumY2 += y * y;
+        }
+
         public void update(double[] x, double[] y) {
             update(x, y, 1.0);
         }

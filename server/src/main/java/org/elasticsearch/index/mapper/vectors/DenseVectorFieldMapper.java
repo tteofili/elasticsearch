@@ -1974,10 +1974,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
 
                 boolean doPrecondition = XContentMapValues.nodeBooleanValue(indexOptionsMap.remove("precondition"), false);
 
-                boolean autoCalibrate = false;
-                if (experimentalFeaturesEnabled) {
-                    autoCalibrate = XContentMapValues.nodeBooleanValue(indexOptionsMap.remove("auto_calibrate"), false);
-                }
+                boolean autoCalibrate = XContentMapValues.nodeBooleanValue(indexOptionsMap.remove("auto_calibrate"), false);
 
                 MappingParser.checkNoRemainingFields(fieldName, indexOptionsMap);
                 return new BBQIVFIndexOptions(
@@ -2719,7 +2716,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                     VectorIndexType.BBQ_DISK.name
                 );
             }
-            if (indexVersionCreated.onOrAfter(DISK_BBQ_QUANTIZE_BITS) && experimentalFeaturesEnabled) {
+            if (indexVersionCreated.onOrAfter(IndexVersions.DISK_BBQ_AUTO_CALIBRATE)) {
                 if (autoCalibrate) {
                     return new ESNextDiskBBQVectorsFormat(
                         ESNextDiskBBQVectorsFormat.QuantEncoding.fromBits((byte) bits),
@@ -2845,6 +2842,10 @@ public class DenseVectorFieldMapper extends FieldMapper {
 
         public boolean doPrecondition() {
             return doPrecondition;
+        }
+
+        public boolean autoCalibrate() {
+            return autoCalibrate;
         }
 
         public int getBits() {
@@ -3460,7 +3461,12 @@ public class DenseVectorFieldMapper extends FieldMapper {
         @Nullable
         private static BytesRef[] extractSliceRouting(@Nullable String sliceRouting, boolean sliceEnabled) {
             if (sliceRouting == null) {
-                return sliceEnabled ? new BytesRef[0] : null;
+                if (sliceEnabled) {
+                    throw new IllegalArgumentException(
+                        "[" + SliceIndexing.PARAM_NAME + "] is required for KNN queries when [index.slice.enabled] is true"
+                    );
+                }
+                return null;
             }
             String[] sliceValues = Strings.splitStringByCommaToArray(sliceRouting.trim());
             if (sliceValues.length == 0) {

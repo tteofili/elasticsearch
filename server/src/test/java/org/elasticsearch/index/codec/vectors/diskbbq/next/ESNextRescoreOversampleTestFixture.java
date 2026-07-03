@@ -59,6 +59,26 @@ public final class ESNextRescoreOversampleTestFixture {
 
     public static final String FIELD_NAME = "f";
 
+    /** Encodings swept by {@link org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibration}. */
+    public static final Set<ESNextDiskBBQVectorsFormat.QuantEncoding> CALIBRATION_CANDIDATE_ENCODINGS = Set.of(
+        ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_1BIT_QUERY,
+        ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+        ESNextDiskBBQVectorsFormat.QuantEncoding.TWO_BIT_4BIT_QUERY,
+        ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC,
+        ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC
+    );
+
+    /** Rescore oversample values from {@link org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibration} rerank depths. */
+    public static final Set<Float> CALIBRATION_RERANK_OVERSAMPLES = Set.of(1.25f, 1.5f, 1.75f, 2.0f, 2.25f, 2.5f);
+
+    /**
+     * Merge resolver matching {@link org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper} when
+     * {@code auto_calibrate} is enabled.
+     */
+    public static IvfMergeConfigResolver productionMergeResolver(int vectorsPerCluster) {
+        return IvfAutoCalibration.mergeConfigResolver(vectorsPerCluster);
+    }
+
     private ESNextRescoreOversampleTestFixture() {}
 
     /** Shared codec helpers for IVF writer + merge replay. */
@@ -228,7 +248,7 @@ public final class ESNextRescoreOversampleTestFixture {
 
     /**
      * Two flushed segments with disagreeing calibration metadata, merged by a background tiered merge
-     * (not force-merge), so {@link IvfAutoCalibration} falls back to codec default when metadata reuse fails.
+     * (not force-merge), so {@link IvfAutoCalibration} re-calibrates when metadata reuse fails.
      */
     public static DirectoryReader buildBackgroundMergedWithDisagreeingFlushCalibration(
         Directory dir,
@@ -236,6 +256,22 @@ public final class ESNextRescoreOversampleTestFixture {
         int vectorDimensions,
         int vectorsPerSegment,
         int vectorsPerCluster
+    ) throws IOException {
+        return buildBackgroundMergedWithDisagreeingFlushCalibration(
+            dir,
+            rnd,
+            vectorDimensions,
+            vectorsPerSegment,
+            new IvfAutoCalibration(vectorsPerCluster)
+        );
+    }
+
+    public static DirectoryReader buildBackgroundMergedWithDisagreeingFlushCalibration(
+        Directory dir,
+        Random rnd,
+        int vectorDimensions,
+        int vectorsPerSegment,
+        IvfAutoCalibration calibration
     ) throws IOException {
         AtomicInteger flushSequence = new AtomicInteger(0);
         IvfFlushConfigSource flushConfig = (state, fieldInfo) -> {
@@ -262,7 +298,7 @@ public final class ESNextRescoreOversampleTestFixture {
                 )
             );
         };
-        Codec codec = createDiskBbqCodec(flushConfig, IvfAutoCalibration.mergeConfigResolver(vectorsPerCluster));
+        Codec codec = createDiskBbqCodec(flushConfig, calibration::resolve);
         IndexWriterConfig iwcNoMerge = new IndexWriterConfig(new StandardAnalyzer()).setCodec(codec).setMergePolicy(NoMergePolicy.INSTANCE);
         writeTwoCommits(vectorsPerSegment, vectorDimensions, dir, iwcNoMerge);
 
