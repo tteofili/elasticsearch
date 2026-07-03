@@ -108,7 +108,7 @@ public final class CalibrationUtils {
      * Maximum squared L2 norm over the sampled corpus vectors (same statistic as reference
      * {@code neyshaburSrebroTransform} over the calibration corpus subset).
      */
-    public static double maxSquaredNormOverCorpusSample(FloatVectorValues vectorValues, int[] corpusOrdinals, int dim) throws IOException {
+    public static double maxSquaredNormOverCorpusSample(FloatVectorValues vectorValues, int[] corpusOrdinals) throws IOException {
         double maxNormSq = 0;
         for (int ord : corpusOrdinals) {
             float[] v = vectorValues.vectorValue(ord);
@@ -267,16 +267,6 @@ public final class CalibrationUtils {
             }
         }
         return total;
-    }
-
-    /**
-     * Stride-samples up to {@code MAX_QUERY_SAMPLE + MAX_CORPUS_SAMPLE} vectors from the merge
-     * inputs. Counts total vectors via {@link #countMergedVectors} then delegates to
-     * {@link #buildSampled(FieldInfo, MergeState, int, int)}.
-     */
-    public static KMeansFloatVectorValues buildSampled(FieldInfo fieldInfo, MergeState mergeState) throws IOException {
-        int totalVectors = countMergedVectors(fieldInfo, mergeState);
-        return buildSampled(fieldInfo, mergeState, totalVectors, MAX_QUERY_SAMPLE + MAX_CORPUS_SAMPLE);
     }
 
     /**

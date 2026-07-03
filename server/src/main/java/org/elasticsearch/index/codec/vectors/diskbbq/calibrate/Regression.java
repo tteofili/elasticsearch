@@ -96,15 +96,6 @@ public final class Regression {
 
         public OLSAccumulator() {}
 
-        OLSAccumulator(double weight, double sumX, double sumY, double sumX2, double sumXY, double sumY2) {
-            this.weight = weight;
-            this.sumX = sumX;
-            this.sumY = sumY;
-            this.sumX2 = sumX2;
-            this.sumXY = sumXY;
-            this.sumY2 = sumY2;
-        }
-
         /** Add a single (x, y) observation without array allocation. */
         public void update(double x, double y) {
             weight += 1;

@@ -44,9 +44,6 @@ public final class ErrorModel {
 
     static final int[] SAMPLE_SIZES_SCALING = { 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360 };
 
-    /** Minimum corpus size required to run the scaling regression. */
-    public static final int MIN_SCALING_CORPUS_SIZE = SAMPLE_SIZES_SCALING[0];
-
     static final int[] SAMPLE_SIZES_MAGNITUDE = { 2048, 3072, 4096 };
 
     /** Scaling fit always uses (qbits=4, dbits=1), matching {@code ONE_BIT_4BIT_QUERY}. */

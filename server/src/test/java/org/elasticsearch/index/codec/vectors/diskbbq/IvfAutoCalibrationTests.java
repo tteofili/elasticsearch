@@ -88,6 +88,13 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             MergeState background = mergeState(bgDir, new KnnVectorsReader[0], new Bits[0], backgroundSegmentInfo(bgDir));
             assertFalse(IvfAutoCalibration.isBoundedForceMerge(background));
         }
+
+        try (Directory numDir = newDirectory()) {
+            SegmentInfo nonIntInfo = backgroundSegmentInfo(numDir);
+            nonIntInfo.addDiagnostics(Map.of("mergeMaxNumSegments", "notAnInt"));
+            MergeState nonInt = mergeState(numDir, new KnnVectorsReader[0], new Bits[0], nonIntInfo);
+            assertFalse(IvfAutoCalibration.isBoundedForceMerge(nonInt));
+        }
     }
 
     public void testSelectFromMergeStateReusesWeightedOversample() throws IOException {
@@ -200,6 +207,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         IvfSegmentConfig config = selector.calibrate(vectors, VectorSimilarityFunction.EUCLIDEAN);
 
         assertThat(config.quantEncoding(), notNullValue());
+        assertTrue(CALIBRATION_CANDIDATE_ENCODINGS.contains(config.quantEncoding()));
         assertTrue(Float.isFinite(config.rescoreOversample()));
         assertTrue(config.rescoreOversample() > 0f);
     }
@@ -323,7 +331,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
                 FloatVectorValues floatVectorValues,
                 VectorSimilarityFunction similarityFunction,
                 int realNumVectors,
-                boolean allowPrecondition
+                IvfAutoCalibration.CalibrationMode mode
             ) {
                 return new IvfSegmentConfig(
                     ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
@@ -493,6 +501,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         IvfSegmentConfig config = selector.calibrate(vectors, similarityFunction);
 
         assertThat(config.quantEncoding(), notNullValue());
+        assertTrue(CALIBRATION_CANDIDATE_ENCODINGS.contains(config.quantEncoding()));
         assertTrue(Float.isFinite(config.rescoreOversample()));
         assertTrue(config.rescoreOversample() > 0f);
     }
@@ -627,10 +636,10 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             FloatVectorValues floatVectorValues,
             VectorSimilarityFunction similarityFunction,
             int realNumVectors,
-            boolean allowPrecondition
+            IvfAutoCalibration.CalibrationMode mode
         ) throws IOException {
             calibrateInvocations++;
-            return super.calibrate(floatVectorValues, similarityFunction, realNumVectors, allowPrecondition);
+            return super.calibrate(floatVectorValues, similarityFunction, realNumVectors, mode);
         }
     }
 
