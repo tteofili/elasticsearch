@@ -602,6 +602,9 @@ $$$dense-vector-index-options$$$
 
 `on_disk_rescore` {applies_to}`stack: preview 9.3` {applies_to}`serverless: unavailable`
 :   (Optional, boolean) Only applicable to quantized HNSW and `bbq_disk` index types. When `true`, vector rescoring will read the raw vector data directly from disk, and will not copy it in memory. This can improve performance when vector data is larger than the amount of available RAM. This setting only applies to newly-indexed vectors; after changing this setting, the vectors must be reindexed or force-merged to apply the new setting to the whole index. Defaults to `false`.
+
+`auto_calibrate` {applies_to}`stack: ga 9.5`
+:   (Optional, boolean) Only applicable to `bbq_disk`. When `true`, {{es}} automatically selects the optimal quantization encoding, oversampling factor, and preconditioning for each merged segment based on the actual recall characteristics of the merged corpus. Segments containing fewer than 10,000 vectors after merging are not calibrated and use a default oversampling factor of 3.0×. Defaults to `false`. Refer to [Auto-calibration for `bbq_disk`](/reference/elasticsearch/mapping-reference/bbq.md#bbq-auto-calibration) for details.
 :::::
 
 
