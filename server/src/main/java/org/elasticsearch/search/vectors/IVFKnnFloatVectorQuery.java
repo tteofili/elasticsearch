@@ -98,11 +98,6 @@ public class IVFKnnFloatVectorQuery extends AbstractIVFKnnVectorQuery {
         return result;
     }
 
-    // TODO: correctness gap — if different segments disagree on whether to precondition the query
-    // (some have a preconditioner, others do not), the first segment that applies the transform
-    // mutates `query` and `isQueryPreconditioned = true`, so all subsequent segments (including
-    // non-preconditioned ones) search with the transformed query. The fix requires per-segment
-    // query copies and moving the precondition decision into `getLeafResults`.
     @Override
     protected void preconditionQuery(LeafReaderContext context) throws IOException {
         if (isQueryPreconditioned) {
