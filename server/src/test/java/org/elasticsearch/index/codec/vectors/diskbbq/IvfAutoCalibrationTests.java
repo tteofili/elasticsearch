@@ -464,9 +464,6 @@ public class IvfAutoCalibrationTests extends ESTestCase {
     }
 
     public void testBackgroundMergeWithEncodingDisagreementCompletesSuccessfully() throws IOException, InterruptedException {
-        // With async calibration, the first background merge returns codec default immediately
-        // (not blocking on the 40-60 s calibration pipeline). Calibration runs on a background
-        // thread; subsequent merges will use the cached calibrated result.
         Random rnd = random();
         int vectorsPerSegment = IvfAutoCalibration.MIN_VECTORS_FOR_CALIBRATION / 2 + 100;
         IvfAutoCalibration calibration = new IvfAutoCalibration(VPC);
@@ -485,8 +482,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
                     reader.leaves().getFirst().reader()
                 );
                 assertNotNull(persisted);
-                // The first background merge uses codec default (async calibration in progress).
-                // The encoding must still be a valid candidate encoding.
+                // The persisted encoding must be one of the calibration candidate encodings.
                 assertTrue(CALIBRATION_CANDIDATE_ENCODINGS.contains(persisted.quantEncoding()));
                 // Must not inherit flush-injected oversample (2f from the first flush segment).
                 assertThat(persisted.rescoreOversample(), not(equalTo(2f)));

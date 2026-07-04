@@ -131,19 +131,29 @@ public class CalibrationUtilsTests extends ESTestCase {
         assertFalse(CalibrationUtils.needsNeyshaburSrebroLift(VectorSimilarityFunction.COSINE));
     }
 
-    public void testNeyshaburCorpusFloatVectorValuesAddsLiftDimension() throws IOException {
+    public void testNeyshaburLiftedSourceAddsLiftDimension() throws IOException {
         float[][] data = { { 1f, 0f }, { 0.5f, 0f } };
         FloatVectorValues base = KMeansFloatVectorValues.build(List.of(data), null, 2);
         double maxNormSq = CalibrationUtils.maxSquaredNormOverCorpusSample(base, new int[] { 0, 1 });
-        CalibrationUtils.NeyshaburCorpusFloatVectorValues lifted = new CalibrationUtils.NeyshaburCorpusFloatVectorValues(
-            base,
-            2,
-            maxNormSq
-        );
-        assertEquals(3, lifted.dimension());
-        float firstLift = lifted.vectorValue(0)[2];
-        float secondLift = lifted.vectorValue(1)[2];
+        CalibrationUtils.NeyshaburLiftedSource<FloatVectorValues> lifted = new CalibrationUtils.NeyshaburLiftedSource<>(base, 2, maxNormSq);
+        assertEquals(3, lifted.liftedDimension());
+        assertEquals(2, lifted.size());
+
+        // explicit scratch read
+        float[] scratch = new float[lifted.liftedDimension()];
+        lifted.liftedVector(0, scratch);
+        float firstLift = scratch[2];
+        lifted.liftedVector(1, scratch);
+        float secondLift = scratch[2];
+        // the shorter vector (smaller norm) gets the larger lift component
         assertThat(secondLift, greaterThan(firstLift));
+
+        // FloatVectorValues bridge produces the same lifted vectors
+        FloatVectorValues bridged = lifted.asFloatVectorValues();
+        assertEquals(3, bridged.dimension());
+        assertEquals(2, bridged.size());
+        assertEquals(firstLift, bridged.vectorValue(0)[2], 0f);
+        assertEquals(secondLift, bridged.vectorValue(1)[2], 0f);
     }
 
     private static KnnVectorsReader heapVectorReader(FieldInfo fieldInfo, FloatVectorValues vectors) {

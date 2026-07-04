@@ -59,17 +59,12 @@ public final class ESNextRescoreOversampleTestFixture {
 
     public static final String FIELD_NAME = "f";
 
-    /** Encodings swept by {@link org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibration}. */
-    public static final Set<ESNextDiskBBQVectorsFormat.QuantEncoding> CALIBRATION_CANDIDATE_ENCODINGS = Set.of(
-        ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_1BIT_QUERY,
-        ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
-        ESNextDiskBBQVectorsFormat.QuantEncoding.TWO_BIT_4BIT_QUERY,
-        ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC,
-        ESNextDiskBBQVectorsFormat.QuantEncoding.SEVEN_BIT_SYMMETRIC
-    );
+    /** Encodings swept by {@link IvfAutoCalibration}; derived from the source so the two cannot drift apart. */
+    public static final Set<ESNextDiskBBQVectorsFormat.QuantEncoding> CALIBRATION_CANDIDATE_ENCODINGS = IvfAutoCalibration
+        .candidateEncodings();
 
-    /** Rescore oversample values from {@link org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibration} rerank depths. */
-    public static final Set<Float> CALIBRATION_RERANK_OVERSAMPLES = Set.of(1.25f, 1.5f, 1.75f, 2.0f, 2.25f, 2.5f);
+    /** Rescore oversample values swept by {@link IvfAutoCalibration}; derived from the source so they stay in sync. */
+    public static final Set<Float> CALIBRATION_RERANK_OVERSAMPLES = IvfAutoCalibration.rerankOversamples();
 
     /**
      * Merge resolver matching {@link org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper} when
@@ -128,6 +123,43 @@ public final class ESNextRescoreOversampleTestFixture {
                     ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
                     false,
                     ov
+                )
+            );
+        };
+        Codec codec = createDiskBbqCodec(flushConfig, mergeConfigResolver);
+        IndexWriterConfig iwc = new IndexWriterConfig(new StandardAnalyzer()).setCodec(codec).setMergePolicy(NoMergePolicy.INSTANCE);
+
+        writeTwoCommits(vectorsPerSegment, vectorDimensions, dir, iwc);
+        return DirectoryReader.open(dir);
+    }
+
+    /**
+     * Two commits under {@link NoMergePolicy}; first segment persists {@code preconditionSegmentA}, second
+     * {@code preconditionSegmentB}. Used to exercise query-time behaviour when leaves disagree on whether the
+     * query must be preconditioned (each preconditioned segment carries its own persisted preconditioner).
+     */
+    public static DirectoryReader buildTwoCommitsTwoSegmentsPreconditioning(
+        Directory dir,
+        int vectorDimensions,
+        int vectorsPerSegment,
+        boolean preconditionSegmentA,
+        boolean preconditionSegmentB,
+        IvfMergeConfigResolver mergeConfigResolver
+    ) throws IOException {
+        Objects.requireNonNull(dir, "dir");
+        AtomicInteger flushSequence = new AtomicInteger(0);
+        IvfFlushConfigSource flushConfig = (state, fieldInfo) -> {
+            if (FIELD_NAME.equals(fieldInfo.name) == false) {
+                return Optional.empty();
+            }
+            int seq = flushSequence.getAndIncrement();
+            boolean precondition = seq == 0 ? preconditionSegmentA : preconditionSegmentB;
+            return Optional.of(
+                new IvfSegmentConfig(
+                    ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                    ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                    precondition,
+                    DenseVectorFieldMapper.DEFAULT_OVERSAMPLE
                 )
             );
         };

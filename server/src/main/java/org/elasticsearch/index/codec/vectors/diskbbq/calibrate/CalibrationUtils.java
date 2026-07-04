@@ -10,6 +10,7 @@
 package org.elasticsearch.index.codec.vectors.diskbbq.calibrate;
 
 import org.apache.lucene.codecs.KnnVectorsReader;
+import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.MergeState;
@@ -120,49 +121,133 @@ public final class CalibrationUtils {
     }
 
     /**
-     * Corpus view that maps each vector {@code x} to {@code [x, sqrt(M - ||x||^2)]} with
-     * {@code M = maxNormSq} over the calibration corpus sample, per Neyshabur and Srebro (ICML 2015).
+     * Applies the Neyshabur–Srebro lift (dot product -> euclidean in one higher dimension) to vectors from an
+     * underlying source, mapping each vector {@code x} to {@code [x, sqrt(M - ||x||^2)]} with {@code M = maxNormSq}
+     * over the calibration corpus sample, per Neyshabur and Srebro (ICML 2015).
+     * <p>
+     * The lift is agnostic to the source element type: the output is always {@code float}, but the source may be a
+     * {@link FloatVectorValues} or a {@link ByteVectorValues}. {@link #liftedVector(int, float[])} reads the base
+     * vector, widens it to float, and appends the lift component into a caller-provided scratch buffer, so the extra
+     * dimension never needs to fit in the source element type. Consumers that require a Lucene
+     * {@link FloatVectorValues} (k-means, bulk scorers) use {@link #asFloatVectorValues()}.
+     *
+     * @param <V> the underlying vector-values type ({@link FloatVectorValues} or {@link ByteVectorValues})
      */
-    public static final class NeyshaburCorpusFloatVectorValues extends FloatVectorValues {
-        private final FloatVectorValues delegate;
-        private final int dim;
+    public static final class NeyshaburLiftedSource<V> {
+        private final V vectorValues;
+        private final int baseDim;
         private final double maxNormSq;
+
+        public NeyshaburLiftedSource(V vectorValues, int baseDim, double maxNormSq) {
+            this.vectorValues = Objects.requireNonNull(vectorValues, "vectorValues");
+            this.baseDim = baseDim;
+            this.maxNormSq = maxNormSq;
+        }
+
+        /** The underlying, un-lifted source. */
+        public V delegate() {
+            return vectorValues;
+        }
+
+        /** Dimension of a lifted vector: {@code baseDim + 1}. */
+        public int liftedDimension() {
+            return baseDim + 1;
+        }
+
+        /** Number of vectors in the underlying source. */
+        public int size() {
+            if (vectorValues instanceof FloatVectorValues fvv) {
+                return fvv.size();
+            }
+            if (vectorValues instanceof ByteVectorValues bvv) {
+                return bvv.size();
+            }
+            throw new IllegalStateException("unsupported vector values type: " + vectorValues.getClass().getName());
+        }
+
+        /**
+         * Reads the base vector at {@code ord}, widens it to float in {@code dst[0..baseDim)}, and writes the lift
+         * component {@code sqrt(max(0, M - ||x||^2))} at {@code dst[baseDim]}. {@code dst.length} must be at least
+         * {@link #liftedDimension()}.
+         */
+        public void liftedVector(int ord, float[] dst) throws IOException {
+            double normSq;
+            if (vectorValues instanceof FloatVectorValues fvv) {
+                float[] base = fvv.vectorValue(ord);
+                System.arraycopy(base, 0, dst, 0, baseDim);
+                normSq = ESVectorUtil.dotProduct(base, base);
+            } else if (vectorValues instanceof ByteVectorValues bvv) {
+                byte[] base = bvv.vectorValue(ord);
+                long dot = 0;
+                for (int i = 0; i < baseDim; i++) {
+                    int b = base[i];
+                    dst[i] = b;
+                    dot += (long) b * b;
+                }
+                normSq = dot;
+            } else {
+                throw new IllegalStateException("unsupported vector values type: " + vectorValues.getClass().getName());
+            }
+            dst[baseDim] = (float) Math.sqrt(Math.max(0.0, maxNormSq - normSq));
+        }
+
+        /**
+         * A {@link FloatVectorValues} view over the lifted vectors, for consumers that require the Lucene interface
+         * (k-means, bulk scorers). Follows the {@link FloatVectorValues} shared-buffer contract: the returned array
+         * is only valid until the next {@link FloatVectorValues#vectorValue(int)} call. Requires a
+         * {@link FloatVectorValues} source.
+         */
+        public FloatVectorValues asFloatVectorValues() {
+            if (vectorValues instanceof FloatVectorValues) {
+                // safe: guarded by the instanceof above, so V is FloatVectorValues
+                @SuppressWarnings("unchecked")
+                NeyshaburLiftedSource<FloatVectorValues> floatSource = (NeyshaburLiftedSource<FloatVectorValues>) this;
+                return new LiftedFloatVectorValues(floatSource);
+            }
+            throw new IllegalStateException(
+                "asFloatVectorValues requires a FloatVectorValues source, got: " + vectorValues.getClass().getName()
+            );
+        }
+    }
+
+    /**
+     * {@link FloatVectorValues} bridge exposing a {@link NeyshaburLiftedSource}'s lifted vectors to consumers that
+     * require the Lucene interface. Reads into a shared per-instance buffer, so the returned array is only valid
+     * until the next {@link #vectorValue(int)} call and callers must not hold two lifted vectors at once.
+     */
+    private static final class LiftedFloatVectorValues extends FloatVectorValues {
+        private final NeyshaburLiftedSource<FloatVectorValues> source;
         private final float[] buffer;
 
-        public NeyshaburCorpusFloatVectorValues(FloatVectorValues delegate, int dim, double maxNormSq) {
-            this.delegate = delegate;
-            this.dim = dim;
-            this.maxNormSq = maxNormSq;
-            this.buffer = new float[dim + 1];
+        LiftedFloatVectorValues(NeyshaburLiftedSource<FloatVectorValues> source) {
+            this.source = source;
+            this.buffer = new float[source.liftedDimension()];
         }
 
         @Override
         public float[] vectorValue(int ord) throws IOException {
-            float[] v = delegate.vectorValue(ord);
-            System.arraycopy(v, 0, buffer, 0, dim);
-            double normSq = ESVectorUtil.dotProduct(v, v);
-            buffer[dim] = (float) Math.sqrt(Math.max(0.0, maxNormSq - normSq));
+            source.liftedVector(ord, buffer);
             return buffer;
         }
 
         @Override
         public FloatVectorValues copy() throws IOException {
-            return new NeyshaburCorpusFloatVectorValues(delegate.copy(), dim, maxNormSq);
+            return new LiftedFloatVectorValues(new NeyshaburLiftedSource<>(source.delegate().copy(), source.baseDim, source.maxNormSq));
         }
 
         @Override
         public int dimension() {
-            return dim + 1;
+            return source.liftedDimension();
         }
 
         @Override
         public int size() {
-            return delegate.size();
+            return source.delegate().size();
         }
 
         @Override
         public DocIndexIterator iterator() {
-            return delegate.iterator();
+            return source.delegate().iterator();
         }
     }
 

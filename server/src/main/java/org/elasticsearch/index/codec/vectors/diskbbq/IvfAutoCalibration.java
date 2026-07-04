@@ -28,12 +28,15 @@ import org.elasticsearch.logging.Logger;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.elasticsearch.core.Strings.format;
 
@@ -98,6 +101,22 @@ public class IvfAutoCalibration {
      * Rerank depth multipliers swept in ascending cost order.
      */
     private static final double[] RERANK_DEPTHS = { 1.25, 1.5, 1.75, 2.0, 2.5, 3.0 };
+
+    /**
+     * The distinct candidate quantization encodings evaluated during calibration. Exposed so tests can assert
+     * that a calibrated segment picked one of these without duplicating (and drifting from) the list here.
+     */
+    public static Set<ESNextDiskBBQVectorsFormat.QuantEncoding> candidateEncodings() {
+        return Arrays.stream(CANDIDATES).map(CandidateEncoding::encoding).collect(Collectors.toUnmodifiableSet());
+    }
+
+    /**
+     * The distinct rerank oversample factors evaluated during calibration, mirroring {@link #RERANK_DEPTHS}.
+     * Exposed so tests stay in sync with the swept values.
+     */
+    public static Set<Float> rerankOversamples() {
+        return Arrays.stream(RERANK_DEPTHS).mapToObj(d -> (float) d).collect(Collectors.toUnmodifiableSet());
+    }
 
     /**
      * Weight of rerank depth in the calibration cost model ({@code dbits + RERANK_COST_WEIGHT * rerankDepth}).
@@ -245,6 +264,12 @@ public class IvfAutoCalibration {
                 // liveDocs[i] is null when all documents in the segment are live.
                 // When non-null, Bits.length() returns the bit-array size (== maxDoc), not the live count,
                 // so we use maxDocs[i] in both cases for a consistent and null-safe weight.
+                // This over-weights segments with many deleted docs in the encoding-agreement threshold and the
+                // oversample-weighted average below (deleted docs still count toward maxDoc). We accept this: the
+                // values only drive heuristics (which encoding the bulk of docs already use, and a rough average
+                // oversample), not a correctness invariant, and deletes are typically spread roughly uniformly
+                // across the merged segments, so relative weights are largely preserved. Using live counts would
+                // be marginally more accurate but require counting live bits per segment.
                 long docs = mergeState.maxDocs[i];
                 calibratedSegments++;
                 encodingDocCounts.merge(enc, docs, Long::sum);
@@ -352,7 +377,7 @@ public class IvfAutoCalibration {
                 )
             );
             case SweepOutcome.BestEffort b -> logger.info(
-                "Calibration: no encoding met target recall [{}], selecting best [{}] with oversample [{}] precondition [{}] and recall [{}]",
+                "No encoding met target recall [{}], selecting best [{}] with oversample [{}] precondition [{}] and recall [{}]",
                 targetRecall,
                 outcome.config().quantEncoding(),
                 outcome.config().rescoreOversample(),
@@ -380,7 +405,7 @@ public class IvfAutoCalibration {
         FloatVectorValues fvvForCalibration = floatVectorValues;
         if (neyshabur) {
             double maxNormSq = CalibrationUtils.maxSquaredNormOverCorpusSample(floatVectorValues, corpusOrdinals);
-            fvvForCalibration = new CalibrationUtils.NeyshaburCorpusFloatVectorValues(floatVectorValues, dim, maxNormSq);
+            fvvForCalibration = new CalibrationUtils.NeyshaburLiftedSource<>(floatVectorValues, dim, maxNormSq).asFloatVectorValues();
             dimWork = dim + 1;
         }
 
@@ -430,6 +455,12 @@ public class IvfAutoCalibration {
      * manifold cluster radius: no k-means, no NN assignment. The slope {@code beta1 = invDim}
      * is taken directly from the manifold; only the intercept {@code beta0} is measured via a
      * single OSQ pass on random residuals. This is the cheapest calibration path.
+     * <p>
+     * TODO: the synthetic Gaussian residuals (and their squared norms) depend only on the manifold
+     * cluster radius, which is constant across candidates in a single sweep — only the OSQ
+     * quantization varies with (qbits, dbits). Generating them once and reusing across all candidates
+     * would avoid regenerating {@code nDocs * dim} Gaussians per candidate. See also the sort in
+     * {@link ErrorModel#quantizedRepErrorStd} which fully sorts to take only the top-5k.
      */
     private SweepOutcome sweepQuantizationCandidatesManifoldResiduals(
         VectorSimilarityFunction similarityFunction,
@@ -438,63 +469,21 @@ public class IvfAutoCalibration {
         double invDim,
         CalibrationSource calibrationSource
     ) throws IOException {
-        double bestRecall = -1;
-        ESNextDiskBBQVectorsFormat.QuantEncoding bestEncoding = ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY;
-        float bestOversample = DEFAULT_CALIBRATED_OVERSAMPLE;
-        boolean bestPrecondition = false;
-
-        boolean[] preconditionValues = new boolean[] { false, true };
-
-        for (boolean precondition : preconditionValues) {
-            for (CalibrationSweep sweep : COST_ORDERED_SWEEPS) {
-                CandidateEncoding candidate = sweep.candidate();
-                QuantizationErrorStdModel magnitudeModel = ErrorModel.estimateMagnitudeFromManifoldResiduals(
-                    alpha,
-                    invDim,
-                    calibrationSource,
-                    precondition,
-                    candidate.qbits(),
-                    candidate.dbits(),
-                    vectorsPerCluster,
-                    numVectors
-                );
-                double errorStd = magnitudeModel.errorStd(vectorsPerCluster, numVectors);
-                int rerankVal = ExpectedRecall.rerankN(k, sweep.rerankDepth());
-                float oversample = (float) sweep.rerankDepth();
-                double expected = ExpectedRecall.expectedRecallAtK(similarityFunction, numVectors, alpha, invDim, errorStd, k, rerankVal);
-
-                logger.debug(
-                    () -> format(
-                        "Quantization recall((%d, %d) | %d, %s) = %.2f%%",
-                        candidate.qbits(),
-                        candidate.dbits(),
-                        rerankVal,
-                        precondition ? "precondition" : "no precondition",
-                        expected * 100.0
-                    )
-                );
-
-                if (expected >= targetRecall) {
-                    IvfSegmentConfig config = new IvfSegmentConfig(
-                        ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
-                        candidate.encoding(),
-                        precondition,
-                        oversample
-                    );
-                    return new SweepOutcome.Success(config, expected, candidate.qbits(), candidate.dbits(), rerankVal);
-                }
-                if (expected > bestRecall) {
-                    bestRecall = expected;
-                    bestEncoding = candidate.encoding();
-                    bestOversample = oversample;
-                    bestPrecondition = precondition;
-                }
-            }
-        }
-
-        return new SweepOutcome.BestEffort(
-            new IvfSegmentConfig(ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT, bestEncoding, bestPrecondition, bestOversample),
-            bestRecall
+        return sweepCandidates(
+            similarityFunction,
+            numVectors,
+            alpha,
+            invDim,
+            (candidate, precondition) -> ErrorModel.estimateMagnitudeFromManifoldResiduals(
+                alpha,
+                invDim,
+                calibrationSource,
+                precondition,
+                candidate.qbits(),
+                candidate.dbits(),
+                vectorsPerCluster,
+                numVectors
+            ).errorStd(vectorsPerCluster, numVectors)
         );
     }
 
@@ -532,35 +521,52 @@ public class IvfAutoCalibration {
         double invDim,
         ErrorScalingFit scalingFit,
         CalibrationSource calibrationSource
-    ) {
+    ) throws IOException {
+        // Error models depend only on (qbits, dbits, precondition), not on rerank depth, so cache across the sweep.
+        Map<EncKey, QuantizationErrorStdModel> errorModelCache = new HashMap<>();
+        return sweepCandidates(similarityFunction, numVectors, alpha, invDim, (candidate, precondition) -> {
+            EncKey key = new EncKey(candidate.qbits(), candidate.dbits(), precondition);
+            QuantizationErrorStdModel errorModel = errorModelCache.computeIfAbsent(
+                key,
+                ignored -> ErrorModel.estimateMagnitudeModel(
+                    scalingFit,
+                    calibrationSource,
+                    precondition,
+                    candidate.qbits(),
+                    candidate.dbits(),
+                    vectorsPerCluster
+                )
+            );
+            return errorModel.errorStd(vectorsPerCluster, numVectors);
+        });
+    }
+
+    /**
+     * Sweeps every {@code (precondition, encoding, rerank-depth)} candidate in cost order and returns the first
+     * configuration whose predicted recall meets {@link #targetRecall}, or the best-effort configuration if none
+     * does. The two calibration paths differ only in how the quantization error std is obtained, which is supplied
+     * by {@code errorStdProvider}.
+     */
+    private SweepOutcome sweepCandidates(
+        VectorSimilarityFunction similarityFunction,
+        int numVectors,
+        double alpha,
+        double invDim,
+        ErrorStdProvider errorStdProvider
+    ) throws IOException {
         double bestRecall = -1;
         ESNextDiskBBQVectorsFormat.QuantEncoding bestEncoding = ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY;
         float bestOversample = DEFAULT_CALIBRATED_OVERSAMPLE;
         boolean bestPrecondition = false;
 
-        Map<EncKey, QuantizationErrorStdModel> errorModelCache = new HashMap<>();
         boolean[] preconditionValues = new boolean[] { false, true };
 
         for (boolean precondition : preconditionValues) {
             for (CalibrationSweep sweep : COST_ORDERED_SWEEPS) {
                 CandidateEncoding candidate = sweep.candidate();
-                EncKey key = new EncKey(candidate.qbits(), candidate.dbits(), precondition);
-                QuantizationErrorStdModel errorModel = errorModelCache.get(key);
-                if (errorModel == null) {
-                    errorModel = ErrorModel.estimateMagnitudeModel(
-                        scalingFit,
-                        calibrationSource,
-                        precondition,
-                        candidate.qbits(),
-                        candidate.dbits(),
-                        vectorsPerCluster
-                    );
-                    errorModelCache.put(key, errorModel);
-                }
-
+                double errorStd = errorStdProvider.errorStd(candidate, precondition);
                 int rerankVal = ExpectedRecall.rerankN(k, sweep.rerankDepth());
                 float oversample = (float) sweep.rerankDepth();
-                double errorStd = errorModel.errorStd(vectorsPerCluster, numVectors);
                 double expected = ExpectedRecall.expectedRecallAtK(similarityFunction, numVectors, alpha, invDim, errorStd, k, rerankVal);
 
                 logger.debug(
@@ -596,6 +602,12 @@ public class IvfAutoCalibration {
             new IvfSegmentConfig(ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT, bestEncoding, bestPrecondition, bestOversample),
             bestRecall
         );
+    }
+
+    /** Supplies the quantization error std for a given candidate encoding and precondition setting. */
+    @FunctionalInterface
+    private interface ErrorStdProvider {
+        double errorStd(CandidateEncoding candidate, boolean precondition) throws IOException;
     }
 
     private record CalibrationSweep(CandidateEncoding candidate, double rerankDepth, double cost) {}
