@@ -464,9 +464,6 @@ public class IvfAutoCalibrationTests extends ESTestCase {
     }
 
     public void testBackgroundMergeWithEncodingDisagreementCompletesSuccessfully() throws IOException, InterruptedException {
-        // With async calibration, the first background merge returns codec default immediately
-        // (not blocking on the 40-60 s calibration pipeline). Calibration runs on a background
-        // thread; subsequent merges will use the cached calibrated result.
         Random rnd = random();
         int vectorsPerSegment = IvfAutoCalibration.MIN_VECTORS_FOR_CALIBRATION / 2 + 100;
         IvfAutoCalibration calibration = new IvfAutoCalibration(VPC);
