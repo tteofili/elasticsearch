@@ -109,6 +109,37 @@ public final class ESNextRescoreOversampleTestFixture {
         float oversampleSegmentB,
         IvfMergeConfigResolver mergeConfigResolver
     ) throws IOException {
+        return buildTwoCommitsTwoSegments(
+            dir,
+            vectorDimensions,
+            vectorsPerSegment,
+            new IvfSegmentConfig(
+                ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                false,
+                oversampleSegmentA
+            ),
+            new IvfSegmentConfig(
+                ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                false,
+                oversampleSegmentB
+            ),
+            mergeConfigResolver
+        );
+    }
+
+    /**
+     * Two commits under {@link NoMergePolicy}, each with an explicit persisted {@link IvfSegmentConfig}.
+     */
+    public static DirectoryReader buildTwoCommitsTwoSegments(
+        Directory dir,
+        int vectorDimensions,
+        int vectorsPerSegment,
+        IvfSegmentConfig segmentA,
+        IvfSegmentConfig segmentB,
+        IvfMergeConfigResolver mergeConfigResolver
+    ) throws IOException {
         Objects.requireNonNull(dir, "dir");
         AtomicInteger flushSequence = new AtomicInteger(0);
         IvfFlushConfigSource flushConfig = (state, fieldInfo) -> {
@@ -116,21 +147,36 @@ public final class ESNextRescoreOversampleTestFixture {
                 return Optional.empty();
             }
             int seq = flushSequence.getAndIncrement();
-            float ov = seq == 0 ? oversampleSegmentA : oversampleSegmentB;
-            return Optional.of(
-                new IvfSegmentConfig(
-                    ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
-                    ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
-                    false,
-                    ov
-                )
-            );
+            return Optional.of(seq == 0 ? segmentA : segmentB);
         };
         Codec codec = createDiskBbqCodec(flushConfig, mergeConfigResolver);
         IndexWriterConfig iwc = new IndexWriterConfig(new StandardAnalyzer()).setCodec(codec).setMergePolicy(NoMergePolicy.INSTANCE);
 
         writeTwoCommits(vectorsPerSegment, vectorDimensions, dir, iwc);
         return DirectoryReader.open(dir);
+    }
+
+    /**
+     * Two commits with codec-default flush configuration (no per-segment overrides).
+     */
+    public static DirectoryReader buildTwoCommitsCodecDefaults(Directory dir, int vectorDimensions, int vectorsPerSegment)
+        throws IOException {
+        return buildTwoCommitsTwoSegments(
+            dir,
+            vectorDimensions,
+            vectorsPerSegment,
+            IvfSegmentConfig.fromCodecDefaults(
+                ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                false
+            ),
+            IvfSegmentConfig.fromCodecDefaults(
+                ESNextDiskBBQVectorsFormat.CentroidIndexFormat.FLAT,
+                ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+                false
+            ),
+            IvfMergeConfigResolver.useCodecDefault()
+        );
     }
 
     /**

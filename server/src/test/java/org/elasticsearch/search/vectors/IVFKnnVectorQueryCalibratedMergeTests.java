@@ -27,6 +27,7 @@ import java.util.Random;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 
 /**
@@ -79,6 +80,97 @@ public class IVFKnnVectorQueryCalibratedMergeTests extends ESTestCase {
 
                 assertThat(hits.scoreDocs.length, lessThanOrEqualTo(Math.min(expectedMergeK, reader.numDocs())));
                 assertThat(hits.scoreDocs.length, greaterThan(k));
+            }
+        }
+    }
+
+    public void testAutoCalibrateRewriteUsesInternalRescorePath() throws IOException {
+        Random rnd = random();
+        float oversampleA = 1.25f;
+        float oversampleB = 2.5f;
+        final int k = 10;
+
+        try (Directory dir = newDirectory()) {
+            try (
+                DirectoryReader reader = ESNextRescoreOversampleTestFixture.buildTwoCommitsTwoSegments(
+                    dir,
+                    4,
+                    64,
+                    oversampleA,
+                    oversampleB,
+                    IvfMergeConfigResolver.useCodecDefault()
+                )
+            ) {
+                IndexSearcher searcher = newSearcher(reader);
+
+                float[] queryVector = new float[4];
+                for (int i = 0; i < queryVector.length; i++) {
+                    queryVector[i] = rnd.nextFloat();
+                }
+                VectorUtil.l2normalize(queryVector);
+
+                var resolver = IvfQueryConfigResolver.from(true, false, 4, DenseVectorFieldMapper.DEFAULT_OVERSAMPLE, null);
+                IVFKnnFloatVectorQuery ivfQuery = new IVFKnnFloatVectorQuery(
+                    ESNextRescoreOversampleTestFixture.FIELD_NAME,
+                    queryVector,
+                    k,
+                    500,
+                    null,
+                    1f,
+                    resolver
+                );
+
+                Query rewritten = ivfQuery.rewrite(searcher);
+                assertThat(rewritten, instanceOf(RescoreKnnVectorQuery.class));
+
+                TopDocs hits = searcher.search(rewritten, k);
+                assertThat(hits.scoreDocs.length, equalTo(Math.min(k, reader.numDocs())));
+            }
+        }
+    }
+
+    public void testQueryOversampleOverridesCalibratedRescorePath() throws IOException {
+        Random rnd = random();
+        float oversampleA = 1.25f;
+        float oversampleB = 2.5f;
+        float queryOversample = 6f;
+        final int k = 10;
+
+        try (Directory dir = newDirectory()) {
+            try (
+                DirectoryReader reader = ESNextRescoreOversampleTestFixture.buildTwoCommitsTwoSegments(
+                    dir,
+                    4,
+                    64,
+                    oversampleA,
+                    oversampleB,
+                    IvfMergeConfigResolver.useCodecDefault()
+                )
+            ) {
+                IndexSearcher searcher = newSearcher(reader);
+
+                float[] queryVector = new float[4];
+                for (int i = 0; i < queryVector.length; i++) {
+                    queryVector[i] = rnd.nextFloat();
+                }
+                VectorUtil.l2normalize(queryVector);
+
+                var resolver = IvfQueryConfigResolver.from(true, false, 4, DenseVectorFieldMapper.DEFAULT_OVERSAMPLE, queryOversample);
+                IVFKnnFloatVectorQuery ivfQuery = new IVFKnnFloatVectorQuery(
+                    ESNextRescoreOversampleTestFixture.FIELD_NAME,
+                    queryVector,
+                    k,
+                    500,
+                    null,
+                    1f,
+                    resolver
+                );
+
+                Query rewritten = ivfQuery.rewrite(searcher);
+                assertThat(rewritten, instanceOf(RescoreKnnVectorQuery.class));
+
+                TopDocs hits = searcher.search(rewritten, k);
+                assertThat(hits.scoreDocs.length, equalTo(Math.min(k, reader.numDocs())));
             }
         }
     }
