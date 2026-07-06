@@ -663,27 +663,25 @@ public class DenseVectorFieldMapperTests extends SyntheticVectorsMapperTestCase 
         registerIndexOptionsUpdate(
             checker,
             b -> b.field("type", "dense_vector").field("dims", dims * 16).field("index", true),
-            b -> b.startObject("index_options").field("type", "bbq_disk").field("bits", 4).endObject(),
-            b -> b.startObject("index_options").field("type", "bbq_disk").field("bits", 2).endObject(),
+            b -> b.field("type", "bbq_disk").field("bits", 4),
+            b -> b.field("type", "bbq_disk").field("bits", 2),
             hasToString(containsString("\"bits\":2"))
         );
         registerIndexOptionsUpdate(
             checker,
             b -> b.field("type", "dense_vector").field("dims", dims * 16).field("index", true),
-            b -> b.startObject("index_options")
-                .field("type", "bbq_disk")
-                .field("bits", 4)
-                .startObject("rescore_vector")
-                .field("oversample", 3f)
-                .endObject()
-                .endObject(),
-            b -> b.startObject("index_options")
-                .field("type", "bbq_disk")
-                .field("bits", 4)
-                .startObject("rescore_vector")
-                .field("oversample", 4f)
-                .endObject()
-                .endObject(),
+            b -> {
+                b.field("type", "bbq_disk").field("bits", 4);
+                b.startObject("rescore_vector");
+                b.field("oversample", 3f);
+                b.endObject();
+            },
+            b -> {
+                b.field("type", "bbq_disk").field("bits", 4);
+                b.startObject("rescore_vector");
+                b.field("oversample", 4f);
+                b.endObject();
+            },
             hasToString(containsString("\"oversample\":4.0"))
         );
     }
