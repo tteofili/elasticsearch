@@ -301,8 +301,13 @@ Segments containing fewer than 10,000 vectors after merging are not calibrated. 
 ### Interaction with other parameters
 
 - **`bits`**: Controls the encoding at flush time for freshly written, pre-merge segments. Auto-calibration operates independently at merge time and may select a different encoding for merged segments.
-- **`precondition`**: The calibration sweep always evaluates both preconditioned and non-preconditioned variants and selects whichever achieves better estimated recall per unit cost. The `precondition` mapping parameter controls the encoding applied at flush time and serves as the fallback default if calibration fails.
-- **`rescore_vector.oversample`**: The oversampling factor for merged segments is selected automatically by the calibration. Any explicit `rescore_vector.oversample` value applies to unmerged segments.
+- **`precondition`**: The calibration sweep always evaluates both preconditioned and non-preconditioned variants and selects whichever achieves better estimated recall per unit cost. The `precondition` mapping parameter controls the encoding applied at flush time and serves as the fallback default if calibration fails. Cannot be changed after the field is created.
+- **`rescore_vector.oversample`**: For calibrated merged segments, the oversampling factor is selected automatically and stored per segment. At query time, the effective oversample is resolved in this order:
+  1. Query-time `rescore_vector.oversample` on the kNN query or retriever, if set. This value is applied uniformly to all segments and overrides calibrated per-segment values.
+  2. Per-segment calibrated oversample, when the segment was calibrated at merge time. Different segments in the same index may use different factors.
+  3. Mapping `rescore_vector.oversample`, or the default 3.0× if unset. This applies to unmerged segments, segments below the calibration threshold, and segments where calibration fell back to codec defaults.
+
+  Query-time oversample affects rerank depth only. Preconditioning and quantization encoding continue to follow each segment's stored configuration when `auto_calibrate` is enabled.
 
 ### Example
 
