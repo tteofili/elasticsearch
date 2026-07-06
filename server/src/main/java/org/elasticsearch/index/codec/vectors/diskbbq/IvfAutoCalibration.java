@@ -14,6 +14,8 @@ import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.util.BitSet;
+import org.apache.lucene.util.Bits;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.CalibrationSource;
 import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.CalibrationUtils;
@@ -261,16 +263,14 @@ public class IvfAutoCalibration {
                 if (enc == null) {
                     continue;
                 }
-                // liveDocs[i] is null when all documents in the segment are live.
-                // When non-null, Bits.length() returns the bit-array size (== maxDoc), not the live count,
-                // so we use maxDocs[i] in both cases for a consistent and null-safe weight.
-                // This over-weights segments with many deleted docs in the encoding-agreement threshold and the
-                // oversample-weighted average below (deleted docs still count toward maxDoc). We accept this: the
-                // values only drive heuristics (which encoding the bulk of docs already use, and a rough average
-                // oversample), not a correctness invariant, and deletes are typically spread roughly uniformly
-                // across the merged segments, so relative weights are largely preserved. Using live counts would
-                // be marginally more accurate but require counting live bits per segment.
-                long docs = mergeState.maxDocs[i];
+                Bits liveDocs = mergeState.liveDocs[i];
+                long docs;
+                if (liveDocs instanceof BitSet bitSet) {
+                    docs = bitSet.cardinality();
+                } else {
+                    // no deletions (null livedocs) or too expensive to count (non-BitSet livedocs), fall back to maxDocs
+                    docs = mergeState.maxDocs[i];
+                }
                 calibratedSegments++;
                 encodingDocCounts.merge(enc, docs, Long::sum);
                 float oversample = car.getOversampleFactor(fieldInfo);
@@ -460,7 +460,7 @@ public class IvfAutoCalibration {
      * cluster radius, which is constant across candidates in a single sweep — only the OSQ
      * quantization varies with (qbits, dbits). Generating them once and reusing across all candidates
      * would avoid regenerating {@code nDocs * dim} Gaussians per candidate. See also the sort in
-     * {@link ErrorModel#quantizedRepErrorStd} which fully sorts to take only the top-5k.
+     * {@code ErrorModel#quantizedRepErrorStd} which fully sorts to take only the top-5k.
      */
     private SweepOutcome sweepQuantizationCandidatesManifoldResiduals(
         VectorSimilarityFunction similarityFunction,

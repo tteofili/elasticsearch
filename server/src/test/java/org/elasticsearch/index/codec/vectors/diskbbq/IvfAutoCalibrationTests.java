@@ -25,6 +25,7 @@ import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.Bits;
+import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.StringHelper;
 import org.apache.lucene.util.Version;
 import org.elasticsearch.common.lucene.Lucene;
@@ -123,6 +124,48 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             assertThat(reused, notNullValue());
             assertThat(reused.quantEncoding(), is(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY));
             assertThat(reused.rescoreOversample(), equalTo(3.2f));
+            assertFalse(reused.usePrecondition());
+        }
+    }
+
+    /**
+     * Calibration must handle a merge that mixes segments with no deletes ({@code liveDocs == null}) and segments
+     * with deleted docs (non-null {@code liveDocs}). Metadata reuse weights each agreeing segment by its <em>live</em>
+     * doc count, so deleted docs (which won't survive the merge) don't skew the reused oversample.
+     */
+    public void testSelectFromMergeStateReusesAcrossSegmentsWithAndWithoutDeletes() throws IOException {
+        FieldInfo fieldInfo = vectorFieldInfo(ESNextRescoreOversampleTestFixture.FIELD_NAME);
+        // Both segments agree on encoding, so metadata is reused rather than re-calibrated.
+        StubCalibrationKnnVectorsReader noDeletes = new StubCalibrationKnnVectorsReader(
+            ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+            2f,
+            false
+        );
+        StubCalibrationKnnVectorsReader withDeletes = new StubCalibrationKnnVectorsReader(
+            ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
+            4f,
+            false
+        );
+        int maxDocA = 8000; // no deletes -> 8000 live
+        int maxDocB = 4000; // 2000 deleted -> 2000 live
+        try (Directory dir = newDirectory()) {
+            // segment A has no deletes (liveDocs == null); segment B has 2000 of 4000 docs deleted.
+            MergeState mergeState = mergeStateWithMaxDocs(
+                new KnnVectorsReader[] { noDeletes, withDeletes },
+                new Bits[] { null, liveDocsWithDeletes(maxDocB, 2000) },
+                new int[] { maxDocA, maxDocB },
+                backgroundSegmentInfo(dir),
+                fieldInfo
+            );
+
+            IvfAutoCalibration selector = new IvfAutoCalibration(VPC);
+            IvfSegmentConfig reused = selector.selectFromMergeState(fieldInfo, mergeState);
+
+            assertThat(reused, notNullValue());
+            assertThat(reused.quantEncoding(), is(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY));
+            // Weighted by LIVE docs per segment (deletes excluded): (2*8000 + 4*2000) / (8000 + 2000) = 2.4
+            // Weighting by maxDoc would instead give (2*8000 + 4*4000) / (8000 + 4000) = 2.667.
+            assertThat(reused.rescoreOversample(), equalTo(2.4f));
             assertFalse(reused.usePrecondition());
         }
     }
@@ -678,6 +721,55 @@ public class IvfAutoCalibrationTests extends ESTestCase {
                 return length;
             }
         };
+    }
+
+    /**
+     * A live-docs bitset for a segment with deletes: {@code maxDoc} bits, of which the first {@code numDeleted}
+     * are cleared. Like a real merge's {@code liveDocs}, {@link Bits#length()} returns {@code maxDoc}.
+     */
+    private static Bits liveDocsWithDeletes(int maxDoc, int numDeleted) {
+        FixedBitSet bits = new FixedBitSet(maxDoc);
+        bits.set(0, maxDoc);
+        for (int i = 0; i < numDeleted; i++) {
+            bits.clear(i);
+        }
+        return bits;
+    }
+
+    /**
+     * Builds a {@link MergeState} with explicit per-segment {@code maxDocs} and a {@code liveDocs} array that may
+     * contain {@code null} entries (segments without deletes), mirroring what Lucene passes at merge time.
+     */
+    private static MergeState mergeStateWithMaxDocs(
+        KnnVectorsReader[] readers,
+        Bits[] liveDocsBits,
+        int[] maxDocs,
+        SegmentInfo segmentInfo,
+        FieldInfo fieldInfo
+    ) {
+        FieldInfos[] fieldInfos = new FieldInfos[readers.length];
+        for (int i = 0; i < readers.length; i++) {
+            fieldInfos[i] = new FieldInfos(new FieldInfo[] { fieldInfo });
+        }
+        return new MergeState(
+            null,
+            segmentInfo,
+            null,
+            null,
+            null,
+            null,
+            null,
+            fieldInfos,
+            liveDocsBits,
+            null,
+            null,
+            readers,
+            maxDocs,
+            null,
+            null,
+            false,
+            null
+        );
     }
 
     private static FieldInfo vectorFieldInfo(String name) {
