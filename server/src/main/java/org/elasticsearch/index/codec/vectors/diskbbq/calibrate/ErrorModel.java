@@ -658,7 +658,7 @@ public final class ErrorModel {
      * The survivors are ordered descending so the caller accumulates error moments in the same order as before,
      * keeping results identical to the previous full-sort implementation.
      */
-    private static void selectTopNDescending(double[] keys, int[] idx, int len, int n) {
+    static void selectTopNDescending(double[] keys, int[] idx, int len, int n) {
         if (n >= len) {
             sortIndicesByKeysDescending(keys, idx, len);
             return;
