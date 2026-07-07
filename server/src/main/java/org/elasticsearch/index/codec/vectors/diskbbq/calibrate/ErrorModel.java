@@ -94,7 +94,8 @@ public final class ErrorModel {
         }
         int actualQueryClusters = queryCentroids.length;
 
-        double[] centroidDotCentroid = scratch.centroidDotCentroid;
+        // Cluster-count scratch: sized to the actual cluster counts (~nDocs / vectorsPerCluster), not maxNDocs.
+        double[] centroidDotCentroid = new double[nDocClusters];
         for (int i = 0; i < nDocClusters; i++) {
             centroidDotCentroid[i] = ESVectorUtil.dotProduct(queryCentroids[docCentroidAssignments[i]], docCentroids[i]);
         }
@@ -132,15 +133,15 @@ public final class ErrorModel {
         double dScale = 1.0 / ((1 << dbits) - 1);
         double qScale = 1.0 / ((1 << qbits) - 1);
 
-        float[] queryLower = scratch.queryLower;
-        float[] queryUpper = scratch.queryUpper;
-        int[] queryL1 = scratch.queryL1;
-        byte[][] queryQuantized = scratch.queryQuantized;
+        float[] queryLower = new float[actualQueryClusters];
+        float[] queryUpper = new float[actualQueryClusters];
+        int[] queryL1 = new int[actualQueryClusters];
+        byte[][] queryQuantized = new byte[actualQueryClusters][dim];
 
         float[] queryScratch = scratch.queryScratch;
         float[] preconditionScratch = scratch.preconditionScratch;
 
-        double[] queryDotCentroid = scratch.queryDotCentroid;
+        double[] queryDotCentroid = new double[nDocClusters];
         double[] simOsq = scratch.simOsq;
         int[] order = scratch.order;
 
@@ -242,9 +243,8 @@ public final class ErrorModel {
                 simOsq[i] = dotEst;
             }
 
-            sortIndicesByKeysDescending(simOsq, order, nDocs);
-
             int topN = Math.min(5 * source.k(), nDocs);
+            selectTopNDescending(simOsq, order, nDocs, topN);
             for (int i = 0; i < topN; i++) {
                 int docIdx = order[i];
                 float[] doc = source.vectors().vectorValue(source.corpusOrdinals()[docIdx]);
@@ -628,8 +628,8 @@ public final class ErrorModel {
                 simOsq[d] = dotEst;
             }
 
-            sortIndicesByKeysDescending(simOsq, order, nDocs);
             int topN = Math.min(5 * source.k(), nDocs);
+            selectTopNDescending(simOsq, order, nDocs, topN);
             for (int i = 0; i < topN; i++) {
                 int docIdx = order[i];
                 float[] doc = syntheticDocs[docIdx];
@@ -649,11 +649,72 @@ public final class ErrorModel {
     }
 
     /**
-     * Sorts {@code idx[0..len)} into a permutation of {@code 0..len-1} such that
-     * {@code keys[idx[i]]} is non-increasing (descending).
+     * Fills {@code idx[0..n)} with the indices of the {@code n} largest {@code keys[0..len)}, ordered by
+     * descending key — the same prefix {@link #sortIndicesByKeysDescending} would produce, but without fully
+     * sorting all {@code len} entries. Callers only consume the top {@code 5 * k} ranked docs per query, so this
+     * bounded selection replaces an O(len·log len) sort (the dominant calibration CPU cost) with an O(len·log n)
+     * heap pass plus a tiny O(n²) ordering of the survivors. For {@code n >= len} it degrades to a full sort.
      * <p>
-     * TODO: callers only consume the top {@code 5 * k} entries, so a bounded partial selection
-     * (quickselect / bounded heap) would avoid fully sorting all {@code len} docs per query.
+     * The survivors are ordered descending so the caller accumulates error moments in the same order as before,
+     * keeping results identical to the previous full-sort implementation.
+     */
+    private static void selectTopNDescending(double[] keys, int[] idx, int len, int n) {
+        if (n >= len) {
+            sortIndicesByKeysDescending(keys, idx, len);
+            return;
+        }
+        // Min-heap (by key) of size n held in idx[0..n): idx[0] is the smallest of the n largest seen so far.
+        for (int i = 0; i < n; i++) {
+            idx[i] = i;
+        }
+        for (int p = (n >>> 1) - 1; p >= 0; p--) {
+            siftDownByKey(keys, idx, p, n);
+        }
+        for (int i = n; i < len; i++) {
+            if (keys[i] > keys[idx[0]]) {
+                idx[0] = i;
+                siftDownByKey(keys, idx, 0, n);
+            }
+        }
+        // Order the n survivors descending by key (insertion sort; n is small, typically 5*k).
+        for (int i = 1; i < n; i++) {
+            int v = idx[i];
+            double kv = keys[v];
+            int j = i - 1;
+            while (j >= 0 && keys[idx[j]] < kv) {
+                idx[j + 1] = idx[j];
+                j--;
+            }
+            idx[j + 1] = v;
+        }
+    }
+
+    private static void siftDownByKey(double[] keys, int[] idx, int root, int size) {
+        int cur = root;
+        while (true) {
+            int left = 2 * cur + 1;
+            int right = left + 1;
+            int smallest = cur;
+            if (left < size && keys[idx[left]] < keys[idx[smallest]]) {
+                smallest = left;
+            }
+            if (right < size && keys[idx[right]] < keys[idx[smallest]]) {
+                smallest = right;
+            }
+            if (smallest == cur) {
+                break;
+            }
+            int tmp = idx[cur];
+            idx[cur] = idx[smallest];
+            idx[smallest] = tmp;
+            cur = smallest;
+        }
+    }
+
+    /**
+     * Sorts {@code idx[0..len)} into a permutation of {@code 0..len-1} such that
+     * {@code keys[idx[i]]} is non-increasing (descending). Retained as the {@code n >= len} fallback for
+     * {@link #selectTopNDescending}.
      */
     private static void sortIndicesByKeysDescending(double[] keys, int[] idx, int len) {
         if (len < 2) {
@@ -730,17 +791,9 @@ public final class ErrorModel {
         /** 4-lane scratch for {@link ESVectorUtil#dotProductBulk(byte[], byte[], byte[], byte[], byte[], int, float[])} */
         final float[] bulkDistances;
 
-        // per-query-cluster and per-doc-cluster arrays.
-        // Although the target is N_QUERY_CLUSTERS query clusters, k-means can return up to
-        // nDocClusters centroids (e.g. when targetSize=1). nDocClusters is itself bounded by
-        // nDocs <= maxNDocs, so maxNDocs is the safe upper bound for all cluster-count arrays.
-        final float[] queryLower;
-        final float[] queryUpper;
-        final int[] queryL1;
-        final byte[][] queryQuantized;
-        final double[] centroidDotCentroid;
-        /** per-query-loop: query · each doc-centroid, indexed [0..nDocClusters) */
-        final double[] queryDotCentroid;
+        // Cluster-count arrays (queryLower/Upper/L1/queryQuantized, centroidDotCentroid, queryDotCentroid) are
+        // indexed by cluster (nDocClusters / actualQueryClusters ~= nDocs / vectorsPerCluster).
+        // they are allocated per call in quantizedRepErrorStd at the exact cluster count, which is known once k-means has run.
 
         QuantizedErrorScratch(int maxNDocs, int dim, boolean cosine, boolean euclidean, boolean hasPreconditioner) {
             residualScratch = new float[dim];
@@ -762,14 +815,6 @@ public final class ErrorModel {
             bucketStart = new int[maxNDocs + 1];
             bucketCursor = new int[maxNDocs];
             bulkDistances = new float[4];
-
-            queryLower = new float[maxNDocs];
-            queryUpper = new float[maxNDocs];
-            queryL1 = new int[maxNDocs];
-            queryQuantized = new byte[maxNDocs][dim];
-
-            centroidDotCentroid = new double[maxNDocs];
-            queryDotCentroid = new double[maxNDocs];
         }
     }
 }

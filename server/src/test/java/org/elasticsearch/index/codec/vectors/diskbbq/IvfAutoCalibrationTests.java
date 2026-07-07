@@ -11,7 +11,10 @@ package org.elasticsearch.index.codec.vectors.diskbbq;
 
 import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.KnnVectorsReader;
+import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
+import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.DocValuesSkipIndexType;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
@@ -23,10 +26,13 @@ import org.apache.lucene.index.SegmentInfo;
 import org.apache.lucene.index.SegmentReader;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.search.AcceptDocs;
+import org.apache.lucene.search.KnnCollector;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.StringHelper;
+import org.apache.lucene.util.VectorUtil;
 import org.apache.lucene.util.Version;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
@@ -103,12 +109,14 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         StubCalibrationKnnVectorsReader segA = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
             2f,
-            false
+            false,
+            40
         );
         StubCalibrationKnnVectorsReader segB = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
             4f,
-            false
+            false,
+            60
         );
         try (Directory dir = newDirectory()) {
             MergeState mergeState = mergeState(
@@ -129,30 +137,34 @@ public class IvfAutoCalibrationTests extends ESTestCase {
     }
 
     /**
-     * Calibration must handle a merge that mixes segments with no deletes ({@code liveDocs == null}) and segments
-     * with deleted docs (non-null {@code liveDocs}). Metadata reuse weights each agreeing segment by its <em>live</em>
-     * doc count, so deleted docs (which won't survive the merge) don't skew the reused oversample.
+     * Metadata reuse must weight each agreeing segment by its <em>vector</em> count, not its doc count.
+     * This also exercises a merge that mixes a segment with no deletes ({@code liveDocs == null}) and one
+     * with deleted docs (non-null {@code liveDocs}) to confirm both are handled.
      */
-    public void testSelectFromMergeStateReusesAcrossSegmentsWithAndWithoutDeletes() throws IOException {
+    public void testSelectFromMergeStateWeightsByVectorCountNotDocCount() throws IOException {
         FieldInfo fieldInfo = vectorFieldInfo(ESNextRescoreOversampleTestFixture.FIELD_NAME);
         // Both segments agree on encoding, so metadata is reused rather than re-calibrated.
-        StubCalibrationKnnVectorsReader noDeletes = new StubCalibrationKnnVectorsReader(
+        int vectorsA = 8000;
+        int maxDocA = 8000; // dense: one vector per doc, no deletes
+        int vectorsB = 2000;
+        int maxDocB = 10000; // 8000 docs carry no vector for this field; some docs also deleted
+        StubCalibrationKnnVectorsReader denseSegment = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
             2f,
-            false
+            false,
+            vectorsA
         );
-        StubCalibrationKnnVectorsReader withDeletes = new StubCalibrationKnnVectorsReader(
+        StubCalibrationKnnVectorsReader sparseSegment = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
             4f,
-            false
+            false,
+            vectorsB
         );
-        int maxDocA = 8000; // no deletes -> 8000 live
-        int maxDocB = 4000; // 2000 deleted -> 2000 live
         try (Directory dir = newDirectory()) {
-            // segment A has no deletes (liveDocs == null); segment B has 2000 of 4000 docs deleted.
+            // segment A has no deletes (liveDocs == null); segment B has some of its docs deleted.
             MergeState mergeState = mergeStateWithMaxDocs(
-                new KnnVectorsReader[] { noDeletes, withDeletes },
-                new Bits[] { null, liveDocsWithDeletes(maxDocB, 2000) },
+                new KnnVectorsReader[] { denseSegment, sparseSegment },
+                new Bits[] { null, liveDocsWithDeletes(maxDocB, 3000) },
                 new int[] { maxDocA, maxDocB },
                 backgroundSegmentInfo(dir),
                 fieldInfo
@@ -163,8 +175,8 @@ public class IvfAutoCalibrationTests extends ESTestCase {
 
             assertThat(reused, notNullValue());
             assertThat(reused.quantEncoding(), is(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY));
-            // Weighted by LIVE docs per segment (deletes excluded): (2*8000 + 4*2000) / (8000 + 2000) = 2.4
-            // Weighting by maxDoc would instead give (2*8000 + 4*4000) / (8000 + 4000) = 2.667.
+            // Weighted by VECTOR count: (2*8000 + 4*2000) / (8000 + 2000) = 2.4
+            // Weighting by DOC count would instead give (2*8000 + 4*10000) / (8000 + 10000) = 3.11.
             assertThat(reused.rescoreOversample(), equalTo(2.4f));
             assertFalse(reused.usePrecondition());
         }
@@ -175,12 +187,14 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         StubCalibrationKnnVectorsReader segA = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
             2f,
-            false
+            false,
+            50
         );
         StubCalibrationKnnVectorsReader segB = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC,
             2f,
-            false
+            false,
+            50
         );
         try (Directory dir = newDirectory()) {
             MergeState mergeState = mergeState(
@@ -243,6 +257,64 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         }
     }
 
+    /**
+     * Calibrates a merge whose input segments contain docs without a vector for the field and docs whose vectors
+     * are deleted, using real DiskBBQ segments. Metadata reuse must weight each segment by its per-segment vector
+     * count ({@code getFloatVectorValues().size()}).
+     */
+    public void testSelectFromMergeStateCountsVectorsIgnoringMissingAndDeleted() throws IOException {
+        float oversampleA = 2f;
+        float oversampleB = 4f;
+        try (Directory dir = newDirectory()) {
+            try (
+                DirectoryReader reader = ESNextRescoreOversampleTestFixture.buildTwoSegmentsWithSparseAndDeletedVectors(
+                    dir,
+                    DIM,
+                    100,
+                    50,
+                    30,
+                    100,
+                    oversampleA,
+                    oversampleB
+                )
+            ) {
+                assertEquals(2, reader.leaves().size());
+                FieldInfo fieldInfo = reader.leaves()
+                    .get(0)
+                    .reader()
+                    .getFieldInfos()
+                    .fieldInfo(ESNextRescoreOversampleTestFixture.FIELD_NAME);
+
+                KnnVectorsReader[] readers = new KnnVectorsReader[2];
+                Bits[] liveDocs = new Bits[2];
+                for (int i = 0; i < 2; i++) {
+                    LeafReader leaf = reader.leaves().get(i).reader();
+                    readers[i] = calibrationReader(leaf);
+                    Bits leafLiveDocs = leaf.getLiveDocs();
+                    liveDocs[i] = leafLiveDocs != null ? leafLiveDocs : liveDocs(leaf.maxDoc());
+                }
+
+                // The sparse+deleted segment is the only one carrying deletes; assert it really models the case.
+                int aIdx = reader.leaves().get(0).reader().getLiveDocs() != null ? 0 : 1;
+                LeafReader leafA = reader.leaves().get(aIdx).reader();
+                assertThat("segment A has docs without a vector", leafA.maxDoc(), equalTo(150));
+                assertThat("segment A has deleted vectors", leafA.numDeletedDocs(), equalTo(30));
+                // physical vector count ignores both the 50 docs without a vector and the 30 deletes.
+                assertThat(readers[aIdx].getFloatVectorValues(fieldInfo.name).size(), equalTo(100));
+                assertThat(readers[1 - aIdx].getFloatVectorValues(fieldInfo.name).size(), equalTo(100));
+
+                MergeState mergeState = mergeState(dir, readers, liveDocs, backgroundSegmentInfo(dir));
+
+                IvfAutoCalibration selector = new IvfAutoCalibration(VPC);
+                IvfSegmentConfig reused = selector.selectFromMergeState(fieldInfo, mergeState);
+
+                assertThat(reused, notNullValue());
+                assertThat(reused.quantEncoding(), is(ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY));
+                assertThat(reused.rescoreOversample(), equalTo(3.0f));
+            }
+        }
+    }
+
     public void testCalibrateOnHeapVectors() throws IOException {
         FloatVectorValues vectors = randomHeapVectors(between(500, 1500), DIM);
         IvfAutoCalibration selector = new IvfAutoCalibration(VPC);
@@ -270,12 +342,14 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         StubCalibrationKnnVectorsReader dominant = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
             2f,
-            false
+            false,
+            85
         );
         StubCalibrationKnnVectorsReader minority = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC,
             2f,
-            false
+            false,
+            15
         );
         try (Directory dir = newDirectory()) {
             MergeState mergeState = mergeState(
@@ -298,12 +372,14 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         StubCalibrationKnnVectorsReader segA = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
             2f,
-            false
+            false,
+            70
         );
         StubCalibrationKnnVectorsReader segB = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.FOUR_BIT_SYMMETRIC,
             2f,
-            false
+            false,
+            30
         );
         try (Directory dir = newDirectory()) {
             MergeState mergeState = mergeState(
@@ -323,12 +399,14 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         StubCalibrationKnnVectorsReader precondTrue = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
             2f,
-            true
+            true,
+            60
         );
         StubCalibrationKnnVectorsReader precondFalse = new StubCalibrationKnnVectorsReader(
             ESNextDiskBBQVectorsFormat.QuantEncoding.ONE_BIT_4BIT_QUERY,
             4f,
-            false
+            false,
+            40
         );
         try (Directory dir = newDirectory()) {
             MergeState mergeState = mergeState(
@@ -569,7 +647,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             }
 
             @Override
-            public org.apache.lucene.index.ByteVectorValues getByteVectorValues(String field) {
+            public ByteVectorValues getByteVectorValues(String field) {
                 return null;
             }
 
@@ -577,16 +655,16 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             public void search(
                 String field,
                 float[] target,
-                org.apache.lucene.search.KnnCollector knnCollector,
-                org.apache.lucene.search.AcceptDocs acceptDocs
+                KnnCollector knnCollector,
+                AcceptDocs acceptDocs
             ) {}
 
             @Override
             public void search(
                 String field,
                 byte[] target,
-                org.apache.lucene.search.KnnCollector knnCollector,
-                org.apache.lucene.search.AcceptDocs acceptDocs
+                KnnCollector knnCollector,
+                AcceptDocs acceptDocs
             ) {}
 
             @Override
@@ -686,7 +764,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         SegmentReader segmentReader = Lucene.tryUnwrapSegmentReader(leaf);
         assertNotNull(segmentReader);
         KnnVectorsReader kvr = segmentReader.getVectorReader();
-        if (kvr instanceof org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat.FieldsReader perField) {
+        if (kvr instanceof PerFieldKnnVectorsFormat.FieldsReader perField) {
             return perField.getFieldReader(ESNextRescoreOversampleTestFixture.FIELD_NAME);
         }
         return kvr;
@@ -781,7 +859,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             false,
             IndexOptions.NONE,
             DocValuesType.NONE,
-            org.apache.lucene.index.DocValuesSkipIndexType.NONE,
+            DocValuesSkipIndexType.NONE,
             -1,
             Map.of(),
             0,
@@ -803,7 +881,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             for (int d = 0; d < dim; d++) {
                 v[d] = rnd.nextFloat();
             }
-            org.apache.lucene.util.VectorUtil.l2normalize(v);
+            VectorUtil.l2normalize(v);
             vecs.add(v);
         }
         return KMeansFloatVectorValues.build(vecs, null, dim);
@@ -817,11 +895,18 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         private final ESNextDiskBBQVectorsFormat.QuantEncoding encoding;
         private final float oversample;
         private final boolean precondition;
+        private final FloatVectorValues vectors;
 
-        StubCalibrationKnnVectorsReader(ESNextDiskBBQVectorsFormat.QuantEncoding encoding, float oversample, boolean precondition) {
+        StubCalibrationKnnVectorsReader(
+            ESNextDiskBBQVectorsFormat.QuantEncoding encoding,
+            float oversample,
+            boolean precondition,
+            int numVectors
+        ) {
             this.encoding = encoding;
             this.oversample = oversample;
             this.precondition = precondition;
+            this.vectors = KMeansFloatVectorValues.build(java.util.Collections.nCopies(numVectors, new float[1]), null, 1);
         }
 
         @Override
@@ -843,12 +928,12 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         public void checkIntegrity() {}
 
         @Override
-        public org.apache.lucene.index.FloatVectorValues getFloatVectorValues(String field) {
-            throw new UnsupportedOperationException();
+        public FloatVectorValues getFloatVectorValues(String field) {
+            return vectors;
         }
 
         @Override
-        public org.apache.lucene.index.ByteVectorValues getByteVectorValues(String field) {
+        public ByteVectorValues getByteVectorValues(String field) {
             throw new UnsupportedOperationException();
         }
 
@@ -856,8 +941,8 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         public void search(
             String field,
             float[] target,
-            org.apache.lucene.search.KnnCollector knnCollector,
-            org.apache.lucene.search.AcceptDocs acceptDocs
+            KnnCollector knnCollector,
+            AcceptDocs acceptDocs
         ) {
             throw new UnsupportedOperationException();
         }
@@ -866,8 +951,8 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         public void search(
             String field,
             byte[] target,
-            org.apache.lucene.search.KnnCollector knnCollector,
-            org.apache.lucene.search.AcceptDocs acceptDocs
+            KnnCollector knnCollector,
+            AcceptDocs acceptDocs
         ) {
             throw new UnsupportedOperationException();
         }
