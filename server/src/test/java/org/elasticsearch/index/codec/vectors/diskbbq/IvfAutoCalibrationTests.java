@@ -36,6 +36,7 @@ import org.apache.lucene.util.VectorUtil;
 import org.apache.lucene.util.Version;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
+import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.CalibrationUtils;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextRescoreOversampleTestFixture;
 import org.elasticsearch.test.ESTestCase;
 
@@ -81,6 +82,24 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             assertThat(config.quantEncoding(), is(CODEC_DEFAULT.quantEncoding()));
             assertThat(config.usePrecondition(), is(CODEC_DEFAULT.usePrecondition()));
             assertThat(config.rescoreOversample(), equalTo(CODEC_DEFAULT.rescoreOversample()));
+        }
+    }
+
+    public void testCountMergedVectorsExcludesDeletes() throws IOException {
+        FieldInfo fieldInfo = vectorFieldInfo(ESNextRescoreOversampleTestFixture.FIELD_NAME);
+        // segment A: 1000 vectors with the first 250 deleted -> 750 live. segment B: 1000 vectors, no deletes.
+        StubCalibrationKnnVectorsReader segA = new StubCalibrationKnnVectorsReader(QuantEncoding.ONE_BIT_4BIT_QUERY, 2f, false, 1000);
+        StubCalibrationKnnVectorsReader segB = new StubCalibrationKnnVectorsReader(QuantEncoding.ONE_BIT_4BIT_QUERY, 2f, false, 1000);
+        try (Directory dir = newDirectory()) {
+            MergeState mergeState = mergeStateWithMaxDocs(
+                new KnnVectorsReader[] { segA, segB },
+                new Bits[] { liveDocsWithDeletes(1000, 250), null },
+                new int[] { 1000, 1000 },
+                backgroundSegmentInfo(dir),
+                fieldInfo
+            );
+            // 750 live in A + 1000 in B = 1750; counting deleted vectors (physical size()) would give 2000.
+            assertEquals(1750, CalibrationUtils.countMergedVectors(fieldInfo, mergeState));
         }
     }
 
@@ -136,7 +155,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         int vectorsA = 8000;
         int maxDocA = 8000; // dense: one vector per doc, no deletes
         int vectorsB = 2000;
-        int maxDocB = 10000; // 8000 docs carry no vector for this field; some docs also deleted
+        int maxDocB = 10000; // 8000 docs carry no vector for this field (no deletes here)
         StubCalibrationKnnVectorsReader denseSegment = new StubCalibrationKnnVectorsReader(
             QuantEncoding.ONE_BIT_4BIT_QUERY,
             2f,
@@ -151,10 +170,11 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         );
 
         try (Directory dir = newDirectory()) {
-            // segment A has no deletes (liveDocs == null); segment B has some of its docs deleted.
+            // segment A has no deletes (liveDocs == null -> size() fast path); segment B also has no deletes but a
+            // non-null all-live liveDocs, exercising the iteration path where every vector survives.
             MergeState mergeState = mergeStateWithMaxDocs(
                 new KnnVectorsReader[] { denseSegment, sparseSegment },
-                new Bits[] { null, liveDocsWithDeletes(maxDocB, 3000) },
+                new Bits[] { null, liveDocs(maxDocB) },
                 new int[] { maxDocA, maxDocB },
                 backgroundSegmentInfo(dir),
                 fieldInfo
@@ -168,6 +188,48 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             // Weighted by VECTOR count: (2*8000 + 4*2000) / (8000 + 2000) = 2.4
             // Weighting by DOC count would instead give (2*8000 + 4*10000) / (8000 + 10000) = 3.11.
             assertThat(reused.rescoreOversample(), equalTo(2.4f));
+            assertFalse(reused.usePrecondition());
+        }
+    }
+
+    public void testSelectFromMergeStateExcludesDeletedVectors() throws IOException {
+        FieldInfo fieldInfo = vectorFieldInfo(ESNextRescoreOversampleTestFixture.FIELD_NAME);
+        // both segments agree on encoding, so metadata is reused rather than re-calibrated.
+        int vectorsA = 1000;
+        int deletedA = 400; // liveDocsWithDeletes clears the first 400 doc ids -> 600 of A's 1000 vectors survive
+        int vectorsB = 1000; // no deletes
+        StubCalibrationKnnVectorsReader deletedSegment = new StubCalibrationKnnVectorsReader(
+            QuantEncoding.ONE_BIT_4BIT_QUERY,
+            2f,
+            false,
+            vectorsA
+        );
+        StubCalibrationKnnVectorsReader liveSegment = new StubCalibrationKnnVectorsReader(
+            QuantEncoding.ONE_BIT_4BIT_QUERY,
+            5f,
+            false,
+            vectorsB
+        );
+
+        try (Directory dir = newDirectory()) {
+            MergeState mergeState = mergeStateWithMaxDocs(
+                new KnnVectorsReader[] { deletedSegment, liveSegment },
+                new Bits[] { liveDocsWithDeletes(vectorsA, deletedA), null },
+                new int[] { vectorsA, vectorsB },
+                backgroundSegmentInfo(dir),
+                fieldInfo
+            );
+
+            IvfAutoCalibration selector = new IvfAutoCalibration(VPC);
+            IvfSegmentConfig reused = selector.selectFromMergeState(fieldInfo, mergeState);
+
+            assertThat(reused, notNullValue());
+            assertThat(reused.quantEncoding(), is(QuantEncoding.ONE_BIT_4BIT_QUERY));
+            // deleted vectors are excluded: A contributes 600 live vectors. (2*600 + 5*1000)/1600 = 3.875.
+            // counting deleted vectors would instead give (2*1000 + 5*1000)/2000 = 3.5.
+            int liveA = vectorsA - deletedA;
+            float expected = (float) ((2.0 * liveA + 5.0 * vectorsB) / (liveA + vectorsB));
+            assertThat(reused.rescoreOversample(), equalTo(expected));
             assertFalse(reused.usePrecondition());
         }
     }
@@ -238,10 +300,10 @@ public class IvfAutoCalibrationTests extends ESTestCase {
 
     /**
      * Calibrates a merge whose input segments contain docs without a vector for the field and docs whose vectors
-     * are deleted, using real DiskBBQ segments. Metadata reuse must weight each segment by its per-segment vector
-     * count ({@code getFloatVectorValues().size()}).
+     * are deleted, using real DiskBBQ segments. Metadata reuse must weight each segment by its <em>live</em> vector
+     * count.
      */
-    public void testSelectFromMergeStateCountsVectorsIgnoringMissingAndDeleted() throws IOException {
+    public void testSelectFromMergeStateWeightsByLiveVectorsExcludingMissingAndDeleted() throws IOException {
         float oversampleA = 2f;
         float oversampleB = 4f;
         try (Directory dir = newDirectory()) {
@@ -278,7 +340,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
                 LeafReader leafA = reader.leaves().get(aIdx).reader();
                 assertThat("segment A has docs without a vector", leafA.maxDoc(), equalTo(150));
                 assertThat("segment A has deleted vectors", leafA.numDeletedDocs(), equalTo(30));
-                // physical vector count ignores both the 50 docs without a vector and the 30 deletes.
+                // size() is the physical vector count (100), the live count is 100 - 30 = 70.
                 assertThat(readers[aIdx].getFloatVectorValues(fieldInfo.name).size(), equalTo(100));
                 assertThat(readers[1 - aIdx].getFloatVectorValues(fieldInfo.name).size(), equalTo(100));
 
@@ -289,7 +351,12 @@ public class IvfAutoCalibrationTests extends ESTestCase {
 
                 assertThat(reused, notNullValue());
                 assertThat(reused.quantEncoding(), is(QuantEncoding.ONE_BIT_4BIT_QUERY));
-                assertThat(reused.rescoreOversample(), equalTo(3.0f));
+                // weighted by LIVE vectors: segment A contributes 70 (100 physical - 30 deleted), segment B 100.
+                // (2*70 + 4*100) / 170 = 3.176; weighting by physical size() would instead give (2*100+4*100)/200 = 3.0.
+                int liveA = 100 - 30;
+                int liveB = 100;
+                float expected = (float) ((oversampleA * (double) liveA + oversampleB * (double) liveB) / (liveA + liveB));
+                assertThat(reused.rescoreOversample(), equalTo(expected));
             }
         }
     }

@@ -10,6 +10,7 @@
 package org.elasticsearch.index.codec.vectors.diskbbq.calibrate;
 
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.util.IntroSelector;
 import org.apache.lucene.util.IntroSorter;
 import org.elasticsearch.core.WelfordVariance;
 import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
@@ -650,82 +651,44 @@ public final class ErrorModel {
 
     /**
      * Fills {@code idx[0..n)} with the indices of the {@code n} largest {@code keys[0..len)}, ordered by
-     * descending key — the same prefix {@link #sortIndicesByKeysDescending} would produce, but without fully
-     * sorting all {@code len} entries. Callers only consume the top {@code 5 * k} ranked docs per query, so this
-     * bounded selection replaces an O(len·log len) sort (the dominant calibration CPU cost) with an O(len·log n)
-     * heap pass plus a tiny O(n²) ordering of the survivors. For {@code n >= len} it degrades to a full sort.
-     * <p>
-     * The survivors are ordered descending so the caller accumulates error moments in the same order as before,
-     * keeping results identical to the previous full-sort implementation.
+     * descending key.
+     * Requires {@code idx.length >= len} and {@code 0 <= n <= len}. Survivors are ordered descending so the caller
+     * accumulates error moments largest-first.
      */
     static void selectTopNDescending(double[] keys, int[] idx, int len, int n) {
-        if (n >= len) {
-            sortIndicesByKeysDescending(keys, idx, len);
-            return;
-        }
-        // Min-heap (by key) of size n held in idx[0..n): idx[0] is the smallest of the n largest seen so far.
-        for (int i = 0; i < n; i++) {
-            idx[i] = i;
-        }
-        for (int p = (n >>> 1) - 1; p >= 0; p--) {
-            siftDownByKey(keys, idx, p, n);
-        }
-        for (int i = n; i < len; i++) {
-            if (keys[i] > keys[idx[0]]) {
-                idx[0] = i;
-                siftDownByKey(keys, idx, 0, n);
-            }
-        }
-        // Order the n survivors descending by key (insertion sort; n is small, typically 5*k).
-        for (int i = 1; i < n; i++) {
-            int v = idx[i];
-            double kv = keys[v];
-            int j = i - 1;
-            while (j >= 0 && keys[idx[j]] < kv) {
-                idx[j + 1] = idx[j];
-                j--;
-            }
-            idx[j + 1] = v;
-        }
-    }
-
-    private static void siftDownByKey(double[] keys, int[] idx, int root, int size) {
-        int cur = root;
-        while (true) {
-            int left = 2 * cur + 1;
-            int right = left + 1;
-            int smallest = cur;
-            if (left < size && keys[idx[left]] < keys[idx[smallest]]) {
-                smallest = left;
-            }
-            if (right < size && keys[idx[right]] < keys[idx[smallest]]) {
-                smallest = right;
-            }
-            if (smallest == cur) {
-                break;
-            }
-            int tmp = idx[cur];
-            idx[cur] = idx[smallest];
-            idx[smallest] = tmp;
-            cur = smallest;
-        }
-    }
-
-    /**
-     * Sorts {@code idx[0..len)} into a permutation of {@code 0..len-1} such that
-     * {@code keys[idx[i]]} is non-increasing (descending). Retained as the {@code n >= len} fallback for
-     * {@link #selectTopNDescending}.
-     */
-    private static void sortIndicesByKeysDescending(double[] keys, int[] idx, int len) {
-        if (len < 2) {
-            if (len == 1) {
-                idx[0] = 0;
-            }
-            return;
-        }
         for (int i = 0; i < len; i++) {
             idx[i] = i;
         }
+        int m = Math.min(n, len);
+        if (m <= 0) {
+            return;
+        }
+        if (m < len) {
+            // partition idx so idx[0..m) hold the m largest keys (unordered). select(from, to, k) leaves the k
+            // elements that sort first in [from, k); under this descending comparator those are the m largest.
+            new IntroSelector() {
+                double pivot;
+
+                @Override
+                protected void swap(int i, int j) {
+                    int tmp = idx[i];
+                    idx[i] = idx[j];
+                    idx[j] = tmp;
+                }
+
+                @Override
+                protected void setPivot(int i) {
+                    pivot = keys[idx[i]];
+                }
+
+                @Override
+                protected int comparePivot(int j) {
+                    // descending: pivot sorts before j when pivot's key is larger
+                    return Double.compare(keys[idx[j]], pivot);
+                }
+            }.select(0, len, m);
+        }
+        // order the m selected indices descending by key.
         new IntroSorter() {
             double pivot;
 
@@ -743,10 +706,10 @@ public final class ErrorModel {
 
             @Override
             protected int comparePivot(int j) {
-                // descending: pivot > keys[idx[j]] means pivot should come first
+                // descending: pivot sorts before j when pivot's key is larger
                 return Double.compare(keys[idx[j]], pivot);
             }
-        }.sort(0, len);
+        }.sort(0, m);
     }
 
     /**

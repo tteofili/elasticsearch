@@ -17,6 +17,8 @@ import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.util.Bits;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.CalibrationSource;
 import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.CalibrationUtils;
@@ -261,11 +263,7 @@ public class IvfAutoCalibration {
                 if (Float.isNaN(car.getOversampleFactor(fieldInfo)) || enc == null) {
                     continue;
                 }
-                // weight by vectors, not docs
-                KnnVectorValues values = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
-                    ? reader.getByteVectorValues(fieldInfo.name)
-                    : reader.getFloatVectorValues(fieldInfo.name);
-                long vectors = values == null ? 0 : values.size();
+                long vectors = liveVectorCount(reader, fieldInfo, mergeState.liveDocs[i]);
                 if (vectors == 0) {
                     continue;
                 }
@@ -322,6 +320,29 @@ public class IvfAutoCalibration {
         double oversampleWeightedSum;
         long preconditionTrueVectors;
         long preconditionFalseVectors;
+    }
+
+    /**
+     * number of live (non-deleted) vectors for {@code fieldInfo} in a single merge input.
+     */
+    private static long liveVectorCount(KnnVectorsReader reader, FieldInfo fieldInfo, Bits liveDocs) throws IOException {
+        KnnVectorValues values = fieldInfo.getVectorEncoding() == VectorEncoding.BYTE
+            ? reader.getByteVectorValues(fieldInfo.name)
+            : reader.getFloatVectorValues(fieldInfo.name);
+        if (values == null) {
+            return 0;
+        }
+        if (liveDocs == null) {
+            return values.size();
+        }
+        long live = 0;
+        KnnVectorValues.DocIndexIterator iterator = values.iterator();
+        for (int doc = iterator.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = iterator.nextDoc()) {
+            if (liveDocs.get(doc)) {
+                live++;
+            }
+        }
+        return live;
     }
 
     /**
