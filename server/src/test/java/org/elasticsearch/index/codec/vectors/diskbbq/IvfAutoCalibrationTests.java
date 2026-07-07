@@ -652,20 +652,10 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             }
 
             @Override
-            public void search(
-                String field,
-                float[] target,
-                KnnCollector knnCollector,
-                AcceptDocs acceptDocs
-            ) {}
+            public void search(String field, float[] target, KnnCollector knnCollector, AcceptDocs acceptDocs) {}
 
             @Override
-            public void search(
-                String field,
-                byte[] target,
-                KnnCollector knnCollector,
-                AcceptDocs acceptDocs
-            ) {}
+            public void search(String field, byte[] target, KnnCollector knnCollector, AcceptDocs acceptDocs) {}
 
             @Override
             public Map<String, Long> getOffHeapByteSize(FieldInfo info) {
@@ -938,22 +928,12 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         }
 
         @Override
-        public void search(
-            String field,
-            float[] target,
-            KnnCollector knnCollector,
-            AcceptDocs acceptDocs
-        ) {
+        public void search(String field, float[] target, KnnCollector knnCollector, AcceptDocs acceptDocs) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public void search(
-            String field,
-            byte[] target,
-            KnnCollector knnCollector,
-            AcceptDocs acceptDocs
-        ) {
+        public void search(String field, byte[] target, KnnCollector knnCollector, AcceptDocs acceptDocs) {
             throw new UnsupportedOperationException();
         }
 
