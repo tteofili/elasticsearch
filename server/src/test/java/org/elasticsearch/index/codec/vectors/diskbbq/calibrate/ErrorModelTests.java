@@ -238,7 +238,7 @@ public class ErrorModelTests extends ESTestCase {
 
     /**
      * Verifies that {@link ErrorModel#estimateMagnitudeFromRealResiduals} (fast single-shot path)
-     * approximates {@link ErrorModel#estimateMagnitudeModel} (full multi-sample sweep).
+     * approximates {@code ErrorModel#estimateMagnitudeModel} (full multi-sample sweep).
      * <p>
      * For a fair like-for-like comparison both models are given the <em>same slope</em> (from the
      * scaling fit). The fast model is anchored at {@link ErrorModel#REAL_RESIDUAL_SAMPLE}, which is
@@ -250,7 +250,6 @@ public class ErrorModelTests extends ESTestCase {
     public void testEstimateMagnitudeFromRealResidualsApproximatesMagnitudeModel() throws IOException {
         int dim = 1024;
         int numQueries = 64;
-        // ≥ max(SAMPLE_SIZES_MAGNITUDE) = 4096 and ≥ SAMPLE_SIZES_SCALING[1] = 5120 for a real scaling slope
         int corpusSize = 6_000;
         float[][] rows = randomNormalizedRows(numQueries + corpusSize, dim, 43L);
         FloatVectorValues fvv = KMeansFloatVectorValues.build(List.of(rows), null, dim);
@@ -282,13 +281,12 @@ public class ErrorModelTests extends ESTestCase {
             4,
             2,
             nDocsPerCluster,
-            ErrorModel.REAL_RESIDUAL_SAMPLE, // anchor at the measurement sample size for correct semantics
+            // anchor at the measurement sample size for correct semantics
             state
         );
 
         // FULL path: beta1 is always fixed from the scaling fit (plug-in OLS)
         assertEquals("full model must use the shared slope", sharedInvDim, fullModel.params().beta1(), 0.0);
-        // FAST path (corpus ≥ REAL_RESIDUAL_SAMPLE_2): beta1 is fitted from two real measurements
         assertTrue("fast model beta1 must be finite", Double.isFinite(fastModel.params().beta1()));
 
         // At the anchor sample size the fast model is anchored; both should agree within the OLS safety margin
@@ -310,7 +308,7 @@ public class ErrorModelTests extends ESTestCase {
         );
 
         // At the largest magnitude sample size the slope extrapolation governs; check agreement there too
-        int largerSample = 4096; // SAMPLE_SIZES_MAGNITUDE[2]
+        int largerSample = 4096;
         double fastAtLarger = fastModel.errorStd(nDocsPerCluster, largerSample);
         double fullAtLarger = fullModel.errorStd(nDocsPerCluster, largerSample);
         assertThat("fast estimate at larger sample must be positive", fastAtLarger, greaterThan(0.0));
@@ -354,9 +352,8 @@ public class ErrorModelTests extends ESTestCase {
     /**
      * Regression guard for the size-extrapolation fix. The real-residual error-std model must depend on
      * corpus size: evaluating it at a larger corpus changes the prediction according to the model's own
-     * fitted slope. With a large enough corpus ({@code ≥ REAL_RESIDUAL_SAMPLE_2}) the model fits both
-     * intercept and slope from two actual measurements, so the ratio at a 10× larger sample size must
-     * equal {@code (1/10)^modelSlope} exactly (self-consistency of the 2-point OLS).
+     * fitted slope. With a large enough corpus the model fits both intercept and slope from two actual
+     * measurements, so the ratio at a 10× larger sample size must equal {@code (1/10)^modelSlope} exactly.
      */
     public void testRealResidualErrorScalesWithCorpusSizeViaInvDim() throws IOException {
         int dim = 1024;
@@ -377,18 +374,9 @@ public class ErrorModelTests extends ESTestCase {
         double invDim = ManifoldModel.estimateManifoldParameters(source)[1];
 
         ErrorModel.RealResidualState state = ErrorModel.newRealResidualState(source);
-        QuantizationErrorStdModel model = ErrorModel.estimateMagnitudeFromRealResiduals(
-            invDim,
-            source,
-            false,
-            4,
-            2,
-            128,
-            fvv.size(),
-            state
-        );
+        QuantizationErrorStdModel model = ErrorModel.estimateMagnitudeFromRealResiduals(invDim, source, false, 4, 2, 128, state);
 
-        // Use the model's own fitted slope (beta1) — with corpus ≥ REAL_RESIDUAL_SAMPLE_2 this comes
+        // Use the model's own fitted slope (beta1) — with corpus ≥ REAL_RESIDUAL_SAMPLE this comes
         // from a 2-point real-data fit rather than the manifold invDim proxy
         double modelSlope = model.params().beta1();
         assumeTrue("need a non-zero model slope to exercise extrapolation", Math.abs(modelSlope) > 1e-4);
@@ -398,7 +386,7 @@ public class ErrorModelTests extends ESTestCase {
         double atTenX = model.errorStd(128, sample * 10);
         assertThat(atSample, greaterThan(0.0));
         double ratio = atTenX / atSample;
-        // Self-consistency: the ratio must match the model's slope exactly (zero OLS residuals in 2-point fit)
+        // Self-consistency: the ratio must match the model's slope exactly
         assertEquals("errorStd must scale as (sample/N)^modelSlope", Math.pow(0.1, modelSlope), ratio, 1e-3);
         assertTrue("estimate must depend on corpus size (slope must not cancel)", Math.abs(ratio - 1.0) > 1e-3);
     }
@@ -419,8 +407,7 @@ public class ErrorModelTests extends ESTestCase {
         );
         double invDim = ManifoldModel.estimateManifoldParameters(source)[1];
         ErrorModel.RealResidualState state = ErrorModel.newRealResidualState(source);
-        return ErrorModel.estimateMagnitudeFromRealResiduals(invDim, source, false, 4, 2, 128, fvv.size(), state)
-            .errorStd(128, corpus.length);
+        return ErrorModel.estimateMagnitudeFromRealResiduals(invDim, source, false, 4, 2, 128, state).errorStd(128, corpus.length);
     }
 
     private static int[] range(int start, int count) {

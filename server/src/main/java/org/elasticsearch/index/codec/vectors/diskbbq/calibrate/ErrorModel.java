@@ -541,7 +541,6 @@ public final class ErrorModel {
         int qbits,
         int dbits,
         int nDocsPerCluster,
-        int numVectors,
         RealResidualState state
     ) throws IOException {
         float[][] warmDoc = state.shared == null ? null : state.shared.docCentroids();

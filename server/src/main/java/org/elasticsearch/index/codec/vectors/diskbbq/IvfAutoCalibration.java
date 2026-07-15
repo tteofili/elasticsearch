@@ -175,12 +175,7 @@ public class IvfAutoCalibration {
      * path, so calibration semantics never depend on the merge kind.
      */
     public IvfSegmentConfig resolve(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig codecDefault) throws IOException {
-        long tResolve = System.nanoTime(); // BENCHMARK INSTRUMENTATION (revert before merging)
-        try {
-            return resolveTimed(fieldInfo, mergeState, codecDefault);
-        } finally {
-            logger.info("[calib-total] resolve={}ms", (System.nanoTime() - tResolve) / 1_000_000);
-        }
+        return resolveTimed(fieldInfo, mergeState, codecDefault);
     }
 
     private IvfSegmentConfig resolveTimed(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig codecDefault) throws IOException {
@@ -416,13 +411,6 @@ public class IvfAutoCalibration {
                 b.bestRecall()
             );
         }
-        // BENCHMARK INSTRUMENTATION (revert before merging): greppable one-line summary of the calibration decision.
-        logger.info(
-            "[calib-selected] encoding={} oversample={} precondition={}",
-            outcome.config().quantEncoding(),
-            outcome.config().rescoreOversample(),
-            outcome.config().usePrecondition()
-        );
         return outcome.config();
     }
 
@@ -516,7 +504,6 @@ public class IvfAutoCalibration {
                     candidate.qbits(),
                     candidate.dbits(),
                     vectorsPerCluster,
-                    numVectors,
                     state
                 );
                 errorModelCache.put(key, errorModel);
