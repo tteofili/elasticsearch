@@ -175,6 +175,15 @@ public class IvfAutoCalibration {
      * path, so calibration semantics never depend on the merge kind.
      */
     public IvfSegmentConfig resolve(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig codecDefault) throws IOException {
+        long tResolve = System.nanoTime(); // BENCHMARK INSTRUMENTATION (revert before merging)
+        try {
+            return resolveTimed(fieldInfo, mergeState, codecDefault);
+        } finally {
+            logger.info("[calib-total] resolve={}ms", (System.nanoTime() - tResolve) / 1_000_000);
+        }
+    }
+
+    private IvfSegmentConfig resolveTimed(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig codecDefault) throws IOException {
         Objects.requireNonNull(mergeState, "mergeState");
         Objects.requireNonNull(codecDefault, "codecDefault");
         VectorSimilarityFunction similarityFunction = fieldInfo.getVectorSimilarityFunction();
@@ -407,6 +416,13 @@ public class IvfAutoCalibration {
                 b.bestRecall()
             );
         }
+        // BENCHMARK INSTRUMENTATION (revert before merging): greppable one-line summary of the calibration decision.
+        logger.info(
+            "[calib-selected] encoding={} oversample={} precondition={}",
+            outcome.config().quantEncoding(),
+            outcome.config().rescoreOversample(),
+            outcome.config().usePrecondition()
+        );
         return outcome.config();
     }
 
@@ -474,12 +490,11 @@ public class IvfAutoCalibration {
 
     /**
      * Sweeps (encoding, rerank) candidates using <em>real</em> corpus residuals: a single k-means clustering
-     * of a {@link ErrorModel#REAL_RESIDUAL_SAMPLE}-vector sample provides the actual per-cluster residuals,
-     * whose OSQ error is measured directly (slope {@code beta1 = invDim} from the manifold). This matches the
-     * full path's error magnitude at a fraction of its cost — the clustering is computed once and reused as a
-     * warm start across candidates, and the expensive multi-sample scaling fit is skipped. It replaces the
-     * synthetic-Gaussian path, whose isotropic residuals over-estimated OSQ error ~3-4x and drove needless
-     * escalation to high-bit symmetric encodings.
+     * of a {@code ErrorModel#REAL_RESIDUAL_SAMPLE}-vector sample provides the actual per-cluster residuals,
+     * whose OSQ error is measured directly. Instead of re-clustering at multiple corpus sizes to learn how
+     * the residual error shrinks as the corpus grows (the full path's multi-sample scaling fit), the manifold
+     * slope {@code invDim} is used as a plug-in to extrapolate that single measurement from the sample size to
+     * the real corpus size (see {@link ErrorModel#estimateMagnitudeFromRealResiduals}).
      */
     private SweepOutcome sweepQuantizationCandidatesRealResiduals(
         VectorSimilarityFunction similarityFunction,
@@ -506,7 +521,9 @@ public class IvfAutoCalibration {
                 );
                 errorModelCache.put(key, errorModel);
             }
-            return errorModel.errorStd(vectorsPerCluster, numVectors);
+            // cap evaluation at the measured sample size to avoid extrapolating beyond its fitted range
+            int effectiveN = Math.min(numVectors, state.ndocs());
+            return errorModel.errorStd(vectorsPerCluster, effectiveN);
         });
     }
 

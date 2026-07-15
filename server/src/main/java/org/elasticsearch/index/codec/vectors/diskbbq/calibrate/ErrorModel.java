@@ -514,6 +514,10 @@ public final class ErrorModel {
                 source.preconditioner() != null
             );
         }
+
+        public int ndocs() {
+            return nDocs;
+        }
     }
 
     /** Creates the shared state for a real-residual magnitude sweep over {@code source}. */
@@ -523,13 +527,12 @@ public final class ErrorModel {
 
     /**
      * Estimates the quantization error-std model for {@code (qbits, dbits)} from <em>real</em> corpus
-     * residuals: clusters a {@link #REAL_RESIDUAL_SAMPLE}-vector sample once (reused as warm start across
-     * candidates via {@code state}) and measures OSQ error with the same machinery as the full path
-     * ({@link #quantizedRepErrorStdWithCentroids}). Unlike the synthetic-Gaussian path, these are the
-     * data's actual per-cluster residuals, so the measured error matches the full path — the synthetic
-     * isotropic-Gaussian residuals over-estimate OSQ error by ~3-4x because real embedding residuals are
-     * anisotropic, which made the synthetic path escalate to needlessly high-bit symmetric encodings. The
-     * slope {@code beta1 = invDim} is taken from the manifold; only the intercept {@code beta0} is fit here.
+     * residuals. The clustering warm start is reused across candidates via {@code state} so k-means is
+     * not recomputed per encoding.
+     * <p>
+     * Measures OSQ error once at {@link #REAL_RESIDUAL_SAMPLE} and anchors the intercept at that sample
+     * size. The manifold slope {@code invDim} is used as the scaling exponent, so evaluating at the real corpus size {@code N}
+     * extrapolates as {@code errorStd = measuredStd × (REAL_RESIDUAL_SAMPLE / N)^invDim}.
      */
     public static QuantizationErrorStdModel estimateMagnitudeFromRealResiduals(
         double invDim,
@@ -558,7 +561,9 @@ public final class ErrorModel {
         if (state.shared == null) {
             state.shared = r;
         }
-        double beta0 = Math.log(Math.max(r.std(), 1e-38)) - invDim * (Math.log(nDocsPerCluster) - Math.log(numVectors));
+        // single measurement anchored at state.nDocs (not numVectors),
+        // so evaluating at N gives measuredStd × (state.nDocs / N)^invDim
+        double beta0 = Math.log(Math.max(r.std(), 1e-38)) - invDim * (Math.log(nDocsPerCluster) - Math.log(state.nDocs));
         return new QuantizationErrorStdModel(new Regression.OLSResult(beta0, invDim, 0, 0, 0, 0));
     }
 
