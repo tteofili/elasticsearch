@@ -297,12 +297,12 @@ public class ErrorModelTests extends ESTestCase {
         assertThat("full estimate at anchor must be positive", fullAtAnchor, greaterThan(0.0));
         double ratioAtAnchor = fastAtAnchor / fullAtAnchor;
         assertThat(
-            "fast/full ratio at anchor must be < 3 (fast=" + fastAtAnchor + " full=" + fullAtAnchor + ")",
+            "fast/full ratio at anchor must be < 1.15 (fast=" + fastAtAnchor + " full=" + fullAtAnchor + ")",
             ratioAtAnchor,
             lessThan(1.15)
         );
         assertThat(
-            "fast/full ratio at anchor must be > 1/3 (fast=" + fastAtAnchor + " full=" + fullAtAnchor + ")",
+            "fast/full ratio at anchor must be > 0.85 (fast=" + fastAtAnchor + " full=" + fullAtAnchor + ")",
             ratioAtAnchor,
             greaterThan(0.85)
         );

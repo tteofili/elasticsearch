@@ -175,10 +175,6 @@ public class IvfAutoCalibration {
      * path, so calibration semantics never depend on the merge kind.
      */
     public IvfSegmentConfig resolve(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig codecDefault) throws IOException {
-        return resolveTimed(fieldInfo, mergeState, codecDefault);
-    }
-
-    private IvfSegmentConfig resolveTimed(FieldInfo fieldInfo, MergeState mergeState, IvfSegmentConfig codecDefault) throws IOException {
         Objects.requireNonNull(mergeState, "mergeState");
         Objects.requireNonNull(codecDefault, "codecDefault");
         VectorSimilarityFunction similarityFunction = fieldInfo.getVectorSimilarityFunction();

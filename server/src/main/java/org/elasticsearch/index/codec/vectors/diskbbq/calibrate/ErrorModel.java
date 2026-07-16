@@ -367,13 +367,32 @@ public final class ErrorModel {
             }
         }
 
-        Regression.OLSResult params = state.fit();
-        if (params == Regression.OLSResult.ZERO) {
+        Regression.OLSResult rawParams = state.fit();
+        if (rawParams == Regression.OLSResult.ZERO) {
             return new ErrorScalingFit(
                 new QuantizationErrorStdModel(Regression.OLSResult.ZERO),
                 warmStartDocCentroids,
                 warmStartQueryCentroids
             );
+        }
+
+        // Clamp to 0 so the error model degenerates to a constant (no corpus-size extrapolation) rather than
+        // producing unbounded estimates.
+        // This can happen when the k-means warm-start introduces non-monotone error steps
+        // over the narrow x-range of the sweep (~1.3 log-units for typical nDocsPerCluster).
+        Regression.OLSResult params;
+        if (rawParams.beta1() < 0) {
+            logger.debug(
+                () -> format(
+                    "Error scaling fit produced negative slope [%.4f] (R²=[%.4f]); "
+                        + "clamping to 0 (constant error model, no corpus-size extrapolation).",
+                    rawParams.beta1(),
+                    state.r2(rawParams)
+                )
+            );
+            params = new Regression.OLSResult(rawParams.beta0(), 0.0, 0, 0, 0, rawParams.sigmaSq());
+        } else {
+            params = rawParams;
         }
 
         double scalingSeconds = (System.nanoTime() - scalingStartNanos) / 1_000_000_000.0;
