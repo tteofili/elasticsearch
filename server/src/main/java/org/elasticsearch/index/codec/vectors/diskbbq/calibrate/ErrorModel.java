@@ -560,9 +560,11 @@ public final class ErrorModel {
         if (state.shared == null) {
             state.shared = r;
         }
+        // 1/d is negative for similarities like cosine, so use -invDim
+        double invDimEffective = ManifoldModel.isDotLike(source.similarityFunction()) ? -invDim : invDim;
         // single measurement anchored at state.nDocs (not numVectors),
         // so evaluating at N gives measuredStd × (state.nDocs / N)^invDim
-        double beta0 = Math.log(Math.max(r.std(), 1e-38)) - invDim * (Math.log(nDocsPerCluster) - Math.log(state.nDocs));
+        double beta0 = Math.log(Math.max(r.std(), 1e-38)) - invDimEffective * (Math.log(nDocsPerCluster) - Math.log(state.nDocs));
         return new QuantizationErrorStdModel(new Regression.OLSResult(beta0, invDim, 0, 0, 0, 0));
     }
 
