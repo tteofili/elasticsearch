@@ -34,8 +34,6 @@ import static org.elasticsearch.simdvec.ES940OSQVectorsScorer.BULK_SIZE;
  */
 public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
 
-    private final float[][] w;
-    private final float[][] ashCentroids;
     private final float[] query;
     private final IndexInput parentsSlice;
     private final float[] globalCentroid;
@@ -85,9 +83,9 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
     private final org.apache.lucene.index.VectorSimilarityFunction similarityFunction;
 
     public AshPostingsVisitor(
-        float[][] w,
         float[][] wT,
-        float[][] ashCentroids,
+        int nDims,
+        int nAshClusters,
         float[] query,
         IndexInput parentsSlice,
         float[] globalCentroid,
@@ -97,21 +95,18 @@ public class AshPostingsVisitor implements IVFVectorsReader.PostingVisitor {
         int bitsPerDim,
         boolean useD2Q4Scoring
     ) {
-        this.w = w;
-        this.ashCentroids = ashCentroids;
         this.query = query;
         this.parentsSlice = parentsSlice;
         this.globalCentroid = globalCentroid;
         this.fieldInfo = fieldInfo;
         this.indexInput = indexInput;
         this.acceptDocs = acceptDocs;
-        this.nDims = w[0].length;
+        this.nDims = nDims;
         this.bitsPerDim = bitsPerDim;
         this.packedCodeBytes = AsymmetricHashingScorer.packedByteLength(nDims, bitsPerDim);
         this.similarityFunction = fieldInfo.getVectorSimilarityFunction();
 
         // Pre-allocate per-ASH-cluster arrays
-        int nAshClusters = ashCentroids != null ? ashCentroids.length : 0;
         this.queryTransformed = new float[nDims];
         this.queryDotCentroidByCluster = new float[nAshClusters];
         this.clusterTransformsReady = false;

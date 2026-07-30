@@ -61,9 +61,6 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
     implements
         VectorPreconditioner {
 
-    // Cache ASH projection matrices per field (read once from disk, reused across queries)
-    private final java.util.HashMap<Integer, AshProjectionMatrix> ashMatrixCache = new java.util.HashMap<>();
-
     public ESNextDiskBBQVectorsReader(SegmentReadState state, GenericFlatVectorReaders.LoadFlatVectorsReader getFormatReader)
         throws IOException {
         super(
@@ -338,13 +335,10 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
     }
 
     /**
-     * Reads the ASH projection matrix for the given field. Returns null if not an ASH field.
+     * Reads the ASH projection matrix for the given field from disk. Returns null if not an ASH field.
+     * The matrix is not cached; callers should use only the data they need and let it be GC'd.
      */
     public AshProjectionMatrix getAshProjectionMatrix(FieldInfo fieldInfo) throws IOException {
-        AshProjectionMatrix cached = ashMatrixCache.get(fieldInfo.number);
-        if (cached != null) {
-            return cached;
-        }
         final NextFieldEntry fieldEntry = fields.get(fieldInfo.number);
         if (fieldEntry == null || fieldEntry.quantEncoding().isAsymmetricHashing() == false) {
             return null;
@@ -354,10 +348,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         if (preconditionerLength > 0) {
             IndexInput slice = ivfCentroids.slice("ash-projection", preconditionerOffset, preconditionerLength);
             slice.seek(0);
-            AshProjectionMatrix matrix = AshProjectionMatrix.read(slice);
-            matrix.wT(); // eagerly compute transpose so it's ready for all queries
-            ashMatrixCache.put(fieldInfo.number, matrix);
-            return matrix;
+            return AshProjectionMatrix.read(slice);
         }
         return null;
     }
@@ -777,10 +768,11 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                     (long) numParents * fieldInfo.getVectorDimension() * Float.BYTES
                 );
             }
+            float[][] ashCentroids = ashMatrix.ashCentroids();
             return new AshPostingsVisitor(
-                ashMatrix.w(),
                 ashMatrix.wT(),
-                ashMatrix.ashCentroids(),
+                ashMatrix.nDims(),
+                ashCentroids != null ? ashCentroids.length : 0,
                 target,
                 parentsSlice,
                 entry.globalCentroid(),
