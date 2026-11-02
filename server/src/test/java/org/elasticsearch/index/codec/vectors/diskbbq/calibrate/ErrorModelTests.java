@@ -31,6 +31,12 @@ import static org.hamcrest.Matchers.lessThan;
 
 public class ErrorModelTests extends ESTestCase {
 
+    private static final CalibrationQuantizer OSQ = OsqCalibrationQuantizer.INSTANCE;
+
+    private static CalibrationQuantizer.Candidate osq(int qbits, int dbits) {
+        return OsqCalibrationQuantizer.candidate(qbits, dbits);
+    }
+
     public void testPackedByteDotProductMatchesIntegerDot() {
         byte[] a = { 1, 2, 3 };
         byte[] b = { 4, 5, 6 };
@@ -134,7 +140,7 @@ public class ErrorModelTests extends ESTestCase {
     public void testEstimateQuantizationErrorStdModelReturnsFiniteModel() throws IOException {
         CalibrationFixture fixture = newCalibrationFixture(8);
         CalibrationSource source = fixture.toSource(randomFrom(VectorSimilarityFunction.values()), 10);
-        QuantizationErrorStdModel model = ErrorModel.estimateErrorScalingFit(source, 128).scalingModel();
+        QuantizationErrorStdModel model = ErrorModel.estimateErrorScalingFit(source, 128, OSQ).scalingModel();
         assertTrue(Double.isFinite(model.params().beta0()));
         assertTrue(Double.isFinite(model.params().beta1()));
         assertThat(model.errorStd(128, 5000), greaterThan(0.0));
@@ -143,18 +149,164 @@ public class ErrorModelTests extends ESTestCase {
     public void testEstimateMagnitudeModelReturnsFiniteModel() throws IOException {
         CalibrationFixture fixture = newCalibrationFixture(8);
         CalibrationSource source = fixture.toSource(randomFrom(VectorSimilarityFunction.values()), 10);
-        ErrorScalingFit scalingFit = ErrorModel.estimateErrorScalingFit(source, 128);
-        QuantizationErrorStdModel magnitudeModel = ErrorModel.estimateMagnitudeModel(scalingFit, source, true, 4, 2, 128);
+        ErrorScalingFit scalingFit = ErrorModel.estimateErrorScalingFit(source, 128, OSQ);
+        QuantizationErrorStdModel magnitudeModel = ErrorModel.estimateMagnitudeModel(scalingFit, source, true, OSQ, osq(4, 2), 128);
         assertTrue(Double.isFinite(magnitudeModel.params().beta0()));
         assertTrue(Double.isFinite(magnitudeModel.params().beta1()));
         assertThat(magnitudeModel.errorStd(128, 4096), greaterThan(0.0));
     }
 
+    private static final int[][] GOLDEN_BITS = { { 4, 1 }, { 4, 2 }, { 1, 1 } };
+    private static final VectorSimilarityFunction[] GOLDEN_SIMS = {
+        VectorSimilarityFunction.EUCLIDEAN,
+        VectorSimilarityFunction.DOT_PRODUCT };
+
+    /**
+     * Pins the error std of the single-shot real-residual path (the production path) on a deterministic fixture,
+     * for every (sim, qbits/dbits, precondition) combination, so that refactors of the quantization-error
+     * measurement can be shown to be behavior-preserving. The path reproduces to ~1e-9 relative between runs, so
+     * a 1e-4 relative tolerance flags any real change without flaking on floating point noise.
+     */
+    public void testRealResidualErrorStdGolden() throws IOException {
+        // order: sim-major, then GOLDEN_BITS, then precondition false/true
+        double[] expected = {
+            0.018495744606987486,
+            0.01799316503653508,
+            0.008731058536285703,
+            0.00926224936732455,
+            0.027589082784386484,
+            0.030653704156278133,
+            0.009247872795140446,
+            0.008996581570063805,
+            0.004365531518075472,
+            0.004631125320808059,
+            0.013794544942394103,
+            0.015326848562323496 };
+        int idx = 0;
+        for (VectorSimilarityFunction sim : GOLDEN_SIMS) {
+            CalibrationSource source = goldenSource(sim);
+            for (int[] bits : GOLDEN_BITS) {
+                for (boolean precondition : new boolean[] { false, true }) {
+                    ErrorModel.RealResidualState state = new ErrorModel.RealResidualState(source, OSQ);
+                    QuantizationErrorStdModel real = ErrorModel.estimateMagnitudeFromRealResiduals(
+                        0.4,
+                        source,
+                        precondition,
+                        OSQ,
+                        osq(bits[0], bits[1]),
+                        128,
+                        state
+                    );
+                    double want = expected[idx++];
+                    assertEquals(
+                        sim + " q" + bits[0] + "d" + bits[1] + " pre=" + precondition,
+                        want,
+                        real.errorStd(128, 4096),
+                        1e-4 * want
+                    );
+                }
+            }
+        }
+    }
+
+    /**
+     * Pins the error std of the multi-sample scaling-fit path (the FULL calibration reference path). Unlike the
+     * real-residual path this one varies slightly from run to run (observed up to ~3% in the fitted error std),
+     * so it is compared with a relative tolerance: tight enough to catch a wrong error model, loose enough not
+     * to flake.
+     */
+    public void testScalingFitErrorStdGolden() throws IOException {
+        // order: sim-major, then GOLDEN_BITS, then precondition false/true
+        double[] expected = {
+            0.019088237273468006,
+            0.018612867746887893,
+            0.009828951166318288,
+            0.009653192253041606,
+            0.02642565344970211,
+            0.028415185643569835,
+            0.009338515530825717,
+            0.009319284485869255,
+            0.005116548891920331,
+            0.004840500669273999,
+            0.01312108444741085,
+            0.014049165257031447 };
+        int idx = 0;
+        for (VectorSimilarityFunction sim : GOLDEN_SIMS) {
+            CalibrationSource source = goldenSource(sim);
+            ErrorScalingFit scalingFit = ErrorModel.estimateErrorScalingFit(source, 128, OSQ);
+            for (int[] bits : GOLDEN_BITS) {
+                for (boolean precondition : new boolean[] { false, true }) {
+                    QuantizationErrorStdModel magnitude = ErrorModel.estimateMagnitudeModel(
+                        scalingFit,
+                        source,
+                        precondition,
+                        OSQ,
+                        osq(bits[0], bits[1]),
+                        128
+                    );
+                    double want = expected[idx++];
+                    assertEquals(
+                        sim + " q" + bits[0] + "d" + bits[1] + " pre=" + precondition,
+                        want,
+                        magnitude.errorStd(128, 4096),
+                        0.1 * want
+                    );
+                }
+            }
+        }
+    }
+
+    /**
+     * Fixed-seed noisy clustered corpus, large enough for the scaling fit to see several sample sizes, with a
+     * preconditioner so both the preconditioned and plain paths are exercised.
+     */
+    private static CalibrationSource goldenSource(VectorSimilarityFunction sim) throws IOException {
+        int dim = 32;
+        int numQueries = 32;
+        int numCorpus = 16_000;
+        Random rnd = new Random(1234L);
+        float[][] centroids = new float[24][dim];
+        for (float[] c : centroids) {
+            for (int d = 0; d < dim; d++) {
+                c[d] = (float) rnd.nextGaussian();
+            }
+        }
+        float[][] rows = new float[numQueries + numCorpus][dim];
+        for (int i = 0; i < rows.length; i++) {
+            for (int d = 0; d < dim; d++) {
+                rows[i][d] = centroids[i % centroids.length][d] + 0.3f * (float) rnd.nextGaussian();
+            }
+            l2normalize(rows[i]);
+        }
+        FloatVectorValues fvv = KMeansFloatVectorValues.build(List.of(rows), null, dim);
+        int[] queryOrdinals = new int[numQueries];
+        int[] corpusOrdinals = new int[numCorpus];
+        for (int i = 0; i < numQueries; i++) {
+            queryOrdinals[i] = i;
+        }
+        for (int i = 0; i < numCorpus; i++) {
+            corpusOrdinals[i] = numQueries + i;
+        }
+        return new CalibrationSource(
+            sim,
+            dim,
+            fvv,
+            queryOrdinals,
+            dim,
+            false,
+            false,
+            Preconditioner.createPreconditioner(dim, 32),
+            corpusOrdinals,
+            10,
+            fvv.size()
+        );
+    }
+
     public void testEstimateMagnitudeModelReusesScalingSlope() throws IOException {
         CalibrationFixture fixture = newCalibrationFixture(8);
         CalibrationSource source = fixture.toSource(randomFrom(VectorSimilarityFunction.values()), 10);
-        ErrorScalingFit scalingFit = ErrorModel.estimateErrorScalingFit(source, 128);
-        QuantizationErrorStdModel magnitudeModel = ErrorModel.estimateMagnitudeModel(scalingFit, source, true, 4, 2, 128);
+        ErrorScalingFit scalingFit = ErrorModel.estimateErrorScalingFit(source, 128, OSQ);
+        QuantizationErrorStdModel magnitudeModel = ErrorModel.estimateMagnitudeModel(scalingFit, source, true, OSQ, osq(4, 2), 128);
         assertEquals(scalingFit.scalingModel().params().beta1(), magnitudeModel.params().beta1(), 0.0);
     }
 
@@ -179,7 +331,7 @@ public class ErrorModelTests extends ESTestCase {
         Regression.OLSResult scalingParams = new Regression.OLSResult(-2.5, 0.35, 0.01, 0.001, 0.0, 0.01);
         ErrorScalingFit scalingFit = ErrorScalingFit.fromScalingModel(new QuantizationErrorStdModel(scalingParams));
 
-        QuantizationErrorStdModel magnitudeModel = ErrorModel.estimateMagnitudeModel(scalingFit, source, false, 4, 2, 128);
+        QuantizationErrorStdModel magnitudeModel = ErrorModel.estimateMagnitudeModel(scalingFit, source, false, OSQ, osq(4, 2), 128);
         assertEquals(scalingParams.beta0(), magnitudeModel.params().beta0(), 0.0);
         assertEquals(scalingParams.beta1(), magnitudeModel.params().beta1(), 0.0);
     }
@@ -192,15 +344,15 @@ public class ErrorModelTests extends ESTestCase {
         float[][] queryWarmStart = null;
 
         // Shared scratch sized to the larger of the two sample sizes
-        ErrorModel.QuantizedErrorScratch scratch = new ErrorModel.QuantizedErrorScratch(3072, 8, false, true, false);
+        CalibrationQuantizer.Scratch scratch = new OsqCalibrationQuantizer.OsqScratch(3072, 8, false, true, false);
 
         ErrorModel.QuantizedErrorComputeResult first = ErrorModel.quantizedRepErrorStdWithCentroids(
             source,
             true,
             2048,
             128,
-            4,
-            1,
+            OSQ,
+            osq(4, 1),
             kmeans,
             docWarmStart,
             queryWarmStart,
@@ -211,8 +363,8 @@ public class ErrorModelTests extends ESTestCase {
             true,
             3072,
             128,
-            4,
-            1,
+            OSQ,
+            osq(4, 1),
             kmeans,
             first.docCentroids(),
             first.queryCentroids(),
@@ -232,8 +384,8 @@ public class ErrorModelTests extends ESTestCase {
     public void testMagnitudeFitReusesScalingFitClusteringState() throws IOException {
         CalibrationFixture fixture = newCalibrationFixture(8);
         CalibrationSource source = fixture.toSource(randomFrom(VectorSimilarityFunction.values()), 10);
-        ErrorScalingFit scalingFit = ErrorModel.estimateErrorScalingFit(source, 128);
-        QuantizationErrorStdModel magnitudeModel = ErrorModel.estimateMagnitudeModel(scalingFit, source, true, 4, 2, 128);
+        ErrorScalingFit scalingFit = ErrorModel.estimateErrorScalingFit(source, 128, OSQ);
+        QuantizationErrorStdModel magnitudeModel = ErrorModel.estimateMagnitudeModel(scalingFit, source, true, OSQ, osq(4, 2), 128);
         assertTrue(Double.isFinite(magnitudeModel.params().beta0()));
         assertThat(magnitudeModel.errorStd(128, 4096), greaterThan(0.0));
     }
@@ -271,18 +423,18 @@ public class ErrorModelTests extends ESTestCase {
         int nDocsPerCluster = 128;
 
         // Full path: sweeps [2048, 3072, 4096] and fits a plug-in OLS intercept with the scaling slope
-        ErrorScalingFit scalingFit = ErrorModel.estimateErrorScalingFit(source, nDocsPerCluster);
-        QuantizationErrorStdModel fullModel = ErrorModel.estimateMagnitudeModel(scalingFit, source, false, 4, 2, nDocsPerCluster);
+        ErrorScalingFit scalingFit = ErrorModel.estimateErrorScalingFit(source, nDocsPerCluster, OSQ);
+        QuantizationErrorStdModel fullModel = ErrorModel.estimateMagnitudeModel(scalingFit, source, false, OSQ, osq(4, 2), nDocsPerCluster);
 
         // Fast path: single measurement; use the same slope for a direct comparison of the intercept
         double sharedInvDim = scalingFit.scalingModel().params().beta1();
-        ErrorModel.RealResidualState state = new ErrorModel.RealResidualState(source);
+        ErrorModel.RealResidualState state = new ErrorModel.RealResidualState(source, OSQ);
         QuantizationErrorStdModel fastModel = ErrorModel.estimateMagnitudeFromRealResiduals(
             sharedInvDim,
             source,
             false,
-            4,
-            2,
+            OSQ,
+            osq(4, 2),
             nDocsPerCluster,
             // anchor at the measurement sample size for correct semantics
             state
@@ -377,8 +529,8 @@ public class ErrorModelTests extends ESTestCase {
         );
         double invDim = ManifoldModel.estimateManifoldParameters(source).invDim();
 
-        ErrorModel.RealResidualState state = new ErrorModel.RealResidualState(source);
-        QuantizationErrorStdModel model = ErrorModel.estimateMagnitudeFromRealResiduals(invDim, source, false, 4, 2, 128, state);
+        ErrorModel.RealResidualState state = new ErrorModel.RealResidualState(source, OSQ);
+        QuantizationErrorStdModel model = ErrorModel.estimateMagnitudeFromRealResiduals(invDim, source, false, OSQ, osq(4, 2), 128, state);
 
         // Use the model's own fitted slope (beta1) — with corpus ≥ REAL_RESIDUAL_SAMPLE this comes
         // from a 2-point real-data fit rather than the manifold invDim proxy
@@ -424,15 +576,15 @@ public class ErrorModelTests extends ESTestCase {
         );
 
         HierarchicalKMeans<float[]> kmeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, dim);
-        ErrorModel.QuantizedErrorScratch scratch = new ErrorModel.QuantizedErrorScratch(corpusOrdinals.length, dim, false, false, true);
+        CalibrationQuantizer.Scratch scratch = new OsqCalibrationQuantizer.OsqScratch(corpusOrdinals.length, dim, false, false, true);
 
         ErrorModel.QuantizedErrorComputeResult withoutPrecondition = ErrorModel.quantizedRepErrorStdWithCentroids(
             source,
             false,
             corpusOrdinals.length,
             128,
-            4,
-            1,
+            OSQ,
+            osq(4, 1),
             kmeans,
             null,
             null,
@@ -443,8 +595,8 @@ public class ErrorModelTests extends ESTestCase {
             true,
             corpusOrdinals.length,
             128,
-            4,
-            1,
+            OSQ,
+            osq(4, 1),
             kmeans,
             null,
             null,
@@ -498,15 +650,15 @@ public class ErrorModelTests extends ESTestCase {
         );
 
         HierarchicalKMeans<float[]> kmeans = HierarchicalKMeans.ofSerial(CentroidOps.FLOAT, dim);
-        ErrorModel.QuantizedErrorScratch scratch = new ErrorModel.QuantizedErrorScratch(corpusOrdinals.length, dim, false, false, true);
+        CalibrationQuantizer.Scratch scratch = new OsqCalibrationQuantizer.OsqScratch(corpusOrdinals.length, dim, false, false, true);
 
         ErrorModel.QuantizedErrorComputeResult withoutPrecondition = ErrorModel.quantizedRepErrorStdWithCentroids(
             source,
             false,
             corpusOrdinals.length,
             128,
-            4,
-            1,
+            OSQ,
+            osq(4, 1),
             kmeans,
             null,
             null,
@@ -518,8 +670,8 @@ public class ErrorModelTests extends ESTestCase {
             true,
             corpusOrdinals.length,
             128,
-            4,
-            1,
+            OSQ,
+            osq(4, 1),
             kmeans,
             withoutPrecondition.docCentroids(),
             withoutPrecondition.queryCentroids(),
@@ -582,8 +734,9 @@ public class ErrorModelTests extends ESTestCase {
             fvv.size()
         );
         double invDim = ManifoldModel.estimateManifoldParameters(source).invDim();
-        ErrorModel.RealResidualState state = new ErrorModel.RealResidualState(source);
-        return ErrorModel.estimateMagnitudeFromRealResiduals(invDim, source, false, 4, 2, 128, state).errorStd(128, corpus.length);
+        ErrorModel.RealResidualState state = new ErrorModel.RealResidualState(source, OSQ);
+        return ErrorModel.estimateMagnitudeFromRealResiduals(invDim, source, false, OSQ, osq(4, 2), 128, state)
+            .errorStd(128, corpus.length);
     }
 
     private static int[] range(int start, int count) {
@@ -679,14 +832,30 @@ public class ErrorModelTests extends ESTestCase {
         );
 
         double invDim = ManifoldModel.estimateManifoldParameters(source).invDim();
-        ErrorModel.RealResidualState state = new ErrorModel.RealResidualState(source);
+        ErrorModel.RealResidualState state = new ErrorModel.RealResidualState(source, OSQ);
 
         // First sweep leg (false): primes state.shared with original-space doc/query centroids.
-        QuantizationErrorStdModel falseModel = ErrorModel.estimateMagnitudeFromRealResiduals(invDim, source, false, 4, 1, 128, state);
+        QuantizationErrorStdModel falseModel = ErrorModel.estimateMagnitudeFromRealResiduals(
+            invDim,
+            source,
+            false,
+            OSQ,
+            osq(4, 1),
+            128,
+            state
+        );
         // Second sweep leg (true): the fix ensures original-space warmQuery is NOT forwarded to
         // preconditioned-space query k-means. Without the fix the wrong-space warm start could
         // corrupt query centroid assignment and inflate the preconditioned error estimate.
-        QuantizationErrorStdModel trueModel = ErrorModel.estimateMagnitudeFromRealResiduals(invDim, source, true, 4, 1, 128, state);
+        QuantizationErrorStdModel trueModel = ErrorModel.estimateMagnitudeFromRealResiduals(
+            invDim,
+            source,
+            true,
+            OSQ,
+            osq(4, 1),
+            128,
+            state
+        );
 
         double falseStd = falseModel.errorStd(128, corpusOrdinals.length);
         double trueStd = trueModel.errorStd(128, corpusOrdinals.length);

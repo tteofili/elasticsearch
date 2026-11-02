@@ -28,6 +28,12 @@ import static org.hamcrest.Matchers.lessThan;
  */
 public class CalibrationModelsIntegrationTests extends ESTestCase {
 
+    private static final CalibrationQuantizer OSQ = OsqCalibrationQuantizer.INSTANCE;
+
+    private static CalibrationQuantizer.Candidate osq(int qbits, int dbits) {
+        return OsqCalibrationQuantizer.candidate(qbits, dbits);
+    }
+
     private static final int CALIBRATION_K = 10;
     private static final int VECTORS_PER_CLUSTER = 128;
     private static final double RERANK_DEPTH = 2.5;
@@ -157,7 +163,7 @@ public class CalibrationModelsIntegrationTests extends ESTestCase {
     }
 
     private static ErrorScalingFit estimateErrorScalingFit(CalibrationFixture fixture, VectorSimilarityFunction similarityFunction) {
-        return ErrorModel.estimateErrorScalingFit(toSource(fixture, similarityFunction), VECTORS_PER_CLUSTER);
+        return ErrorModel.estimateErrorScalingFit(toSource(fixture, similarityFunction), VECTORS_PER_CLUSTER, OSQ);
     }
 
     private static QuantizationErrorStdModel estimateErrorMagnitude(
@@ -171,8 +177,8 @@ public class CalibrationModelsIntegrationTests extends ESTestCase {
             scalingFit,
             toSource(fixture, similarityFunction),
             false,
-            qbits,
-            dbits,
+            OSQ,
+            osq(qbits, dbits),
             VECTORS_PER_CLUSTER
         );
     }

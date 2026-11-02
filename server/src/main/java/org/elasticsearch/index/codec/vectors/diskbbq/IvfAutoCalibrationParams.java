@@ -11,7 +11,7 @@ package org.elasticsearch.index.codec.vectors.diskbbq;
 
 import org.elasticsearch.core.Nullable;
 
-public final class IvfAutoCalibrationOsqParams {
+public final class IvfAutoCalibrationParams {
     /**
      * Default target recall for calibration sweeps.
      */
@@ -31,7 +31,7 @@ public final class IvfAutoCalibrationOsqParams {
     private final int k;
     private final int maxDocBits;
 
-    IvfAutoCalibrationOsqParams(@Nullable Double targetRecall, @Nullable Integer k, @Nullable Integer maxDocBits) {
+    IvfAutoCalibrationParams(@Nullable Double targetRecall, @Nullable Integer k, @Nullable Integer maxDocBits) {
         this.targetRecall = targetRecall == null ? DEFAULT_TARGET_RECALL : targetRecall;
         this.k = k == null ? DEFAULT_K : k;
         this.maxDocBits = maxDocBits == null ? UNCAPPED_MAX_DOC_BITS : maxDocBits;

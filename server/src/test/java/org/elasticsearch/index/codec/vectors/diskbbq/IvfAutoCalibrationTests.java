@@ -37,6 +37,7 @@ import org.apache.lucene.util.Version;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.CalibrationUtils;
+import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.OsqCalibrationQuantizer;
 import org.elasticsearch.index.codec.vectors.diskbbq.es95.ES950DiskBBQVectorsFormat;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextRescoreOversampleTestFixture;
 import org.elasticsearch.test.ESTestCase;
@@ -50,9 +51,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 
-import static org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibrationOsqParams.DEFAULT_K;
-import static org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibrationOsqParams.DEFAULT_TARGET_RECALL;
-import static org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibrationOsqParams.UNCAPPED_MAX_DOC_BITS;
+import static org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibrationParams.DEFAULT_K;
+import static org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibrationParams.DEFAULT_TARGET_RECALL;
+import static org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibrationParams.UNCAPPED_MAX_DOC_BITS;
 import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextRescoreOversampleTestFixture.CALIBRATION_CANDIDATE_ENCODINGS;
 import static org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextRescoreOversampleTestFixture.CALIBRATION_RERANK_OVERSAMPLES;
 import static org.hamcrest.Matchers.equalTo;
@@ -762,7 +763,7 @@ public class IvfAutoCalibrationTests extends ESTestCase {
             if (profile == IvfAutoCalibrationProfile.DISABLED) {
                 assertThrows(IllegalStateException.class, () -> IvfAutoCalibration.fromProfile(VPC, profile));
             } else {
-                IvfAutoCalibrationOsqParams params = profile.osqParams();
+                IvfAutoCalibrationParams params = profile.params();
                 IvfAutoCalibration calibration = IvfAutoCalibration.fromProfile(VPC, profile);
                 assertThat(profile.toString(), calibration.targetRecall(), equalTo(params.targetRecall()));
                 assertThat(profile.toString(), calibration.k(), equalTo(params.k()));
@@ -1035,7 +1036,10 @@ public class IvfAutoCalibrationTests extends ESTestCase {
      * tiers never interleave regardless of which rerank depth is chosen.
      */
     public void testCostOrderedSweepsOrdering() {
-        List<IvfAutoCalibration.CalibrationSweep> sweeps = IvfAutoCalibration.buildCostOrderedSweeps(UNCAPPED_MAX_DOC_BITS);
+        List<IvfAutoCalibration.CalibrationSweep> sweeps = IvfAutoCalibration.buildCostOrderedSweeps(
+            OsqCalibrationQuantizer.INSTANCE,
+            UNCAPPED_MAX_DOC_BITS
+        );
         double docBitsWeight = IvfAutoCalibration.docBitsWeight();
         double rerankCostWeight = IvfAutoCalibration.rerankCostWeight();
 
@@ -1047,8 +1051,9 @@ public class IvfAutoCalibrationTests extends ESTestCase {
         int prevQbits = 0;
 
         for (IvfAutoCalibration.CalibrationSweep sweep : sweeps) {
-            int dbits = sweep.candidate().dbits();
-            int qbits = sweep.candidate().qbits();
+            OsqCalibrationQuantizer.OsqCandidate candidate = (OsqCalibrationQuantizer.OsqCandidate) sweep.candidate();
+            int dbits = candidate.dbits();
+            int qbits = candidate.qbits();
             double rerankDepth = sweep.rerankDepth();
             double cost = docBitsWeight * dbits + rerankCostWeight * rerankDepth;
 

@@ -16,14 +16,14 @@ import java.util.Optional;
 
 public enum IvfAutoCalibrationProfile {
     DISABLED(null),
-    ISO_SIZING(new IvfAutoCalibrationOsqParams(null, null, 1)),
-    QUALITY(new IvfAutoCalibrationOsqParams(null, null, null));
+    ISO_SIZING(new IvfAutoCalibrationParams(null, null, 1)),
+    QUALITY(new IvfAutoCalibrationParams(null, null, null));
 
     @Nullable
-    private final IvfAutoCalibrationOsqParams osqParams;
+    private final IvfAutoCalibrationParams params;
 
-    IvfAutoCalibrationProfile(@Nullable IvfAutoCalibrationOsqParams osqParams) {
-        this.osqParams = osqParams;
+    IvfAutoCalibrationProfile(@Nullable IvfAutoCalibrationParams params) {
+        this.params = params;
     }
 
     /** Returns the profile whose {@link #toString()} equals {@code name}, or empty if there is none. */
@@ -36,11 +36,11 @@ public enum IvfAutoCalibrationProfile {
         return Optional.empty();
     }
 
-    public IvfAutoCalibrationOsqParams osqParams() {
-        if (osqParams == null) {
-            throw new IllegalStateException("No osq params for autocalibration profile [" + this + "]");
+    public IvfAutoCalibrationParams params() {
+        if (params == null) {
+            throw new IllegalStateException("No params for autocalibration profile [" + this + "]");
         }
-        return osqParams;
+        return params;
     }
 
     @Override
