@@ -69,6 +69,7 @@ public final class AsymmetricHashingQuantizer {
     private final long seed;
     private final AshSphericalScalarQuantizer quantizer;
     private final TaskExecutor executor;
+    private final int codebook;
 
     /**
      * Rows of the training sample gathered before they are folded into the second-moment matrix. The
@@ -124,6 +125,39 @@ public final class AsymmetricHashingQuantizer {
         long seed,
         TaskExecutor executor
     ) {
+        this(
+            projectedDimsFraction,
+            maxProjectedDims,
+            bitsPerDim,
+            method,
+            nTrainingIterations,
+            trainingFactor,
+            seed,
+            executor,
+            IvfSegmentConfig.AshConfig.CODEBOOK_GRID
+        );
+    }
+
+    /**
+     * As {@link #AsymmetricHashingQuantizer(float, int, int, Method, int, int, long, TaskExecutor)}, choosing the codebook
+     * that quantizes the projected vectors: {@link IvfSegmentConfig.AshConfig#CODEBOOK_GRID} (per-coordinate levels) or
+     * {@link IvfSegmentConfig.AshConfig#CODEBOOK_E8} (E8 blocks, see {@link E8Codebook}, with {@code bitsPerDim} stages).
+     */
+    public AsymmetricHashingQuantizer(
+        float projectedDimsFraction,
+        int maxProjectedDims,
+        int bitsPerDim,
+        Method method,
+        int nTrainingIterations,
+        int trainingFactor,
+        long seed,
+        TaskExecutor executor,
+        int codebook
+    ) {
+        if (codebook == IvfSegmentConfig.AshConfig.CODEBOOK_E8 && bitsPerDim != 1 && bitsPerDim != 2) {
+            throw new IllegalArgumentException("E8 codebook supports bitsPerDim 1 or 2, got: " + bitsPerDim);
+        }
+        this.codebook = codebook;
         if (projectedDimsFraction <= 0 || projectedDimsFraction > 1.0f) {
             throw new IllegalArgumentException("projectedDimsFraction must be in (0, 1]");
         }
@@ -462,6 +496,8 @@ public final class AsymmetricHashingQuantizer {
         /** The block projected into latent space, row-major (maxBlockSize x nDims). Rows are only proportional to centered @ W. */
         protected final float[] latent;
         private final float[][] codes;
+        /** E8 code bytes per vector, stage by stage; null for the grid codebook. */
+        private final byte[][] e8Codes;
         private final float[] normSqs;
         private final float[] vecCentroidDots;
         private final float[] scales;
@@ -476,6 +512,12 @@ public final class AsymmetricHashingQuantizer {
             this.maxBlockSize = maxBlockSize;
             this.latent = new float[maxBlockSize * nDims];
             this.codes = new float[maxBlockSize][nDims];
+            if (codebook == IvfSegmentConfig.AshConfig.CODEBOOK_E8) {
+                E8Codebook.validateDims(nDims);
+                this.e8Codes = new byte[maxBlockSize][E8Codebook.codeBytes(nDims, bitsPerDim)];
+            } else {
+                this.e8Codes = null;
+            }
             this.normSqs = new float[maxBlockSize];
             this.vecCentroidDots = new float[maxBlockSize];
             this.scales = new float[maxBlockSize];
@@ -525,7 +567,9 @@ public final class AsymmetricHashingQuantizer {
 
             for (int i = 0; i < size; i++) {
                 float[] code = codes[i];
-                float codeNorm = quantizer.quantizeExact(latent, i * nDims, code, 0, nDims);
+                float codeNorm = e8Codes != null
+                    ? E8Codebook.encode(latent, i * nDims, nDims, bitsPerDim, code, 0, e8Codes[i])
+                    : quantizer.quantizeExact(latent, i * nDims, code, 0, nDims);
                 float scale = codeNorm > 0 ? (float) Math.sqrt(normSqs[i]) / codeNorm : 0;
                 scales[i] = scale;
                 offsets[i] = computeOffset(vecCentroidDots[i], scale, code, precomputed);
@@ -539,6 +583,13 @@ public final class AsymmetricHashingQuantizer {
         public float[] code(int i) {
             assert i < size;
             return codes[i];
+        }
+
+        /** The E8 code bytes of the {@code i}-th vector, stage by stage; only for the E8 codebook. */
+        public byte[] e8Code(int i) {
+            assert i < size;
+            assert e8Codes != null : "not an E8 encoder";
+            return e8Codes[i];
         }
 
         public float scale(int i) {

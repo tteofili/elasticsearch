@@ -250,6 +250,9 @@ public class ES950DiskBBQVectorsFormat extends KnnVectorsFormat {
                 "flatVectorThreshold must be -1 (dynamic), 0 (disabled), or > 0, got: " + flatVectorThreshold
             );
         }
+        if (quantEncoding == QuantEncoding.E8_ROOTS) {
+            throw new IllegalArgumentException("the experimental E8 encoding is only available in the ESNext DiskBBQ format");
+        }
         this.vectorPerCluster = vectorPerCluster;
         this.centroidsPerParentCluster = centroidsPerParentCluster;
         this.quantEncoding = quantEncoding;

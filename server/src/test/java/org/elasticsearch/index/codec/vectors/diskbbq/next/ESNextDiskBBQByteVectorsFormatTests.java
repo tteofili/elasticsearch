@@ -74,7 +74,7 @@ public class ESNextDiskBBQByteVectorsFormatTests extends BaseByteKnnVectorsForma
     @Override
     protected Codec getCodec() {
         if (format == null) {
-            QuantEncoding encoding = QuantEncoding.values()[random().nextInt(QuantEncoding.values().length)];
+            QuantEncoding encoding = QuantEncoding.nonExperimentalValues()[random().nextInt(QuantEncoding.nonExperimentalValues().length)];
             if (rarely()) {
                 format = new ESNextDiskBBQVectorsFormat(
                     encoding,
@@ -201,7 +201,7 @@ public class ESNextDiskBBQByteVectorsFormatTests extends BaseByteKnnVectorsForma
      */
     public void testSlicedByteVectors() throws IOException {
         String sliceField = "_slice";
-        QuantEncoding encoding = QuantEncoding.values()[random().nextInt(QuantEncoding.values().length)];
+        QuantEncoding encoding = QuantEncoding.nonExperimentalValues()[random().nextInt(QuantEncoding.nonExperimentalValues().length)];
         int vectorPerCluster = random().nextInt(MIN_VECTORS_PER_CLUSTER, 2 * MIN_VECTORS_PER_CLUSTER);
         ESNextDiskBBQVectorsFormat slicedFormat = new ESNextDiskBBQVectorsFormat(
             encoding,

@@ -127,7 +127,20 @@ public class KnnIndexTester {
 
     enum QuantizationType {
         OSQ,
-        ASH;
+        ASH,
+        /** ASH with the E8 block codebook (experimental): quantize_bits 1 codes E8 roots, 2 the two-stage E8 code. */
+        E8,
+        /** DiskBBQ (ESNext OSQ format) with the E8 roots in place of the 1-bit OSQ code (experimental, QuantEncoding.E8_ROOTS). */
+        OSQ_E8;
+
+        /** Whether this type uses the ASH format (projection plus per-vector scale and offset). */
+        boolean isAshFormat() {
+            return this == ASH || this == E8;
+        }
+
+        int ashCodebook() {
+            return this == E8 ? IvfSegmentConfig.AshConfig.CODEBOOK_E8 : IvfSegmentConfig.AshConfig.CODEBOOK_GRID;
+        }
 
         static QuantizationType fromString(String name) {
             if (name == null) {
@@ -135,8 +148,12 @@ public class KnnIndexTester {
             }
             return switch (name.toLowerCase(Locale.ROOT)) {
                 case "ash" -> ASH;
+                case "e8" -> E8;
                 case "osq" -> OSQ;
-                default -> throw new IllegalArgumentException("Unknown quantization_type: '" + name + "'. Known types: ash, osq");
+                case "osq_e8" -> OSQ_E8;
+                default -> throw new IllegalArgumentException(
+                    "Unknown quantization_type: '" + name + "'. Known types: ash, e8, osq, osq_e8"
+                );
             };
         }
     }
@@ -231,8 +248,14 @@ public class KnnIndexTester {
             case FLAT -> suffix.add("flat");
             case GPU_HNSW -> suffix.add("gpu_hnsw");
             case IVF -> {
-                boolean isAsh = QuantizationType.fromString(args.quantizationType()) == QuantizationType.ASH;
-                suffix.add(isAsh ? "ash" : "ivf");
+                QuantizationType quantizationType = QuantizationType.fromString(args.quantizationType());
+                boolean isAsh = quantizationType.isAshFormat();
+                suffix.add(
+                    quantizationType == QuantizationType.E8 ? "e8"
+                        : quantizationType == QuantizationType.OSQ_E8 ? "ivf_e8"
+                        : isAsh ? "ash"
+                        : "ivf"
+                );
                 suffix.add(Integer.toString(args.ivfClusterSize()));
                 if (isAsh) {
                     int bits = args.quantizeBits() != null ? args.quantizeBits() : 2;
@@ -286,7 +309,8 @@ public class KnnIndexTester {
 
         format = switch (args.indexType()) {
             case IVF -> {
-                boolean isAsh = QuantizationType.fromString(args.quantizationType()) == QuantizationType.ASH;
+                QuantizationType quantizationType = QuantizationType.fromString(args.quantizationType());
+                boolean isAsh = quantizationType.isAshFormat();
                 int flatVectorThreshold = args.flatVectorThreshold() >= 0 ? args.flatVectorThreshold() : -1;
                 int centroidsPerParentCluster = args.secondaryClusterSize() == -1
                     ? (isAsh
@@ -306,7 +330,7 @@ public class KnnIndexTester {
                         queryBits,
                         args.projectedDimsFraction(),
                         args.maxProjectedDims()
-                    );
+                    ).withCodebook(quantizationType.ashCodebook());
                     yield new ESNextDiskASHVectorsFormat(
                         ashConfig,
                         args.ivfClusterSize(),
@@ -323,7 +347,9 @@ public class KnnIndexTester {
                         false
                     );
                 } else {
-                    var encoding = resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
+                    var encoding = quantizationType == QuantizationType.OSQ_E8
+                        ? QuantEncoding.E8_ROOTS
+                        : resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
                     IvfMergeConfigResolver mergeConfigResolver = args.autoCalibrate()
                         ? IvfAutoCalibration.mergeConfigResolver(args.ivfClusterSize(), args.autoCalibrationProfile())
                         : IvfMergeConfigResolver.useCodecDefault();
@@ -879,14 +905,19 @@ public class KnnIndexTester {
     private static void checkQuantizeBits(TestConfiguration args) {
         switch (args.indexType()) {
             case IVF:
-                if (QuantizationType.fromString(args.quantizationType()) == QuantizationType.ASH) {
-                    // AshConfig.of validates bitsPerDim, queryBitsPerDim, and projectedDimsFraction
+                QuantizationType quantizationType = QuantizationType.fromString(args.quantizationType());
+                if (quantizationType.isAshFormat()) {
+                    // AshConfig.of validates bitsPerDim, queryBitsPerDim, and projectedDimsFraction; withCodebook the E8 bit widths
                     IvfSegmentConfig.AshConfig.of(
                         Objects.requireNonNullElse(args.quantizeBits(), IvfSegmentConfig.AshConfig.DEFAULT_BITS_PER_DIM),
                         Objects.requireNonNullElse(args.queryQuantizeBits(), IvfSegmentConfig.AshConfig.DEFAULT_QUERY_BITS_PER_DIM),
                         args.projectedDimsFraction(),
                         args.maxProjectedDims()
-                    );
+                    ).withCodebook(quantizationType.ashCodebook());
+                } else if (quantizationType == QuantizationType.OSQ_E8) {
+                    if (args.quantizeBits() != null && args.quantizeBits() != 1) {
+                        throw new IllegalArgumentException("osq_e8 codes one byte per 8 dims (1 bit/dim): quantize_bits must be 1");
+                    }
                 } else {
                     if (args.quantizeBits() == null) {
                         throw new IllegalArgumentException("IVF index type requires quantize_bits to be set");

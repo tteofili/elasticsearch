@@ -135,7 +135,8 @@ public class AshPostingsListWriter {
             ashConfig.trainingIterations(),
             effectiveTrainingFactor,
             42L,
-            quantizerExec
+            quantizerExec,
+            ashConfig.codebook()
         );
 
         int nDims = ashQuantizer.nDims(originalDim);
@@ -227,12 +228,16 @@ public class AshPostingsListWriter {
         final int bitsPerDim = ashConfig.bitsPerDim();
         final int packedCodeBytes = bitsPerDim * ((nDims + 7) >>> 3);
         final float centerOffset = ((1 << bitsPerDim) - 1) / 2.0f;
+        final boolean e8 = ashConfig.codebook() == IvfSegmentConfig.AshConfig.CODEBOOK_E8;
+        assert e8 == false || packedCodeBytes == E8Codebook.codeBytes(nDims, bitsPerDim)
+            : "E8 codes must take the same space as the grid codes";
         final int[] docIds = new int[maxPostingListSize];
         final int[] docDeltas = new int[maxPostingListSize];
         final int[] clusterOrds = new int[maxPostingListSize];
         // Pre-allocated bulk block buffers.
         // Codes are written contiguously, then corrections in SoA layout per field.
         final byte[] blockCodesBuf = new byte[BULK_SIZE * packedCodeBytes];
+        final byte[] blockCodesTransposed = e8 ? new byte[BULK_SIZE * packedCodeBytes] : null;
         final byte[] blockCorrectionsBuf = new byte[BULK_SIZE * AshPostingsVisitor.CORRECTION_BYTES];
         final boolean isEuclidean = similarityFunction == VectorSimilarityFunction.EUCLIDEAN;
         final float[] blockVecCentroidSqDists = new float[ENCODE_SIZE];
@@ -322,7 +327,7 @@ public class AshPostingsListWriter {
 
                     for (int j = 0; j < blockSize; j++) {
                         float[] code = encoder.code(encodeOffset + j);
-                        byte[] vectorPacked = ESVectorUtil.ashPack(code, bitsPerDim);
+                        byte[] vectorPacked = e8 ? encoder.e8Code(encodeOffset + j) : ESVectorUtil.ashPack(code, bitsPerDim);
                         System.arraycopy(vectorPacked, 0, blockCodesBuf, j * packedCodeBytes, packedCodeBytes);
                         int jOff = j * Float.BYTES;
                         BitUtil.VH_BE_INT.set(blockCorrectionsBuf, scaleBase + jOff, Float.floatToIntBits(encoder.scale(encodeOffset + j)));
@@ -332,9 +337,12 @@ public class AshPostingsListWriter {
                             Float.floatToIntBits(encoder.offset(encodeOffset + j))
                         );
                         // Compute docSum: sum of unsigned code values directly from the centered float codes
+                        // (unused by the E8 codebook, which is scored on the float path)
                         int docSum = 0;
-                        for (int d = 0; d < nDims; d++) {
-                            docSum += Math.round(code[d] + centerOffset);
+                        if (e8 == false) {
+                            for (int d = 0; d < nDims; d++) {
+                                docSum += Math.round(code[d] + centerOffset);
+                            }
                         }
                         BitUtil.VH_BE_INT.set(blockCorrectionsBuf, docSumBase + jOff, docSum);
                         // EUCLIDEAN: ⟨μ*,x⟩ and ‖x-μ*‖² from the original float vectors; 0 otherwise
@@ -354,8 +362,18 @@ public class AshPostingsListWriter {
                             BitUtil.VH_BE_INT.set(blockCorrectionsBuf, vcsdBase + jOff, 0);
                         }
                     }
-                    // Write packed codes, then all corrections in one call
-                    postingsOutput.writeBytes(blockCodesBuf, 0, blockSize * packedCodeBytes);
+                    // Write packed codes, then all corrections in one call. E8 codes are written transposed within the block
+                    // (byte v * blockSize + j is code byte v of vector j), the layout the E8 table-lookup kernels scan.
+                    if (e8) {
+                        for (int v = 0; v < packedCodeBytes; v++) {
+                            for (int j = 0; j < blockSize; j++) {
+                                blockCodesTransposed[v * blockSize + j] = blockCodesBuf[j * packedCodeBytes + v];
+                            }
+                        }
+                        postingsOutput.writeBytes(blockCodesTransposed, 0, blockSize * packedCodeBytes);
+                    } else {
+                        postingsOutput.writeBytes(blockCodesBuf, 0, blockSize * packedCodeBytes);
+                    }
                     postingsOutput.writeBytes(blockCorrectionsBuf, 0, blockSize * AshPostingsVisitor.CORRECTION_BYTES);
                     written += blockSize;
                     encodeOffset += blockSize;

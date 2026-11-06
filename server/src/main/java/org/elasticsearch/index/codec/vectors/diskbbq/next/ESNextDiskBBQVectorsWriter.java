@@ -65,6 +65,7 @@ import org.elasticsearch.index.codec.vectors.diskbbq.IvfFlushConfigSource;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfMergeConfigResolver;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfSegmentConfig;
 import org.elasticsearch.index.codec.vectors.diskbbq.OverspillAssignments;
+import org.elasticsearch.index.codec.vectors.diskbbq.E8ResidualQuantizer;
 import org.elasticsearch.index.codec.vectors.diskbbq.Preconditioner;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantEncoding;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantizedVectorValues;
@@ -240,7 +241,12 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         // write the posting lists
         final PackedLongValues.Builder offsets = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
         final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
-        DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(effectiveQuantEncoding.bits(), BULK_SIZE, postingsOutput, true, true);
+        DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.forEncoding(
+            effectiveQuantEncoding,
+            fieldInfo.getVectorDimension(),
+            BULK_SIZE,
+            postingsOutput
+        );
         final QuantizedVectorValues quantizedVectors;
         if (isByte) {
             quantizedVectors = new OnHeapQuantizedByteVectors(
@@ -353,6 +359,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         ) {
             quantizedVectorsTempName = quantizedVectorsTemp.getName();
             OptimizedScalarQuantizer quantizer = new OptimizedScalarQuantizer(vectorSimilarityFunction);
+            E8ResidualQuantizer e8Quantizer = new E8ResidualQuantizer(vectorSimilarityFunction);
             int[] quantized = new int[effectiveQuantEncoding.discretizedDimensions(fieldInfo.getVectorDimension())];
             byte[] binary = new byte[effectiveQuantEncoding.getDocPackedLength(fieldInfo.getVectorDimension())];
             float[] scratch = new float[fieldInfo.getVectorDimension()];
@@ -370,7 +377,15 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                 } else {
                     float[] vector = ((FloatVectorValues) vectorValues).vectorValue(i);
                     float[] centroid = centroidSupplier.centroid(c);
-                    result = quantizer.scalarQuantize(vector, scratch, quantized, effectiveQuantEncoding.bits(), centroid);
+                    result = E8ResidualQuantizer.quantize(
+                        effectiveQuantEncoding,
+                        quantizer,
+                        e8Quantizer,
+                        vector,
+                        scratch,
+                        quantized,
+                        centroid
+                    );
                 }
                 if (parentCentroid != null) {
                     float additionalCorrection = switch (vectorSimilarityFunction) {
@@ -382,7 +397,16 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                                 yield ESVectorUtil.squareDistance(((FloatVectorValues) vectorValues).vectorValue(i), parentCentroid);
                             }
                         }
-                        case DOT_PRODUCT, MAXIMUM_INNER_PRODUCT -> ESVectorUtil.dotProduct(scratch, parentCentroid);
+                        case DOT_PRODUCT, MAXIMUM_INNER_PRODUCT -> isByte
+                            ? ESVectorUtil.dotProduct(scratch, parentCentroid)
+                            : E8ResidualQuantizer.dotProductCorrection(
+                                effectiveQuantEncoding,
+                                result,
+                                quantized,
+                                scratch,
+                                centroidSupplier.centroid(c),
+                                parentCentroid
+                            );
                         default -> throw new AssertionError(vectorSimilarityFunction);
                     };
                     result = new OptimizedScalarQuantizer.QuantizationResult(
@@ -406,7 +430,15 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                     } else {
                         float[] vector = ((FloatVectorValues) vectorValues).vectorValue(i);
                         float[] overspillCentroid = centroidSupplier.centroid(s);
-                        result = quantizer.scalarQuantize(vector, scratch, quantized, effectiveQuantEncoding.bits(), overspillCentroid);
+                        result = E8ResidualQuantizer.quantize(
+                            effectiveQuantEncoding,
+                            quantizer,
+                            e8Quantizer,
+                            vector,
+                            scratch,
+                            quantized,
+                            overspillCentroid
+                        );
                     }
                     if (overspillParentCentroid != null) {
                         float additionalCorrection = switch (vectorSimilarityFunction) {
@@ -421,7 +453,16 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                                     );
                                 }
                             }
-                            case DOT_PRODUCT, MAXIMUM_INNER_PRODUCT -> ESVectorUtil.dotProduct(scratch, overspillParentCentroid);
+                            case DOT_PRODUCT, MAXIMUM_INNER_PRODUCT -> isByte
+                                ? ESVectorUtil.dotProduct(scratch, overspillParentCentroid)
+                                : E8ResidualQuantizer.dotProductCorrection(
+                                    effectiveQuantEncoding,
+                                    result,
+                                    quantized,
+                                    scratch,
+                                    centroidSupplier.centroid(s),
+                                    overspillParentCentroid
+                                );
                             default -> throw new AssertionError(vectorSimilarityFunction);
                         };
                         result = new OptimizedScalarQuantizer.QuantizationResult(
@@ -487,12 +528,11 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                 fieldInfo.getVectorDimension(),
                 vectorCentroidOffsets.build()
             );
-            DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(
-                effectiveQuantEncoding.bits(),
+            DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.forEncoding(
+                effectiveQuantEncoding,
+                fieldInfo.getVectorDimension(),
                 BULK_SIZE,
-                postingsOutput,
-                true,
-                true
+                postingsOutput
             );
             // write the posting lists
             final int[] docIdsScratch = new int[maxPostingListSize];
@@ -1221,6 +1261,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
     static class OnHeapQuantizedVectors implements QuantizedVectorValues {
         private final FloatVectorValues vectorValues;
         private final OptimizedScalarQuantizer quantizer;
+        private final E8ResidualQuantizer e8Quantizer;
         private final byte[] quantizedVector;
         private final int[] quantizedVectorScratch;
         private final float[] floatVectorScratch;
@@ -1243,6 +1284,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             this.similarityFunction = similarityFunction;
             this.encoding = encoding;
             this.quantizer = quantizer;
+            this.e8Quantizer = new E8ResidualQuantizer(similarityFunction);
             this.quantizedVector = new byte[encoding.getDocPackedLength(dimension)];
             this.floatVectorScratch = new float[dimension];
             this.quantizedVectorScratch = new int[encoding.discretizedDimensions(dimension)];
@@ -1271,12 +1313,27 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             currOrd++;
             int ord = ordTransformer.apply(currOrd);
             float[] vector = vectorValues.vectorValue(ord);
-            corrections = quantizer.scalarQuantize(vector, floatVectorScratch, quantizedVectorScratch, encoding.bits(), currentCentroid);
+            corrections = E8ResidualQuantizer.quantize(
+                encoding,
+                quantizer,
+                e8Quantizer,
+                vector,
+                floatVectorScratch,
+                quantizedVectorScratch,
+                currentCentroid
+            );
             // note, with a parent centroid, our correction needs to take it into account
             if (currentParentCentroid != null) {
                 float additionalCorrection = switch (similarityFunction) {
                     case EUCLIDEAN -> ESVectorUtil.squareDistance(vector, currentParentCentroid);
-                    case DOT_PRODUCT, MAXIMUM_INNER_PRODUCT -> ESVectorUtil.dotProduct(floatVectorScratch, currentParentCentroid);
+                    case DOT_PRODUCT, MAXIMUM_INNER_PRODUCT -> E8ResidualQuantizer.dotProductCorrection(
+                        encoding,
+                        corrections,
+                        quantizedVectorScratch,
+                        floatVectorScratch,
+                        currentCentroid,
+                        currentParentCentroid
+                    );
                     default -> throw new AssertionError(similarityFunction);
                 };
                 corrections = new OptimizedScalarQuantizer.QuantizationResult(
@@ -1328,6 +1385,9 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         ) {
             this.vectorValues = vectorValues;
             this.similarityFunction = similarityFunction;
+            if (encoding == QuantEncoding.E8_ROOTS) {
+                throw new IllegalArgumentException("the E8 encoding supports float vectors only");
+            }
             this.encoding = encoding;
             this.quantizer = quantizer;
             this.quantizedVector = new byte[encoding.getDocPackedLength(dimension)];

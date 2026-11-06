@@ -62,9 +62,73 @@ public record IvfSegmentConfig(
         int bitsPerDim,
         int queryBitsPerDim,
         int trainingIterations,
-        int trainingFactor
+        int trainingFactor,
+        int codebook
     ) implements QuantConfig {
         private static final Set<Integer> SUPPORTED_BITS_PER_DIM = Set.of(1, 2, 3, 4, 8);
+
+        /** Per-coordinate cosine-optimal grid: the ASH default. */
+        public static final int CODEBOOK_GRID = 0;
+        /**
+         * E8 block code (experimental): each 8-dimensional block of the projected vector is coded with the 240 minimal
+         * vectors of the E8 lattice, in {@code bitsPerDim} stages (1: roots, 2: two-stage roots). Same storage as the grid.
+         */
+        public static final int CODEBOOK_E8 = 1;
+
+        /** Bits of the stored bits-per-dimension value that hold the bit width; the codebook id sits above them. */
+        private static final int STORED_BITS_MASK = 0xF;
+        private static final int STORED_CODEBOOK_SHIFT = 4;
+
+        public AshConfig(
+            float projectedDimsFraction,
+            int maxProjectedDims,
+            int bitsPerDim,
+            int queryBitsPerDim,
+            int trainingIterations,
+            int trainingFactor
+        ) {
+            this(projectedDimsFraction, maxProjectedDims, bitsPerDim, queryBitsPerDim, trainingIterations, trainingFactor, CODEBOOK_GRID);
+        }
+
+        public AshConfig {
+            if (codebook != CODEBOOK_GRID && codebook != CODEBOOK_E8) {
+                throw new IllegalArgumentException("ASH codebook must be " + CODEBOOK_GRID + " or " + CODEBOOK_E8 + ", got: " + codebook);
+            }
+            if (codebook == CODEBOOK_E8 && bitsPerDim != 1 && bitsPerDim != 2) {
+                throw new IllegalArgumentException("ASH E8 codebook supports bitsPerDim 1 or 2, got: " + bitsPerDim);
+            }
+        }
+
+        /** Returns a copy of this configuration with the given codebook. */
+        public AshConfig withCodebook(int newCodebook) {
+            return new AshConfig(
+                projectedDimsFraction,
+                maxProjectedDims,
+                bitsPerDim,
+                queryBitsPerDim,
+                trainingIterations,
+                trainingFactor,
+                newCodebook
+            );
+        }
+
+        /**
+         * The value persisted in the segment metadata: the bit width, with the codebook id in the bits above it. For the
+         * grid codebook this is just the bit width, so segments written without the E8 option read back unchanged.
+         */
+        public int storedBitsPerDim() {
+            return bitsPerDim | (codebook << STORED_CODEBOOK_SHIFT);
+        }
+
+        /** The bit width encoded in a value written by {@link #storedBitsPerDim()}. */
+        public static int bitsFromStored(int stored) {
+            return stored & STORED_BITS_MASK;
+        }
+
+        /** The codebook encoded in a value written by {@link #storedBitsPerDim()}. */
+        public static int codebookFromStored(int stored) {
+            return stored >>> STORED_CODEBOOK_SHIFT;
+        }
 
         public static final float DEFAULT_PROJECTED_DIMS_FRACTION = 0.5f;
         public static final int DEFAULT_MAX_PROJECTED_DIMS = 1024;

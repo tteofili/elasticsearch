@@ -74,6 +74,18 @@ public abstract sealed class DiskBBQBulkWriter {
         };
     }
 
+    /**
+     * Creates the bulk writer for a {@link QuantEncoding}: the bit-size writers of {@link #fromBitSize}, or, for
+     * {@link QuantEncoding#E8_ROOTS}, a writer that stores each bulk's codes transposed (block-major), as the E8 scan
+     * kernels read them. Tails are block encoded (transposed with the tail's own size) and component sums are ints.
+     */
+    public static DiskBBQBulkWriter forEncoding(QuantEncoding encoding, int dimensions, int bulkSize, IndexOutput out) {
+        if (encoding == QuantEncoding.E8_ROOTS) {
+            return new E8TransposedDiskBBQBulkWriter(bulkSize, out, encoding.getDocPackedLength(dimensions));
+        }
+        return fromBitSize(encoding.bits(), bulkSize, out, true, true);
+    }
+
     private static non-sealed class SmallBitDiskBBQBulkWriter extends DiskBBQBulkWriter {
         protected final OptimizedScalarQuantizer.QuantizationResult[] corrections;
         private final boolean writeComponentSumAsInt;
@@ -271,6 +283,66 @@ public abstract sealed class DiskBBQBulkWriter {
                 tailCorrections[j] = qvv.getCorrections();
                 out.writeBytes(qv, qv.length);
                 j++;
+            }
+            writeCorrections(tailCorrections);
+        }
+    }
+
+    /**
+     * E8 block codes: same layout as {@link SmallBitEncodedDiskBBQBulkWriter} (codes, then the four correction arrays,
+     * component sums as ints), except that the codes of a bulk are written transposed: byte {@code b * n + j} is the code
+     * of the {@code j}-th of the bulk's {@code n} vectors for block {@code b}.
+     */
+    private static final class E8TransposedDiskBBQBulkWriter extends SmallBitDiskBBQBulkWriter {
+        private final int blocks;
+        private final byte[][] bulkCodes;
+        private final byte[] transposed;
+
+        private E8TransposedDiskBBQBulkWriter(int bulkSize, IndexOutput out, int blocks) {
+            super(bulkSize, out, true);
+            this.blocks = blocks;
+            this.bulkCodes = new byte[bulkSize][blocks];
+            this.transposed = new byte[bulkSize * blocks];
+        }
+
+        private void writeTransposed(int n) throws IOException {
+            for (int b = 0; b < blocks; b++) {
+                for (int j = 0; j < n; j++) {
+                    transposed[b * n + j] = bulkCodes[j][b];
+                }
+            }
+            out.writeBytes(transposed, 0, n * blocks);
+        }
+
+        @Override
+        public void writeVectors(QuantizedVectorValues qvv, CheckedIntConsumer<IOException> docsWriter) throws IOException {
+            int limit = qvv.count() - bulkSize + 1;
+            int i = 0;
+            for (; i < limit; i += bulkSize) {
+                if (docsWriter != null) {
+                    docsWriter.accept(i);
+                }
+                for (int j = 0; j < bulkSize; j++) {
+                    byte[] qv = qvv.next();
+                    assert qv.length == blocks;
+                    corrections[j] = qvv.getCorrections();
+                    System.arraycopy(qv, 0, bulkCodes[j], 0, blocks);
+                }
+                writeTransposed(bulkSize);
+                writeCorrections(corrections);
+            }
+            if (i < qvv.count() && docsWriter != null) {
+                docsWriter.accept(i);
+            }
+            int tail = qvv.count() - i;
+            OptimizedScalarQuantizer.QuantizationResult[] tailCorrections = new OptimizedScalarQuantizer.QuantizationResult[tail];
+            for (int j = 0; j < tail; j++) {
+                byte[] qv = qvv.next();
+                tailCorrections[j] = qvv.getCorrections();
+                System.arraycopy(qv, 0, bulkCodes[j], 0, blocks);
+            }
+            if (tail > 0) {
+                writeTransposed(tail);
             }
             writeCorrections(tailCorrections);
         }

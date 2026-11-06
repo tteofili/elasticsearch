@@ -1046,6 +1046,22 @@ public abstract class SimdVecLibrary {
         dotProductD4Q4BulkMasked_raw(dataset, query, documentBytes, pitch, mask, count, scores);
     }
 
+    // --- E8 lattice block codes (experimental) ---
+    //
+    // A bulk of `count` documents with `blocks` one-byte codes each, stored block-major (codes[b * count + j]), is
+    // looked up in a per-query int8 table of 128 entries per block; sums[j] receives the exact integer sum
+    // sum_b (sign ? -1 : 1) * table[b * 128 + pair]. See E8Lattice and vec_e8_1.cpp.
+
+    @Function("vec_e8_lookup_bulk")
+    @Critical(fallbackAdapter = Critical.UnsupportedFallback.class)
+    public abstract void e8LookupBulk(
+        @RawAddress @MatrixSegment(rowsParam = "blocks", colsParam = "count", elementBits = Byte.SIZE) MemorySegment codes,
+        @VectorSegment(countParam = "blocks", elementBits = 128 * Byte.SIZE) MemorySegment table,
+        int blocks,
+        int count,
+        @VectorSegment(countParam = "count", elementBits = Integer.SIZE) MemorySegment sums
+    );
+
     // --- Corrections (DiskBBQ) ---
     //
     // The corrections kernels read a caller-described layout rather than a plain vector, so they carry

@@ -19,6 +19,7 @@ import org.apache.lucene.util.VectorUtil;
 import org.elasticsearch.common.CheckedIntFunction;
 import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader;
+import org.elasticsearch.index.codec.vectors.diskbbq.IvfSegmentConfig;
 import org.elasticsearch.index.codec.vectors.diskbbq.PostingMetadata;
 import org.elasticsearch.index.codec.vectors.diskbbq.SlicedBlockRange;
 import org.elasticsearch.search.vectors.BulkKnnCollector;
@@ -208,12 +209,36 @@ public class AshPostingsVisitor<T> implements IVFVectorsReader.PostingVisitor {
         VectorSimilarityFunction similarityFunction,
         IndexInput indexInput,
         Bits acceptDocs,
-        int bitsPerDim,
+        int storedBitsPerDim,
         int queryBitsPerDim,
         CheckedIntFunction<float[], IOException> centroidReader
     ) throws IOException {
         // Precompute query projection: queryTransformed = W^T @ query
         float[] queryTransformed = matrix.projectQuery(query);
+
+        // The segment metadata stores the codebook in the bits above the bit width (see AshConfig#storedBitsPerDim)
+        int codebook = IvfSegmentConfig.AshConfig.codebookFromStored(storedBitsPerDim);
+        int bitsPerDim = IvfSegmentConfig.AshConfig.bitsFromStored(storedBitsPerDim);
+        if (codebook == IvfSegmentConfig.AshConfig.CODEBOOK_E8) {
+            // E8 blocks are scored by an int8 table lookup (native, Panama or scalar kernel, see E8VectorsScorer); the
+            // result is the raw inner product between the projected query and the code's reconstruction, so the
+            // visitor applies the float-path corrections
+            E8AshScorer.QueryTable qt = E8AshScorer.buildQueryTable(queryTransformed, matrix.nDims(), bitsPerDim);
+            byte[] table = qt.table();
+            AshScorer<byte[]> scorer = new E8AshScorer(indexInput, matrix.nDims(), bitsPerDim, qt.scale());
+            return new AshPostingsVisitor<>(
+                matrix.nDims(),
+                query,
+                similarityFunction,
+                scorer,
+                table,
+                indexInput,
+                acceptDocs,
+                bitsPerDim,
+                null,
+                centroidReader
+            );
+        }
 
         if (queryBitsPerDim > 0) {
             QuantizedQuery qq = quantizeQuery(queryTransformed, matrix.nDims(), queryBitsPerDim, bitsPerDim);

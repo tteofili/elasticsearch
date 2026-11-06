@@ -109,6 +109,41 @@ public enum QuantEncoding {
         public void packQuery(int[] quantized, byte[] destination) {
             ESVectorUtil.pack1BitValues(quantized, destination);
         }
+    },
+    /**
+     * Experimental: E8 lattice block code (see {@link org.elasticsearch.simdvec.E8Lattice}). Each block of eight residual
+     * dimensions is coded by the nearest of the 240 E8 roots, one byte per block, so a document takes the storage of a
+     * one-bit code. The "quantized" ints hold one root code per block; codes are stored transposed within each bulk.
+     * The query is not quantized but turned into an int8 lookup table of {@link org.elasticsearch.simdvec.E8Lattice#TABLE_STRIDE}
+     * entries per block, so {@link #getQueryPackedLength} is the table size and {@link #packQuery} is unsupported.
+     */
+    E8_ROOTS(6, (byte) 1, (byte) 8) {
+        @Override
+        public void pack(int[] quantized, byte[] destination) {
+            for (int i = 0; i < destination.length; i++) {
+                destination[i] = (byte) quantized[i];
+            }
+        }
+
+        @Override
+        public void packQuery(int[] quantized, byte[] destination) {
+            throw new UnsupportedOperationException("E8 queries are lookup tables, see E8Lattice#buildTable");
+        }
+
+        @Override
+        public int discretizedDimensions(int dimensions) {
+            return org.elasticsearch.simdvec.E8Lattice.blocks(dimensions) * org.elasticsearch.simdvec.E8Lattice.BLOCK;
+        }
+
+        @Override
+        public int getDocPackedLength(int dimensions) {
+            return org.elasticsearch.simdvec.E8Lattice.blocks(dimensions);
+        }
+
+        @Override
+        public int getQueryPackedLength(int dimensions) {
+            return org.elasticsearch.simdvec.E8Lattice.blocks(dimensions) * org.elasticsearch.simdvec.E8Lattice.TABLE_STRIDE;
+        }
     };
 
     private static void pack4BitValues(int[] quantized, byte[] destination) {
@@ -185,6 +220,11 @@ public enum QuantEncoding {
         // how many bytes do we need to store the quantized vector?
         int totalBits = discretized * queryBits;
         return (totalBits + 7) / 8;
+    }
+
+    /** The encodings available in every DiskBBQ format, i.e. all but the experimental {@link #E8_ROOTS}. */
+    public static QuantEncoding[] nonExperimentalValues() {
+        return java.util.Arrays.stream(values()).filter(e -> e != E8_ROOTS).toArray(QuantEncoding[]::new);
     }
 
     public static QuantEncoding fromId(int id) {

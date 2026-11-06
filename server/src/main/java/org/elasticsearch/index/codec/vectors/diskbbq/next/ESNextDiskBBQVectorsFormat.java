@@ -262,6 +262,9 @@ public class ESNextDiskBBQVectorsFormat extends KnnVectorsFormat {
                 "flatVectorThreshold must be -1 (dynamic), 0 (disabled), or > 0, got: " + flatVectorThreshold
             );
         }
+        if (quantEncoding == QuantEncoding.E8_ROOTS && elementType == DenseVectorFieldMapper.ElementType.BYTE) {
+            throw new IllegalArgumentException("the experimental E8 encoding supports float and bfloat16 vectors only");
+        }
         this.vectorPerCluster = vectorPerCluster;
         this.centroidsPerParentCluster = centroidsPerParentCluster;
         this.quantEncoding = quantEncoding;

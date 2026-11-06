@@ -103,7 +103,7 @@ public class ES950DiskBBQVectorsFormatTests extends ESBaseKnnVectorsFormatTestCa
     @Override
     protected Codec getCodec() {
         if (format == null) {
-            QuantEncoding encoding = randomFrom(QuantEncoding.values());
+            QuantEncoding encoding = randomFrom(QuantEncoding.nonExperimentalValues());
             boolean disableFlatOnFlush = random().nextBoolean();
             if (rarely()) {
                 int vectorPerCluster = random().nextInt(2 * MIN_VECTORS_PER_CLUSTER, MAX_VECTORS_PER_CLUSTER);

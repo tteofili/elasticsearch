@@ -44,6 +44,8 @@ import org.elasticsearch.index.codec.vectors.diskbbq.VectorPreconditioner;
 import org.elasticsearch.search.vectors.BulkKnnCollector;
 import org.elasticsearch.search.vectors.ESAcceptDocs;
 import org.elasticsearch.simdvec.BulkMask;
+import org.elasticsearch.simdvec.E8Lattice;
+import org.elasticsearch.simdvec.E8VectorsScorer;
 import org.elasticsearch.simdvec.ES940OSQVectorsScorer;
 import org.elasticsearch.simdvec.ESVectorUtil;
 import org.elasticsearch.simdvec.ScoringQuery;
@@ -591,14 +593,24 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                     queryCentroid = globalCentroid;
                 }
 
-                OptimizedScalarQuantizer.QuantizationResult queryCorrections = quantizer.scalarQuantize(
-                    target,
-                    scratch,
-                    quantizationScratch,
-                    quantEncoding.queryBits(),
-                    queryCentroid
-                );
-                quantEncoding.packQuery(quantizationScratch, quantizedQuery);
+                final OptimizedScalarQuantizer.QuantizationResult queryCorrections;
+                if (quantEncoding == QuantEncoding.E8_ROOTS) {
+                    // E8: the "quantized query" is the int8 lookup table of q - p; its scale travels as the lower interval
+                    for (int i = 0; i < target.length; i++) {
+                        scratch[i] = target[i] - queryCentroid[i];
+                    }
+                    float tableScale = E8Lattice.buildTable(scratch, target.length, quantizedQuery);
+                    queryCorrections = new OptimizedScalarQuantizer.QuantizationResult(tableScale, 0f, 0f, 0);
+                } else {
+                    queryCorrections = quantizer.scalarQuantize(
+                        target,
+                        scratch,
+                        quantizationScratch,
+                        quantEncoding.queryBits(),
+                        queryCentroid
+                    );
+                    quantEncoding.packQuery(quantizationScratch, quantizedQuery);
+                }
                 currentCentroidOrdinal = nextCentroidOrdinal;
                 result = new QueryQuantizerResult(queryCorrections, new ScoringQuery(quantizedQuery));
                 cache.put(nextCentroidOrdinal, result);
@@ -717,6 +729,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         final FieldInfo fieldInfo;
         final Bits acceptDocs;
         private final ES940OSQVectorsScorer osqVectorsScorer;
+        /** Non-null for {@link QuantEncoding#E8_ROOTS}, which replaces {@link #osqVectorsScorer}. */
+        private final E8VectorsScorer e8Scorer;
         final float[] scores = new float[BULK_SIZE];
         final float[] correctionsLower = new float[BULK_SIZE];
         final float[] correctionsUpper = new float[BULK_SIZE];
@@ -752,6 +766,12 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             this.acceptDocs = acceptDocs;
             quantizedVectorByteSize = quantEncoding.getDocPackedLength(fieldInfo.getVectorDimension());
             quantizedByteLength = quantizedVectorByteSize + (Float.BYTES * 3) + Integer.BYTES;
+            if (quantEncoding == QuantEncoding.E8_ROOTS) {
+                e8Scorer = E8VectorsScorer.create(indexInput, (int) quantizedVectorByteSize, BULK_SIZE);
+                osqVectorsScorer = null;
+                return;
+            }
+            e8Scorer = null;
             osqVectorsScorer = ESVectorUtil.getES940OSQVectorsScorer(
                 indexInput,
                 quantEncoding.queryBits(),
@@ -784,6 +804,18 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             };
             queryQuantizer.reset(metadata.queryCentroidOrdinal());
             return vectors;
+        }
+
+        private float scoreE8(int mask, int count) throws IOException {
+            return e8Scorer.scoreBulk(
+                queryQuantizer.getQuantizedTarget().bytes(),
+                queryQuantizer.getQueryCorrections().lowerInterval(),
+                centroidDistance,
+                fieldInfo.getVectorSimilarityFunction(),
+                mask,
+                scores,
+                count
+            );
         }
 
         private float scoreIndividually(int bulkSize) throws IOException {
@@ -900,7 +932,9 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 }
                 queryQuantizer.quantizeQueryIfNecessary();
                 final float maxScore;
-                if (docsToBulkScore == 1) {
+                if (e8Scorer != null) {
+                    maxScore = scoreE8(mask, BULK_SIZE);
+                } else if (docsToBulkScore == 1) {
                     maxScore = scoreIndividually(BULK_SIZE);
                 } else if (docsToBulkScore < BULK_SIZE) {
                     maxScore = osqVectorsScorer.scoreBulkMasked(
@@ -943,7 +977,9 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 } else {
                     queryQuantizer.quantizeQueryIfNecessary();
                     final float maxScore;
-                    if (docsToBulkScore == 1) {
+                    if (e8Scorer != null) {
+                        maxScore = scoreE8(mask, tailSize);
+                    } else if (docsToBulkScore == 1) {
                         maxScore = scoreIndividually(tailSize);
                     } else if (docsToBulkScore < tailSize) {
                         maxScore = osqVectorsScorer.scoreBulkMasked(

@@ -75,7 +75,7 @@ public class DenseVectorStatsTests extends AbstractWireSerializingTestCase<Dense
             SegmentCalibrationParameters params = rarely()
                 ? new SegmentCalibrationParameters.Osq(null, false, Float.NaN)
                 : new SegmentCalibrationParameters.Osq(
-                    randomFrom(QuantEncoding.values()),
+                    randomFrom(QuantEncoding.nonExperimentalValues()),
                     randomBoolean(),
                     (float) randomDoubleBetween(1.0, 3.0, true)
                 );

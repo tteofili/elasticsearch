@@ -42,7 +42,7 @@ public class ES950DiskBBQBFloat16VectorsFormatTests extends BaseBFloat16KnnVecto
     @Override
     protected Codec getCodec() {
         if (format == null) {
-            QuantEncoding encoding = randomFrom(QuantEncoding.values());
+            QuantEncoding encoding = randomFrom(QuantEncoding.nonExperimentalValues());
             if (rarely()) {
                 format = new ES950DiskBBQVectorsFormat(
                     encoding,
