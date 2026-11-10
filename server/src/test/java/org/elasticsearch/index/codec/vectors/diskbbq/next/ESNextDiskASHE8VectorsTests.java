@@ -68,8 +68,7 @@ public class ESNextDiskASHE8VectorsTests extends ESTestCase {
             IvfSegmentConfig.AshConfig.DEFAULT_QUERY_BITS_PER_DIM,
             fraction,
             IvfSegmentConfig.AshConfig.DEFAULT_MAX_PROJECTED_DIMS
-        )
-            .withCodebook(IvfSegmentConfig.AshConfig.CODEBOOK_E8);
+        ).withCodebook(IvfSegmentConfig.AshConfig.CODEBOOK_E8);
         return new ESNextDiskASHVectorsFormat(
             ashConfig,
             ESNextDiskASHVectorsFormat.MIN_VECTORS_PER_CLUSTER,

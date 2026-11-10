@@ -120,7 +120,8 @@ public class E8CodebookTests extends ESTestCase {
 
     public void testStoredBitsPerDimRoundTrip() {
         for (int bits : new int[] { 1, 2 }) {
-            var e8 = IvfSegmentConfig.AshConfig.of(bits, 4, 0.5f, IvfSegmentConfig.AshConfig.DEFAULT_MAX_PROJECTED_DIMS).withCodebook(IvfSegmentConfig.AshConfig.CODEBOOK_E8);
+            var e8 = IvfSegmentConfig.AshConfig.of(bits, 4, 0.5f, IvfSegmentConfig.AshConfig.DEFAULT_MAX_PROJECTED_DIMS)
+                .withCodebook(IvfSegmentConfig.AshConfig.CODEBOOK_E8);
             assertThat(IvfSegmentConfig.AshConfig.bitsFromStored(e8.storedBitsPerDim()), equalTo(bits));
             int storedCodebook = IvfSegmentConfig.AshConfig.codebookFromStored(e8.storedBitsPerDim());
             assertThat(storedCodebook, equalTo(IvfSegmentConfig.AshConfig.CODEBOOK_E8));
@@ -133,7 +134,8 @@ public class E8CodebookTests extends ESTestCase {
         }
         expectThrows(
             IllegalArgumentException.class,
-            () -> IvfSegmentConfig.AshConfig.of(4, 4, 0.5f, IvfSegmentConfig.AshConfig.DEFAULT_MAX_PROJECTED_DIMS).withCodebook(IvfSegmentConfig.AshConfig.CODEBOOK_E8)
+            () -> IvfSegmentConfig.AshConfig.of(4, 4, 0.5f, IvfSegmentConfig.AshConfig.DEFAULT_MAX_PROJECTED_DIMS)
+                .withCodebook(IvfSegmentConfig.AshConfig.CODEBOOK_E8)
         );
         expectThrows(IllegalArgumentException.class, () -> E8Codebook.validateDims(12));
     }

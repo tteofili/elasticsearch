@@ -159,7 +159,7 @@ public class ESNextDiskBBQE8VectorsTests extends ESTestCase {
         }
     }
 
-    private static float[] preconditioned(LeafReader leaf, float[] query) {
+    private static float[] preconditioned(LeafReader leaf, float[] query) throws IOException {
         if (leaf instanceof SegmentReader sr
             && sr.getVectorReader() instanceof PerFieldKnnVectorsFormat.FieldsReader fr
             && fr.getFieldReader("f") instanceof VectorPreconditioner vp) {

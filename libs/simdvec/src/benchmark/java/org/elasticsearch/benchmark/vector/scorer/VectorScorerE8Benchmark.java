@@ -253,16 +253,7 @@ public class VectorScorerE8Benchmark {
             for (int i = 0; i < numVectors; i += BULK_SIZE) {
                 max = Math.max(
                     max,
-                    osq.scoreBulk(
-                        osqQueries[query],
-                        c.lowerInterval(),
-                        c.upperInterval(),
-                        c.quantizedComponentSum(),
-                        0.1f,
-                        SIM,
-                        0f,
-                        scores
-                    )
+                    osq.scoreBulk(osqQueries[query], c.lowerInterval(), c.upperInterval(), c.quantizedComponentSum(), 0.1f, SIM, 0f, scores)
                 );
             }
         }
