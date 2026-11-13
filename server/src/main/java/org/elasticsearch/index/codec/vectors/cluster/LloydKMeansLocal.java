@@ -58,7 +58,7 @@ abstract class LloydKMeansLocal<V> extends KMeansLocal<V> {
         IntUnaryOperator ordTranslator = IntUnaryOperator.identity();
         ClusteringVectorValues<V> sampledVectors = vectors;
         if (sampleSize < n) {
-            sampledVectors = ClusteringVectorValuesSlice.createRandomSlice(vectors, sampleSize, 42L);
+            sampledVectors = ClusteringVectorValuesSlice.createRandomSlice(vectors, sampleSize, BENCH_SEED);
             ordTranslator = sampledVectors::ordToDoc;
         }
 

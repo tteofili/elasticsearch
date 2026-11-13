@@ -53,6 +53,7 @@ import org.elasticsearch.index.store.FsDirectoryFactory;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -66,6 +67,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiFunction;
 
 import static org.elasticsearch.test.knn.KnnIndexTester.logger;
@@ -191,9 +193,16 @@ public class KnnIndexer {
                 }
             }
             logger.info("KnnIndexer: indexed {} documents", totalDocs);
+            final com.sun.management.ThreadMXBean tmx = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+            final long commitAlloc0 = tmx.getCurrentThreadAllocatedBytes();
             iw.commit();
             ConcurrentMergeScheduler cms = (ConcurrentMergeScheduler) iwc.getMergeScheduler();
             cms.sync();
+            logger.info(
+                "KNN-PERF-INDEX allocated_bytes_indexer_threads={} allocated_bytes_commit_thread={}",
+                INDEXER_THREAD_ALLOCATED.get(),
+                tmx.getCurrentThreadAllocatedBytes() - commitAlloc0
+            );
         }
 
         long elapsed = System.nanoTime() - start;
@@ -447,6 +456,9 @@ public class KnnIndexer {
         }
     }
 
+    /** EXPERIMENT ONLY: bytes allocated by indexer threads (document adds, and flushes they trigger). */
+    static final AtomicLong INDEXER_THREAD_ALLOCATED = new AtomicLong();
+
     static class IndexerThread implements Runnable {
         private final IndexWriter iw;
         private final IndexVectorReader vectorReader;
@@ -505,6 +517,10 @@ public class KnnIndexer {
                 }
             } catch (IOException ioe) {
                 throw new UncheckedIOException(ioe);
+            } finally {
+                INDEXER_THREAD_ALLOCATED.addAndGet(
+                    ((com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean()).getCurrentThreadAllocatedBytes()
+                );
             }
         }
     }

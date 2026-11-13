@@ -455,7 +455,11 @@ public class KnnSearcher {
                     }
                 }
 
-                IntConsumer queryConsumer = searchIdx -> {
+                final long[] latencyNs = new long[totalSearches];
+                final long[] allocatedBytes = new long[totalSearches];
+                final com.sun.management.ThreadMXBean tmx = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory
+                    .getThreadMXBean();
+                IntConsumer rawQueryConsumer = searchIdx -> {
                     int qIdx = filterProvider.queryIndex(searchIdx);
                     Query filter = filterProvider.filter(searchIdx, sliced);
                     BytesRef partition = filterProvider.partition(searchIdx);
@@ -482,6 +486,15 @@ public class KnnSearcher {
                     } catch (IOException e) {
                         throw new UncheckedIOException(e);
                     }
+                };
+
+                // EXPERIMENT ONLY: per query latency and allocation on the calling thread (exact when search_threads == 1)
+                IntConsumer queryConsumer = searchIdx -> {
+                    long alloc0 = tmx.getCurrentThreadAllocatedBytes();
+                    long t0 = System.nanoTime();
+                    rawQueryConsumer.accept(searchIdx);
+                    latencyNs[searchIdx] = System.nanoTime() - t0;
+                    allocatedBytes[searchIdx] = tmx.getCurrentThreadAllocatedBytes() - alloc0;
                 };
 
                 int[][] searchSplits = new int[searchParameters.numSearchers()][];
@@ -549,6 +562,27 @@ public class KnnSearcher {
                     elapsed,
                     (1000L * totalSearches) / elapsed,
                     totalCpuTimeMS
+                );
+                long[] sortedLatency = latencyNs.clone();
+                java.util.Arrays.sort(sortedLatency);
+                double meanAlloc = java.util.Arrays.stream(allocatedBytes).average().orElse(0);
+                logger.info(
+                    String.format(
+                        java.util.Locale.ROOT,
+                        "KNN-PERF-SEARCH visit=%.3f oversample=%.2f search_threads=%d num_searchers=%d queries=%d qps=%.1f lat_ms_mean=%.3f p50=%.3f p95=%.3f p99=%.3f alloc_bytes_per_query=%.0f cpu_ms_per_query=%.3f",
+                        searchParameters.visitPercentage(),
+                        searchParameters.overSamplingFactor(),
+                        searchParameters.searchThreads(),
+                        searchParameters.numSearchers(),
+                        totalSearches,
+                        (1000.0 * totalSearches) / elapsed,
+                        java.util.Arrays.stream(latencyNs).average().orElse(0) / 1e6,
+                        sortedLatency[totalSearches / 2] / 1e6,
+                        sortedLatency[(int) Math.min(totalSearches - 1, Math.floor(totalSearches * 0.95))] / 1e6,
+                        sortedLatency[(int) Math.min(totalSearches - 1, Math.floor(totalSearches * 0.99))] / 1e6,
+                        meanAlloc,
+                        (double) totalCpuTimeMS / totalSearches
+                    )
                 );
             }
         }

@@ -206,7 +206,7 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
                     ClusteringVectorValues<V> sampledVectors = ClusteringVectorValuesSlice.createRandomSlice(
                         vectors,
                         miniBatchSizeLocal,
-                        t++,
+                        t++ + (BENCH_SEED - 42L),
                         miniBatchSamples
                     );
 
@@ -226,7 +226,7 @@ abstract class BalancedASKMeansLocal<V> extends KMeansLocal<V> {
                                 maxDistance = Math.max(maxDistance, d);
                             }
                         }
-                        medianEstimator = new OnlineQuantileEstimator(0.5f, 0, maxDistance, 0.0001f, 42L);
+                        medianEstimator = new OnlineQuantileEstimator(0.5f, 0, maxDistance, 0.0001f, BENCH_SEED);
                     }
 
                     for (float[] dist : distances) {

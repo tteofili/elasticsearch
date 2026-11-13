@@ -33,7 +33,8 @@ public class HierarchicalKMeans<V> {
     public static final float DEFAULT_SOAR_LAMBDA = 1.0f;
     private static final int MIN_VECTORS_PER_THREAD = 64;
 
-    public static final boolean USE_BALANCING = true;
+    // EXPERIMENT ONLY: benchmark switch to compare against the non-balanced (Lloyd) code path
+    public static final boolean USE_BALANCING = Boolean.parseBoolean(System.getProperty("bench.kmeans.balancing", "true"));
     public static final int MAX_ITERATIONS_DEFAULT = USE_BALANCING ? 2 : 6;
 
     // Hyperparameter for capacity-constrained assignment in reduceVarianceAware
@@ -144,7 +145,14 @@ public class HierarchicalKMeans<V> {
         }
 
         // partition the space
+        final long stage0 = System.nanoTime();
+        final long sampled0 = T_SAMPLED_NS.get();
+        final long neigh0 = KMeansLocal.T_NEIGHBORHOODS_NS.get();
+        final long finalInner0 = KMeansLocal.T_FINAL_INNER_NS.get();
+        final long eTrain0 = EMeansKMeansLocal.T_TRAIN_NS.get();
+        final long eAssign0 = EMeansKMeansLocal.T_ASSIGN_NS.get();
         KMeansResult<V> kMeansResult = clusterAndSplit(vectors, targetSize, warmStartCentroids);
+        final long stage1 = System.nanoTime();
 
         if (logger.isDebugEnabled()) {
             logger.debug("Hierarchical clustering stats (pre-SOAR):");
@@ -155,6 +163,19 @@ public class HierarchicalKMeans<V> {
             int localSampleSize = Math.min(kMeansResult.centroids().length * samplesPerCluster / 2, vectors.size());
             KMeansLocal<V> kMeansLocal = buildKmeansLocalFinal(vectors.size(), localSampleSize);
             NeighborHood[] neighborHoods = kMeansLocal.cluster(vectors, kMeansResult, clustersPerNeighborhood);
+            logStages(
+                kMeansResult.clusterCounts(),
+                vectors.size(),
+                targetSize,
+                kMeansResult.centroids().length,
+                stage1 - stage0,
+                T_SAMPLED_NS.get() - sampled0,
+                KMeansLocal.T_NEIGHBORHOODS_NS.get() - neigh0,
+                KMeansLocal.T_FINAL_INNER_NS.get() - finalInner0,
+                EMeansKMeansLocal.T_TRAIN_NS.get() - eTrain0,
+                EMeansKMeansLocal.T_ASSIGN_NS.get() - eAssign0,
+                System.nanoTime() - stage0
+            );
 
             if (logger.isDebugEnabled()) {
                 logger.debug("Refinement clustering stats (pre-SOAR):");
@@ -164,6 +185,59 @@ public class HierarchicalKMeans<V> {
         }
 
         return new KMeansNeighbors<>(kMeansResult, null);
+    }
+
+    /** EXPERIMENT ONLY (stage timers). */
+    private static final java.util.concurrent.atomic.AtomicLong T_SAMPLED_NS = new java.util.concurrent.atomic.AtomicLong();
+
+    private static void logStages(
+        int[] sizes,
+        int n,
+        int target,
+        int k,
+        long splitNs,
+        long sampledNs,
+        long neighNs,
+        long finalInnerNs,
+        long eTrainNs,
+        long eAssignNs,
+        long totalNs
+    ) {
+        long minSize = Long.MAX_VALUE;
+        long maxSize = 0;
+        double sum = 0;
+        double sumSq = 0;
+        for (int c : sizes) {
+            minSize = Math.min(minSize, c);
+            maxSize = Math.max(maxSize, c);
+            sum += c;
+            sumSq += (double) c * c;
+        }
+        final double mean = sizes.length == 0 ? 0 : sum / sizes.length;
+        final double std = sizes.length == 0 ? 0 : Math.sqrt(Math.max(0, sumSq / sizes.length - mean * mean));
+        logger.info(
+            "KNN-PERF-CLUSTERS n={} target={} centroids={} size_min={} size_max={} size_mean={} size_std={}",
+            n,
+            target,
+            k,
+            minSize,
+            maxSize,
+            String.format(java.util.Locale.ROOT, "%.1f", mean),
+            String.format(java.util.Locale.ROOT, "%.1f", std)
+        );
+        logger.info(
+            "KNN-PERF-STAGE n={} target={} centroids={} split_total_ms={} sampled_kmeans_ms={} neighborhoods_ms={} final_pass_ms={} emeans_train_ms={} emeans_assign_ms={} cluster_total_ms={}",
+            n,
+            target,
+            k,
+            splitNs / 1_000_000,
+            sampledNs / 1_000_000,
+            neighNs / 1_000_000,
+            finalInnerNs / 1_000_000,
+            eTrainNs / 1_000_000,
+            eAssignNs / 1_000_000,
+            totalNs / 1_000_000
+        );
     }
 
     public OverspillAssignments computeSoar(ClusteringVectorValues<V> vectors, KMeansResult<V> kMeans, NeighborHood[] neighborhoods)
@@ -177,11 +251,18 @@ public class HierarchicalKMeans<V> {
         NeighborHood[] neighborhoods,
         float soarLambda
     ) throws IOException {
+        final long soar0 = System.nanoTime();
         Soar<V> soar = buildSoar(vectors.size(), soarLambda);
         OverspillAssignments overspill = OverspillAssignments.NONE;
         if (kMeans.centroids().length > 1) {
             overspill = soar.assignSpilled(vectors, kMeans, neighborhoods);
         }
+        logger.info(
+            "KNN-PERF-STAGE-SOAR n={} centroids={} soar_ms={}",
+            vectors.size(),
+            kMeans.centroids().length,
+            (System.nanoTime() - soar0) / 1_000_000
+        );
         return overspill;
     }
 
@@ -194,6 +275,15 @@ public class HierarchicalKMeans<V> {
 
     private KMeansIntermediate<V> clusterAndSplit(final ClusteringVectorValues<V> vectors, final int targetSize, V[] warmStartCentroids)
         throws IOException {
+        return clusterAndSplit(vectors, targetSize, warmStartCentroids, 0);
+    }
+
+    private KMeansIntermediate<V> clusterAndSplit(
+        final ClusteringVectorValues<V> vectors,
+        final int targetSize,
+        V[] warmStartCentroids,
+        final int depth
+    ) throws IOException {
         if (vectors.size() <= targetSize) {
             return KMeansIntermediate.empty(ops);
         }
@@ -207,8 +297,11 @@ public class HierarchicalKMeans<V> {
         Arrays.fill(assignments, -1);
         V[] centroids = initialCentroidsForClustering(vectors, k, warmStartCentroids, ops);
         KMeansIntermediate<V> kMeansIntermediate = new KMeansIntermediate<>(centroids, assignments, vectors::ordToDoc);
+        benchDepth = depth;
         KMeansLocal<V> kMeansLocal = buildKmeansLocal(vectors.size(), m);
+        final long sampledStart = System.nanoTime();
         kMeansLocal.cluster(vectors, kMeansIntermediate);
+        T_SAMPLED_NS.addAndGet(System.nanoTime() - sampledStart);
 
         centroids = kMeansIntermediate.centroids();
         int[] centroidVectorCount = kMeansIntermediate.clusterCounts();
@@ -228,7 +321,7 @@ public class HierarchicalKMeans<V> {
                 // TODO: consider iterative here instead of recursive
                 // recursive call to build out the sub partitions around this centroid c
                 // subsequently reconcile and flatten the space of all centroids and assignments into one structure we can return
-                KMeansIntermediate<V> subPartitions = clusterAndSplit(sample, targetSize, null);
+                KMeansIntermediate<V> subPartitions = clusterAndSplit(sample, targetSize, null, depth + 1);
                 // Update offset: split replaces 1 centroid with subPartitions.centroids().length centroids
                 centroidIndexOffset += updateAssignmentsWithRecursiveSplit(kMeansIntermediate, adjustedCentroid, subPartitions);
             }
@@ -262,8 +355,72 @@ public class HierarchicalKMeans<V> {
         return centroids;
     }
 
+    /**
+     * EXPERIMENT ONLY (phase 0 of the e-means evaluation): benchmark-only switch for the sampled clustering phase.
+     * One of {@code balanced} (current default), {@code lloyd}, {@code emeans}, {@code emeans_bal} (e-means followed by one
+     * balanced iteration). Must not ship in this form.
+     */
+    private static final String BENCH_VARIANT = System.getProperty("bench.kmeans.variant", "balanced");
+    private static final int BENCH_SAMPLE_MULT = Integer.getInteger("bench.emeans.sample_mult", 1);
+    /** EXPERIMENT ONLY: e-means sample multiplier below the top recursion level (defaults to the top-level one). */
+    private static final int BENCH_SAMPLE_MULT_DEEP = Integer.getInteger("bench.emeans.sample_mult_deep", BENCH_SAMPLE_MULT);
+    private static final int BENCH_BALANCED_SAMPLE_MULT = Integer.getInteger("bench.kmeans.balanced_sample_mult", 1);
+    private static final int BENCH_BALANCED_SAMPLE_MULT_DEEP = Integer.getInteger("bench.kmeans.balanced_sample_mult_deep", 1);
+    private int benchDepth;
+    private static final double BENCH_EPOCHS = Double.parseDouble(System.getProperty("bench.emeans.epochs", "5"));
+
     private KMeansLocal<V> buildKmeansLocal(int numVectors, int localSampleSize) {
-        return buildKmeansLocal(numVectors, localSampleSize, maxIterations);
+        switch (BENCH_VARIANT) {
+            case "balanced":
+                // EXPERIMENT ONLY: optionally train the balanced k-means on a larger sample (default multiplier 1 = unchanged behavior)
+                return buildKmeansLocal(
+                    numVectors,
+                    (int) Math.min(
+                        numVectors,
+                        (long) localSampleSize * (benchDepth == 0 ? BENCH_BALANCED_SAMPLE_MULT : BENCH_BALANCED_SAMPLE_MULT_DEEP)
+                    ),
+                    maxIterations
+                );
+            case "lloyd":
+                return new LloydKMeansLocalSerial<>(ops, localSampleSize, maxIterations);
+            case "emeans":
+                return new EMeansKMeansLocal<>(ops, BENCH_EPOCHS, KMeansLocal.BENCH_SEED);
+            case "emeans_s":
+                // trained on the same sample size as the other variants, then one full assignment pass
+                return new EMeansKMeansLocal<>(
+                    ops,
+                    BENCH_EPOCHS,
+                    KMeansLocal.BENCH_SEED,
+                    (int) Math.min(
+                        Integer.MAX_VALUE,
+                        (long) localSampleSize * (benchDepth == 0 ? BENCH_SAMPLE_MULT : BENCH_SAMPLE_MULT_DEEP)
+                    )
+                );
+            case "emeans_bal": {
+                final EMeansKMeansLocal<V> e = new EMeansKMeansLocal<>(ops, EMeansKMeansLocal.DEFAULT_EPOCHS, KMeansLocal.BENCH_SEED);
+                final KMeansLocal<V> bal = buildKmeansLocal(numVectors, localSampleSize, 1);
+                return new KMeansLocal<V>(ops) {
+                    @Override
+                    protected int numWorkers() {
+                        return 1;
+                    }
+
+                    @Override
+                    protected NeighborHood[] computeNeighborhoods(V[] centroids, int c) throws IOException {
+                        return e.computeNeighborhoods(centroids, c);
+                    }
+
+                    @Override
+                    protected void innerCluster(ClusteringVectorValues<V> vectors, KMeansResult<V> r, NeighborHood[] nh)
+                        throws IOException {
+                        e.innerCluster(vectors, r, nh);
+                        bal.innerCluster(vectors, r, nh);
+                    }
+                };
+            }
+            default:
+                throw new IllegalStateException("unknown bench.kmeans.variant [" + BENCH_VARIANT + "]");
+        }
     }
 
     private KMeansLocal<V> buildKmeansLocal(int numVectors, int localSampleSize, int iterations) {

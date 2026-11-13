@@ -210,6 +210,8 @@ tasks.register("checkVec", JavaExec) {
   // Configure logging to console
   systemProperty "es.logger.out", "console"
   systemProperty "es.logger.level", "INFO"  // Change to DEBUG if needed
+  // EXPERIMENT ONLY: single extra JVM flag, e.g. -Dbench.jvmargs=-Xlog:gc:file=/tmp/gc.log
+  if (System.getProperty("bench.jvmargs") != null) { jvmArgs System.getProperty("bench.jvmargs") }
   systemProperty 'es.nativelibs.path', TestUtil.getTestLibraryPath(file("../../libs/native/libraries/build/platform/").toString())
   def heapSize = System.getProperty("bench.heap", "16g")
   jvmArgs "-Xms${heapSize}", "-Xmx${heapSize}", '-Djava.util.concurrent.ForkJoinPool.common.parallelism=8', '-XX:+UnlockDiagnosticVMOptions', '-XX:+DebugNonSafepoints', '-XX:+HeapDumpOnOutOfMemoryError'

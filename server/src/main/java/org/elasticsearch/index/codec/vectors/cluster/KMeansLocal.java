@@ -18,6 +18,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntUnaryOperator;
 
 /**
@@ -27,6 +28,13 @@ import java.util.function.IntUnaryOperator;
  * @param <V> the array type for vectors and centroids ({@code float[]} or {@code byte[]})
  */
 abstract class KMeansLocal<V> {
+
+    /** EXPERIMENT ONLY: benchmark-only seed so repeated runs can differ in initial centroids and sampling. Default 42. */
+    static final long BENCH_SEED = Long.getLong("bench.kmeans.seed", 42L);
+
+    /** EXPERIMENT ONLY (stage timers): time spent computing neighborhoods and in the final neighbor-aware pass. */
+    static final AtomicLong T_NEIGHBORHOODS_NS = new AtomicLong();
+    static final AtomicLong T_FINAL_INNER_NS = new AtomicLong();
 
     protected final CentroidOps<V> ops;
 
@@ -51,7 +59,7 @@ abstract class KMeansLocal<V> {
      * @throws IOException is thrown if vectors is inaccessible
      */
     static <V> V[] pickInitialCentroids(ClusteringVectorValues<V> vectors, int centroidCount, CentroidOps<V> ops) throws IOException {
-        Random random = new Random(42L);
+        Random random = new Random(BENCH_SEED);
         int centroidsSize = Math.min(vectors.size(), centroidCount);
         V[] centroids = ops.newCentroidArray(centroidsSize, vectors.dimension());
         for (int i = 0; i < vectors.size(); i++) {
@@ -170,9 +178,13 @@ abstract class KMeansLocal<V> {
         NeighborHood[] neighborhoods = null;
         // if there are very few centroids, don't bother with neighborhoods or neighbor aware clustering
         if (kMeansResult.centroids().length > clustersPerNeighborhood) {
+            final long n0 = System.nanoTime();
             neighborhoods = computeNeighborhoods(kMeansResult.centroids(), clustersPerNeighborhood);
+            T_NEIGHBORHOODS_NS.addAndGet(System.nanoTime() - n0);
         }
+        final long f0 = System.nanoTime();
         doCluster(vectors, kMeansResult, neighborhoods);
+        T_FINAL_INNER_NS.addAndGet(System.nanoTime() - f0);
         return neighborhoods;
     }
 
