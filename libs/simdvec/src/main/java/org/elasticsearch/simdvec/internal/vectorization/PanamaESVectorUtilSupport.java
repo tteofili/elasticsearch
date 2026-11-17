@@ -25,6 +25,7 @@ import org.apache.lucene.util.BitUtil;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.Constants;
 import org.apache.lucene.util.VectorUtil;
+import org.elasticsearch.simdvec.E8Roots;
 import org.elasticsearch.simdvec.MathUtils;
 import org.elasticsearch.simdvec.MultiBFloat16VectorsSource;
 import org.elasticsearch.simdvec.MultiByteVectorsSource;
@@ -302,6 +303,12 @@ public sealed class PanamaESVectorUtilSupport implements ESVectorUtilSupport per
             result = fma(diff, diff, result);
         }
         return result;
+    }
+
+    @Override
+    public float e8QueryTable(float[] y, byte[] table) {
+        // the dense vectorized formulation is slower than the scalar code, which the compiler already handles well
+        return E8Roots.buildQueryTable(y, table);
     }
 
     @Override

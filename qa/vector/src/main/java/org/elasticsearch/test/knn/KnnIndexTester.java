@@ -127,7 +127,8 @@ public class KnnIndexTester {
 
     enum QuantizationType {
         OSQ,
-        ASH;
+        ASH,
+        E8;
 
         static QuantizationType fromString(String name) {
             if (name == null) {
@@ -136,7 +137,8 @@ public class KnnIndexTester {
             return switch (name.toLowerCase(Locale.ROOT)) {
                 case "ash" -> ASH;
                 case "osq" -> OSQ;
-                default -> throw new IllegalArgumentException("Unknown quantization_type: '" + name + "'. Known types: ash, osq");
+                case "e8" -> E8;
+                default -> throw new IllegalArgumentException("Unknown quantization_type: '" + name + "'. Known types: ash, osq, e8");
             };
         }
     }
@@ -232,7 +234,8 @@ public class KnnIndexTester {
             case GPU_HNSW -> suffix.add("gpu_hnsw");
             case IVF -> {
                 boolean isAsh = QuantizationType.fromString(args.quantizationType()) == QuantizationType.ASH;
-                suffix.add(isAsh ? "ash" : "ivf");
+                boolean isE8 = QuantizationType.fromString(args.quantizationType()) == QuantizationType.E8;
+                suffix.add(isAsh ? "ash" : isE8 ? "ivfe8" : "ivf");
                 suffix.add(Integer.toString(args.ivfClusterSize()));
                 if (isAsh) {
                     int bits = args.quantizeBits() != null ? args.quantizeBits() : 2;
@@ -323,7 +326,9 @@ public class KnnIndexTester {
                         false
                     );
                 } else {
-                    var encoding = resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
+                    var encoding = QuantizationType.fromString(args.quantizationType()) == QuantizationType.E8
+                        ? QuantEncoding.E8_ROOTS
+                        : resolveQuantEncoding(quantizeBits, args.queryQuantizeBits());
                     IvfMergeConfigResolver mergeConfigResolver = args.autoCalibrate()
                         ? IvfAutoCalibration.mergeConfigResolver(args.ivfClusterSize(), args.autoCalibrationProfile())
                         : IvfMergeConfigResolver.useCodecDefault();
@@ -887,6 +892,10 @@ public class KnnIndexTester {
                         args.projectedDimsFraction(),
                         args.maxProjectedDims()
                     );
+                } else if (QuantizationType.fromString(args.quantizationType()) == QuantizationType.E8) {
+                    if (args.quantizeBits() == null || args.quantizeBits() != 1) {
+                        throw new IllegalArgumentException("e8 quantization requires quantize_bits = 1");
+                    }
                 } else {
                     if (args.quantizeBits() == null) {
                         throw new IllegalArgumentException("IVF index type requires quantize_bits to be set");

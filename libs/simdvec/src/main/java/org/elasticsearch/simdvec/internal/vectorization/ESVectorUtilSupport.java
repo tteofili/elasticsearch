@@ -70,6 +70,12 @@ public interface ESVectorUtilSupport {
     /** Returns the sum of squared differences between a byte vector and a float vector. */
     float squareDistance(byte[] a, float[] b);
 
+    /**
+     * Builds the int8 query lookup table of the E8 root code, see {@link org.elasticsearch.simdvec.E8Roots#buildQueryTable}.
+     * @return the scale of the table
+     */
+    float e8QueryTable(float[] y, byte[] table);
+
     float maxSimDotProduct(MultiFloatVectorsSource source, float[][] query, float[] scoresScratch);
 
     float maxSimDotProduct(MultiBFloat16VectorsSource source, float[][] query, float[] scoresScratch);

@@ -167,6 +167,17 @@ public class ESVectorUtil {
         return l2Normalize(v, 0, v.length);
     }
 
+    /**
+     * Builds the int8 query lookup table of the {@link E8Roots} code: {@link E8Roots#TABLE_SIZE} bytes per block of the query.
+     * Equivalent to {@link E8Roots#buildQueryTable}, up to the rounding of ties, but vectorized where possible.
+     *
+     * @return the scale: {@code <y, codeword> ≈ scale * table entry}
+     */
+    public static float buildE8QueryTable(float[] y, byte[] table) {
+        Objects.checkFromIndexSize(0, E8Roots.blocks(y.length) * E8Roots.TABLE_SIZE, table.length);
+        return IMPL.e8QueryTable(y, table);
+    }
+
     public static float squareDistance(float[] a, float[] b) {
         if (a.length != b.length) {
             throw new IllegalArgumentException("vector dimensions incompatible: " + a.length + "!= " + b.length);

@@ -119,7 +119,7 @@ public class DiskBBQPlugin extends Plugin implements InternalVectorFormatProvide
                             ? IvfAutoCalibration.mergeConfigResolver(clusterSize, diskbbq.autoCalibrationProfile())
                             : IvfMergeConfigResolver.useCodecDefault();
                         return new ESNextDiskBBQVectorsFormat(
-                            QuantEncoding.fromBits((byte) diskbbq.getBits()),
+                            diskbbq.getQuantEncoding(),
                             clusterSize,
                             ESNextDiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
                             elementType,

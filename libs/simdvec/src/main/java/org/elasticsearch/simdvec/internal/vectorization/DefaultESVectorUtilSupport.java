@@ -15,6 +15,7 @@ import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.Constants;
 import org.apache.lucene.util.VectorUtil;
 import org.elasticsearch.simdvec.BFloat16Support;
+import org.elasticsearch.simdvec.E8Roots;
 import org.elasticsearch.simdvec.MathUtils;
 import org.elasticsearch.simdvec.MultiBFloat16VectorsSource;
 import org.elasticsearch.simdvec.MultiByteVectorsSource;
@@ -1119,5 +1120,10 @@ public final class DefaultESVectorUtilSupport implements ESVectorUtilSupport {
             }
             result[i] = sum;
         }
+    }
+
+    @Override
+    public float e8QueryTable(float[] y, byte[] table) {
+        return E8Roots.buildQueryTable(y, table);
     }
 }

@@ -2237,6 +2237,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 }
 
                 boolean isAsh = quantizationType == BBQIVFIndexOptions.QuantizationType.ASH;
+                boolean isE8 = quantizationType == BBQIVFIndexOptions.QuantizationType.E8;
                 Object quantizeBitsNode = indexOptionsMap.remove("bits");
                 int defaultBits = isAsh ? DEFAULT_ASH_IVF_QUANTIZE_BITS : DEFAULT_BBQ_IVF_QUANTIZE_BITS;
                 int quantizeBits = XContentMapValues.nodeIntegerValue(quantizeBitsNode, defaultBits);
@@ -2252,6 +2253,16 @@ public class DenseVectorFieldMapper extends FieldMapper {
                             "'bits' must be 1, 2, 4 or 7, got: " + quantizeBits + " for field [" + fieldName + "]"
                         );
                     }
+                    if (isE8 && quantizeBits != 1) {
+                        throw new IllegalArgumentException(
+                            "'bits' must be 1 for E8 quantization, got: " + quantizeBits + " for field [" + fieldName + "]"
+                        );
+                    }
+                    if (isE8 && experimentalFeaturesEnabled == false) {
+                        throw new IllegalArgumentException(
+                            "quantization_type 'e8' requires experimental dense vector features for field [" + fieldName + "]"
+                        );
+                    }
                 }
                 if (rescoreVector == null) {
                     // adjust the oversampling factor based on quantization scheme
@@ -2265,8 +2276,8 @@ public class DenseVectorFieldMapper extends FieldMapper {
 
                 Object autoCalibrateMapValue = indexOptionsMap.remove(DenseVectorAutoCalibrate.NAME);
                 DenseVectorAutoCalibrate autoCalibrate;
-                if (autoCalibrateMapValue == null && isAsh) {
-                    // Disable autocalibration by default when using ASH
+                if (autoCalibrateMapValue == null && (isAsh || isE8)) {
+                    // Disable autocalibration by default when using ASH or E8, it only chooses between OSQ encodings
                     autoCalibrate = DenseVectorAutoCalibrate.DEFAULT_DISABLED;
                 } else {
                     autoCalibrate = DenseVectorAutoCalibrate.parse(
@@ -2276,13 +2287,18 @@ public class DenseVectorFieldMapper extends FieldMapper {
                         fieldName
                     );
                 }
-                if (isAsh && autoCalibrate.enabled()) {
+                if ((isAsh || isE8) && autoCalibrate.enabled()) {
                     throw new IllegalArgumentException(
-                        "'auto_calibrate' is not supported with 'quantization_type' 'ash' for field [" + fieldName + "]"
+                        "'auto_calibrate' is not supported with 'quantization_type' '"
+                            + quantizationType
+                            + "' for field ["
+                            + fieldName
+                            + "]"
                     );
                 }
 
-                boolean doPrecondition = XContentMapValues.nodeBooleanValue(indexOptionsMap.remove("precondition"), false);
+                // E8 codes rely on a rotation to spread energy across the coordinates of each block
+                boolean doPrecondition = XContentMapValues.nodeBooleanValue(indexOptionsMap.remove("precondition"), isE8);
                 MappingParser.checkNoRemainingFields(fieldName, indexOptionsMap);
                 return new BBQIVFIndexOptions(
                     clusterSize,
@@ -3077,7 +3093,8 @@ public class DenseVectorFieldMapper extends FieldMapper {
 
         public enum QuantizationType {
             OSQ("osq"),
-            ASH("ash");
+            ASH("ash"),
+            E8("e8");
 
             private final String name;
 
@@ -3187,7 +3204,7 @@ public class DenseVectorFieldMapper extends FieldMapper {
                         ? IvfAutoCalibration.mergeConfigResolver(clusterSize, autoCalibrationProfile())
                         : IvfMergeConfigResolver.useCodecDefault();
                     return new ESNextDiskBBQVectorsFormat(
-                        QuantEncoding.fromBits((byte) bits),
+                        getQuantEncoding(),
                         clusterSize,
                         ESNextDiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
                         elementType,
@@ -3296,11 +3313,11 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 rescoreVector.toXContent(builder, params);
             }
             builder.field("bits", bits);
-            if (doPrecondition) {
+            if (doPrecondition || quantizationType == QuantizationType.E8) {
                 builder.field("precondition", doPrecondition);
             }
             autoCalibrate.toXContent(builder, params);
-            if (quantizationType == QuantizationType.ASH) {
+            if (quantizationType != QuantizationType.OSQ) {
                 builder.field("quantization_type", quantizationType);
             }
         }
@@ -3331,6 +3348,11 @@ public class DenseVectorFieldMapper extends FieldMapper {
 
         public IvfAutoCalibrationProfile autoCalibrationProfile() {
             return autoCalibrate.profile();
+        }
+
+        /** The document encoding of the experimental (next) disk BBQ format. */
+        public QuantEncoding getQuantEncoding() {
+            return quantizationType == QuantizationType.E8 ? QuantEncoding.E8_ROOTS : QuantEncoding.fromBits((byte) bits);
         }
 
         public int getBits() {

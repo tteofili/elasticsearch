@@ -20,6 +20,7 @@ import static org.apache.lucene.index.VectorSimilarityFunction.EUCLIDEAN;
 import static org.apache.lucene.index.VectorSimilarityFunction.MAXIMUM_INNER_PRODUCT;
 import static org.elasticsearch.simdvec.BBQEncoding.D1Q1;
 import static org.elasticsearch.simdvec.BBQEncoding.D1Q4;
+import static org.elasticsearch.simdvec.BBQEncoding.D1Q8;
 import static org.elasticsearch.simdvec.BBQEncoding.D2Q4;
 import static org.elasticsearch.simdvec.BBQEncoding.D4Q4;
 import static org.elasticsearch.simdvec.BBQEncoding.D7Q7;
@@ -31,7 +32,7 @@ public class ES940OSQVectorsScorer {
 
     public static boolean supportsQuantization(byte indexBits, byte queryBits) {
         return switch ((indexBits << 8) | queryBits) {
-            case D1Q1, D1Q4, D2Q4, D4Q4, D7Q7 -> true;
+            case D1Q1, D1Q4, D1Q8, D2Q4, D4Q4, D7Q7 -> true;
             default -> false;
         };
     }
@@ -48,7 +49,9 @@ public class ES940OSQVectorsScorer {
         D2Q4_PACKED((byte) 2, (byte) 4, BitEncoding.PACKED),
         D4Q4_STRIPED((byte) 4, (byte) 4),
         D4Q4_PACKED((byte) 4, (byte) 4, BitEncoding.PACKED),
-        D7Q7((byte) 7, (byte) 7, BitEncoding.PACKED);
+        D7Q7((byte) 7, (byte) 7, BitEncoding.PACKED),
+        /** E8 root codes, transposed within each bulk; scored in bulk only, see {@link E8Roots} */
+        E8((byte) 1, (byte) 8);
 
         private final BBQEncoding bbqEncoding;
         private final BitEncoding bitEncoding;
@@ -69,6 +72,7 @@ public class ES940OSQVectorsScorer {
                 case BBQEncoding.D2Q4 -> bitEncoding == BitEncoding.PACKED ? D2Q4_PACKED : D2Q4_STRIPED;
                 case BBQEncoding.D4Q4 -> bitEncoding == BitEncoding.PACKED ? D4Q4_PACKED : D4Q4_STRIPED;
                 case BBQEncoding.D7Q7 -> D7Q7;
+                case BBQEncoding.D1Q8 -> E8;
                 default -> throw new IllegalArgumentException("Unsupported query/index bits combination: " + bbqEncoding);
             };
         }
@@ -111,6 +115,7 @@ public class ES940OSQVectorsScorer {
     protected final float[] additionalCorrections;
     private final byte[] scratch;
     private final byte[] packedScratch;
+    private final byte[] e8Scratch;
     /** Dot product for the bit-plane encodings; {@code null} for the packed encodings and D7Q7, which are not bit-planes */
     private final BBQDotProduct dotProduct;
 
@@ -126,9 +131,10 @@ public class ES940OSQVectorsScorer {
         this.bulkSize = bulkSize;
         this.scratch = encoding.bbqEncoding().dataBits() == 7 ? new byte[dimensions] : null;
         this.packedScratch = encoding.bitEncoding == BitEncoding.PACKED ? new byte[length] : null;
+        this.e8Scratch = encoding == QuantEncoding.E8 ? new byte[length * bulkSize] : null;
         this.dotProduct = switch (encoding) {
             case D1Q1, D1Q4, D2Q4_STRIPED, D4Q4_STRIPED -> BBQDotProduct.create(in, dimensions, encoding.bbqEncoding());
-            case D2Q4_PACKED, D4Q4_PACKED, D7Q7 -> null;
+            case D2Q4_PACKED, D4Q4_PACKED, D7Q7, E8 -> null;
         };
     }
 
@@ -161,6 +167,7 @@ public class ES940OSQVectorsScorer {
             case D2Q4_PACKED -> quantized4BitScore2BitIndexPacked(q.bytes());
             case D4Q4_PACKED -> quantized4BitScorePacked(q.bytes());
             case D7Q7 -> quantized7BitScore(q.bytes());
+            case E8 -> throw new UnsupportedOperationException("E8 codes are transposed within a bulk and can only be scored in bulk");
         };
     }
 
@@ -204,6 +211,11 @@ public class ES940OSQVectorsScorer {
      * determined by {@param count} and the results are stored in the provided {@param scores} array.
      */
     public void quantizeScoreBulk(ScoringQuery q, int count, float[] scores) throws IOException {
+        if (encoding == QuantEncoding.E8) {
+            in.readBytes(e8Scratch, 0, length * count);
+            E8Roots.scoreBulk(e8Scratch, 0, q.bytes(), length, count, scores);
+            return;
+        }
         for (int i = 0; i < count; i++) {
             scores[i] = quantizeScore(q);
         }
@@ -217,6 +229,16 @@ public class ES940OSQVectorsScorer {
      * the others are skipped.
      */
     public void quantizeScoreBulkMasked(ScoringQuery q, int mask, float[] scores, int count) throws IOException {
+        if (encoding == QuantEncoding.E8) {
+            // codes are interleaved, scoring the whole bulk is as cheap as skipping
+            quantizeScoreBulk(q, count, scores);
+            for (int i = 0; i < count; i++) {
+                if (BulkMask.isSelected(mask, i) == false) {
+                    scores[i] = 0.0f;
+                }
+            }
+            return;
+        }
         for (int i = 0; i < count; i++) {
             if (BulkMask.isSelected(mask, i)) {
                 scores[i] = quantizeScore(q);

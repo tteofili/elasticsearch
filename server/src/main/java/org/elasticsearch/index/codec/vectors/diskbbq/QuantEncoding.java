@@ -9,6 +9,9 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq;
 
+import org.apache.lucene.index.VectorSimilarityFunction;
+import org.elasticsearch.index.codec.vectors.OptimizedScalarQuantizer;
+import org.elasticsearch.simdvec.E8Roots;
 import org.elasticsearch.simdvec.ESVectorUtil;
 
 public enum QuantEncoding {
@@ -109,6 +112,61 @@ public enum QuantEncoding {
         public void packQuery(int[] quantized, byte[] destination) {
             ESVectorUtil.pack1BitValues(quantized, destination);
         }
+    },
+    /**
+     * Each block of 8 dimensions is coded as the nearest of the 240 roots of the E8 lattice, in one byte (about one bit
+     * per dimension); see {@link E8Roots}. Codes are written transposed within each bulk, and queries are turned into an
+     * int8 lookup table of {@link E8Roots#TABLE_SIZE} entries per block.
+     */
+    E8_ROOTS(6, (byte) 1, (byte) 8) {
+        @Override
+        public void pack(int[] quantized, byte[] destination) {
+            for (int i = 0; i < destination.length; i++) {
+                destination[i] = (byte) quantized[i];
+            }
+        }
+
+        @Override
+        public void packQuery(int[] quantized, byte[] destination) {
+            pack(quantized, destination);
+        }
+
+        @Override
+        public int discretizedDimensions(int dimensions) {
+            return E8Roots.blocks(dimensions) * E8Roots.BLOCK_DIMS;
+        }
+
+        @Override
+        public int getDocPackedLength(int dimensions) {
+            return E8Roots.blocks(dimensions);
+        }
+
+        @Override
+        public int getQueryPackedLength(int dimensions) {
+            return E8Roots.blocks(dimensions) * E8Roots.TABLE_SIZE;
+        }
+
+        @Override
+        public OptimizedScalarQuantizer newQuantizer(VectorSimilarityFunction similarityFunction) {
+            return new E8RootQuantizer(similarityFunction);
+        }
+
+        @Override
+        public OptimizedScalarQuantizer.QuantizationResult quantizeQuery(
+            OptimizedScalarQuantizer quantizer,
+            float[] query,
+            float[] residualScratch,
+            int[] quantizedScratch,
+            float[] centroid,
+            byte[] destination
+        ) {
+            return E8RootQuantizer.quantizeQuery(query, centroid, residualScratch, destination);
+        }
+
+        @Override
+        public boolean transposed() {
+            return true;
+        }
     };
 
     private static void pack4BitValues(int[] quantized, byte[] destination) {
@@ -185,6 +243,39 @@ public enum QuantEncoding {
         // how many bytes do we need to store the quantized vector?
         int totalBits = discretized * queryBits;
         return (totalBits + 7) / 8;
+    }
+
+    /** The quantizer that encodes documents for this encoding. */
+    public OptimizedScalarQuantizer newQuantizer(VectorSimilarityFunction similarityFunction) {
+        return new OptimizedScalarQuantizer(similarityFunction);
+    }
+
+    /** Quantizes a query, centred on {@code centroid}, into {@code destination} ({@link #getQueryPackedLength} bytes). */
+    public OptimizedScalarQuantizer.QuantizationResult quantizeQuery(
+        OptimizedScalarQuantizer quantizer,
+        float[] query,
+        float[] residualScratch,
+        int[] quantizedScratch,
+        float[] centroid,
+        byte[] destination
+    ) {
+        OptimizedScalarQuantizer.QuantizationResult result = quantizer.scalarQuantize(
+            query,
+            residualScratch,
+            quantizedScratch,
+            queryBits,
+            centroid
+        );
+        packQuery(quantizedScratch, destination);
+        return result;
+    }
+
+    /**
+     * Whether document codes are stored transposed within each bulk (block-major), in which case vectors can only be
+     * scored a bulk at a time.
+     */
+    public boolean transposed() {
+        return false;
     }
 
     public static QuantEncoding fromId(int id) {

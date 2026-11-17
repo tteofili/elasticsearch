@@ -46,6 +46,11 @@ public final class Native22ESVectorUtilSupport extends PanamaESVectorUtilSupport
      */
 
     @Override
+    public float e8QueryTable(float[] y, byte[] table) {
+        return SIMDVEC.e8QueryTable(MemorySegment.ofArray(y), MemorySegment.ofArray(table), y.length);
+    }
+
+    @Override
     public float dotProduct(float[] a, float[] b) {
         return SIMDVEC.dotProductF32(MemorySegment.ofArray(a), MemorySegment.ofArray(b), a.length);
     }

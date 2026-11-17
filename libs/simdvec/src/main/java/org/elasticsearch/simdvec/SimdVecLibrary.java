@@ -224,6 +224,45 @@ public abstract class SimdVecLibrary {
         dotProductI7uBulkMasked_raw(dataset, query, length, pitch, mask, count, scores);
     }
 
+    @Function("vec_e8_table")
+    @Critical(fallbackAdapter = Critical.UnsupportedFallback.class)
+    protected abstract float e8QueryTable_raw(
+        @VectorSegment(countParam = "dims", elementBits = Float.SIZE) MemorySegment y,
+        @MatrixSegment(rowsParam = "blocks", colsParam = "tableSize", elementBits = Byte.SIZE) MemorySegment table,
+        int dims,
+        int blocks,
+        int tableSize
+    );
+
+    /**
+     * Builds the int8 query table of {@code y}: {@link E8Roots#TABLE_SIZE} bytes for each of its blocks, see
+     * {@link E8Roots#buildQueryTable}. The entries are computed in fixed point, so they can differ by one from the exact ones.
+     *
+     * @return the scale of the table
+     */
+    public float e8QueryTable(MemorySegment y, MemorySegment table, int dims) {
+        return e8QueryTable_raw(y, table, dims, E8Roots.blocks(dims), E8Roots.TABLE_SIZE);
+    }
+
+    @Function("vec_dote8_bulk")
+    @Critical(fallbackAdapter = Critical.UnsupportedFallback.class)
+    protected abstract void dotProductE8Bulk_raw(
+        @RawAddress @MatrixSegment(rowsParam = "blocks", colsParam = "count", elementBits = Byte.SIZE) MemorySegment codes,
+        @MatrixSegment(rowsParam = "blocks", colsParam = "tableSize", elementBits = Byte.SIZE) MemorySegment table,
+        int blocks,
+        int tableSize,
+        int count,
+        @VectorSegment(countParam = "count", elementBits = Float.SIZE) MemorySegment scores
+    );
+
+    /**
+     * Scores {@code count} documents coded with {@link E8Roots}, whose codes are stored transposed
+     * ({@code codes[block * count + doc]}), against a query lookup table of {@link E8Roots#TABLE_SIZE} bytes per block.
+     */
+    public void dotProductE8Bulk(MemorySegment codes, MemorySegment table, int blocks, int count, MemorySegment scores) {
+        dotProductE8Bulk_raw(codes, table, blocks, E8Roots.TABLE_SIZE, count, scores);
+    }
+
     @Function("vec_doti7u_bulk_sparse")
     @Critical(fallbackAdapter = Critical.UnsupportedFallback.class)
     protected abstract void dotProductI7uBulkSparse_raw(

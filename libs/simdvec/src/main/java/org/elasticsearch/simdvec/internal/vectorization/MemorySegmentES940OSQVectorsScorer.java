@@ -101,6 +101,7 @@ public final class MemorySegmentES940OSQVectorsScorer extends ES940OSQVectorsSco
             case D2Q4_PACKED -> new NativeD2Q4PackedScorer(in, dimensions, dataLength, bulkSize);
             case D4Q4_PACKED -> new NativeD4Q4PackedScorer(in, dimensions, dataLength, bulkSize);
             case D7Q7 -> new NativeD7Q7Scorer(in, dimensions, dataLength, bulkSize);
+            case E8 -> new NativeE8Scorer(in, dimensions, dataLength, bulkSize);
         };
     }
 
@@ -116,6 +117,7 @@ public final class MemorySegmentES940OSQVectorsScorer extends ES940OSQVectorsSco
             case D2Q4_PACKED -> new MemorySegmentScorer(in, dimensions, dataLength, bulkSize);  // no special implementation yet
             case D4Q4_PACKED -> new MemorySegmentScorer(in, dimensions, dataLength, bulkSize);  // no special implementation yet
             case D7Q7 -> new MSD7Q7ES940OSQVectorsScorer(in, dimensions, dataLength, bulkSize);
+            case E8 -> new MSE8ES940OSQVectorsScorer(in, dimensions, dataLength, bulkSize);
         };
     }
 
@@ -261,7 +263,8 @@ public final class MemorySegmentES940OSQVectorsScorer extends ES940OSQVectorsSco
         );
     }
 
-    static sealed class MemorySegmentScorer permits NativeMemorySegmentScorer, StripedES940OSQVectorsScorer, MSD7Q7ES940OSQVectorsScorer {
+    static sealed class MemorySegmentScorer permits NativeMemorySegmentScorer, StripedES940OSQVectorsScorer, MSD7Q7ES940OSQVectorsScorer,
+        MSE8ES940OSQVectorsScorer {
 
         static final float TWO_BIT_SCALE = ES940OSQVectorsScorer.BIT_SCALES[1];
         static final float FOUR_BIT_SCALE = ES940OSQVectorsScorer.BIT_SCALES[3];

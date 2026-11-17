@@ -240,7 +240,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         // write the posting lists
         final PackedLongValues.Builder offsets = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
         final PackedLongValues.Builder lengths = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
-        DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(effectiveQuantEncoding.bits(), BULK_SIZE, postingsOutput, true, true);
+        DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.forEncoding(effectiveQuantEncoding, BULK_SIZE, postingsOutput);
         final QuantizedVectorValues quantizedVectors;
         if (isByte) {
             quantizedVectors = new OnHeapQuantizedByteVectors(
@@ -248,7 +248,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                 fieldInfo.getVectorSimilarityFunction(),
                 effectiveQuantEncoding,
                 fieldInfo.getVectorDimension(),
-                new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction())
+                effectiveQuantEncoding.newQuantizer(fieldInfo.getVectorSimilarityFunction())
             );
         } else {
             quantizedVectors = new OnHeapQuantizedVectors(
@@ -256,7 +256,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                 fieldInfo.getVectorSimilarityFunction(),
                 effectiveQuantEncoding,
                 fieldInfo.getVectorDimension(),
-                new OptimizedScalarQuantizer(fieldInfo.getVectorSimilarityFunction())
+                effectiveQuantEncoding.newQuantizer(fieldInfo.getVectorSimilarityFunction())
             );
         }
         final int[] docIdsScratch = new int[maxPostingListSize];
@@ -352,7 +352,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             )
         ) {
             quantizedVectorsTempName = quantizedVectorsTemp.getName();
-            OptimizedScalarQuantizer quantizer = new OptimizedScalarQuantizer(vectorSimilarityFunction);
+            OptimizedScalarQuantizer quantizer = effectiveQuantEncoding.newQuantizer(vectorSimilarityFunction);
             int[] quantized = new int[effectiveQuantEncoding.discretizedDimensions(fieldInfo.getVectorDimension())];
             byte[] binary = new byte[effectiveQuantEncoding.getDocPackedLength(fieldInfo.getVectorDimension())];
             float[] scratch = new float[fieldInfo.getVectorDimension()];
@@ -487,13 +487,7 @@ public class ESNextDiskBBQVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
                 fieldInfo.getVectorDimension(),
                 vectorCentroidOffsets.build()
             );
-            DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.fromBitSize(
-                effectiveQuantEncoding.bits(),
-                BULK_SIZE,
-                postingsOutput,
-                true,
-                true
-            );
+            DiskBBQBulkWriter bulkWriter = DiskBBQBulkWriter.forEncoding(effectiveQuantEncoding, BULK_SIZE, postingsOutput);
             // write the posting lists
             final int[] docIdsScratch = new int[maxPostingListSize];
             final int[] docDeltas = new int[maxPostingListSize];

@@ -38,6 +38,8 @@ public record BBQEncoding(byte dataBits, byte queryBits) {
     public static final int D2Q4 = (2 << 8) | 4;
     public static final int D4Q4 = (4 << 8) | 4;
     public static final int D7Q7 = (7 << 8) | 7;
+    /** E8 root code: one byte per 8 dimensions (about 1 bit per dimension), queries as int8 lookup tables */
+    public static final int D1Q8 = (1 << 8) | 8;
 
     @Override
     public String toString() {

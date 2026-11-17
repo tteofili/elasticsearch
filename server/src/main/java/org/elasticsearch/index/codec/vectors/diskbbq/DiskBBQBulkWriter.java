@@ -44,6 +44,15 @@ public abstract sealed class DiskBBQBulkWriter {
      * @param out the IndexOutput to write to
      * @return a DiskBBQBulkWriter instance
      */
+    /**
+     * Factory method for the postings of the given encoding, writing tail vectors as a (short) bulk and component sums as ints.
+     */
+    public static DiskBBQBulkWriter forEncoding(QuantEncoding encoding, int bulkSize, IndexOutput out) {
+        return encoding.transposed()
+            ? new TransposedDiskBBQBulkWriter(bulkSize, out)
+            : fromBitSize(encoding.bits(), bulkSize, out, true, true);
+    }
+
     public static DiskBBQBulkWriter fromBitSize(int bitSize, int bulkSize, IndexOutput out) {
         return fromBitSize(bitSize, bulkSize, out, false, false);
     }
@@ -273,6 +282,45 @@ public abstract sealed class DiskBBQBulkWriter {
                 j++;
             }
             writeCorrections(tailCorrections);
+        }
+    }
+
+    /**
+     * Writes each bulk, including the tail, with the codes transposed: byte {@code b} of every vector of the bulk, then
+     * byte {@code b + 1}, and so on, so that a scorer reads the codes of one block for consecutive vectors contiguously.
+     */
+    private static final class TransposedDiskBBQBulkWriter extends SmallBitDiskBBQBulkWriter {
+        private byte[] transposed = new byte[0];
+
+        private TransposedDiskBBQBulkWriter(int bulkSize, IndexOutput out) {
+            super(bulkSize, out, true);
+        }
+
+        @Override
+        public void writeVectors(QuantizedVectorValues qvv, CheckedIntConsumer<IOException> docsWriter) throws IOException {
+            for (int i = 0; i < qvv.count(); i += bulkSize) {
+                final int count = Math.min(bulkSize, qvv.count() - i);
+                if (docsWriter != null) {
+                    docsWriter.accept(i);
+                }
+                final OptimizedScalarQuantizer.QuantizationResult[] bulkCorrections = count == bulkSize
+                    ? corrections
+                    : new OptimizedScalarQuantizer.QuantizationResult[count];
+                int length = 0;
+                for (int j = 0; j < count; j++) {
+                    byte[] qv = qvv.next();
+                    bulkCorrections[j] = qvv.getCorrections();
+                    length = qv.length;
+                    if (transposed.length < length * count) {
+                        transposed = new byte[length * bulkSize];
+                    }
+                    for (int b = 0; b < length; b++) {
+                        transposed[b * count + j] = qv[b];
+                    }
+                }
+                out.writeBytes(transposed, 0, length * count);
+                writeCorrections(bulkCorrections);
+            }
         }
     }
 }

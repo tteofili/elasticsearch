@@ -591,14 +591,14 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                     queryCentroid = globalCentroid;
                 }
 
-                OptimizedScalarQuantizer.QuantizationResult queryCorrections = quantizer.scalarQuantize(
+                OptimizedScalarQuantizer.QuantizationResult queryCorrections = quantEncoding.quantizeQuery(
+                    quantizer,
                     target,
                     scratch,
                     quantizationScratch,
-                    quantEncoding.queryBits(),
-                    queryCentroid
+                    queryCentroid,
+                    quantizedQuery
                 );
-                quantEncoding.packQuery(quantizationScratch, quantizedQuery);
                 currentCentroidOrdinal = nextCentroidOrdinal;
                 result = new QueryQuantizerResult(queryCorrections, new ScoringQuery(quantizedQuery));
                 cache.put(nextCentroidOrdinal, result);
@@ -735,6 +735,8 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
         final DocIdsWriter idsWriter = new DocIdsWriter();
         final VectorSimilarityFunction similarityFunction;
         final long quantizedVectorByteSize;
+        // transposed codes can only be scored a bulk at a time
+        final int minDocsToScoreInBulk;
 
         MemorySegmentPostingsVisitor(
             QueryQuantizer queryQuantizer,
@@ -752,6 +754,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
             this.acceptDocs = acceptDocs;
             quantizedVectorByteSize = quantEncoding.getDocPackedLength(fieldInfo.getVectorDimension());
             quantizedByteLength = quantizedVectorByteSize + (Float.BYTES * 3) + Integer.BYTES;
+            minDocsToScoreInBulk = quantEncoding.transposed() ? 1 : 2;
             osqVectorsScorer = ESVectorUtil.getES940OSQVectorsScorer(
                 indexInput,
                 quantEncoding.queryBits(),
@@ -900,7 +903,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 }
                 queryQuantizer.quantizeQueryIfNecessary();
                 final float maxScore;
-                if (docsToBulkScore == 1) {
+                if (docsToBulkScore < minDocsToScoreInBulk) {
                     maxScore = scoreIndividually(BULK_SIZE);
                 } else if (docsToBulkScore < BULK_SIZE) {
                     maxScore = osqVectorsScorer.scoreBulkMasked(
@@ -943,7 +946,7 @@ public class ESNextDiskBBQVectorsReader extends IVFVectorsReader<ESNextDiskBBQVe
                 } else {
                     queryQuantizer.quantizeQueryIfNecessary();
                     final float maxScore;
-                    if (docsToBulkScore == 1) {
+                    if (docsToBulkScore < minDocsToScoreInBulk) {
                         maxScore = scoreIndividually(tailSize);
                     } else if (docsToBulkScore < tailSize) {
                         maxScore = osqVectorsScorer.scoreBulkMasked(

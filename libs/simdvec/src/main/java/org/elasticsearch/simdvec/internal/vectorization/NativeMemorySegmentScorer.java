@@ -29,7 +29,7 @@ import java.lang.foreign.ValueLayout;
  * the scoring logic (quantize, bulk, corrections) is handled by template methods here.
  */
 abstract sealed class NativeMemorySegmentScorer extends MemorySegmentES940OSQVectorsScorer.MemorySegmentScorer permits
-    NativeD2Q4PackedScorer, NativeD4Q4PackedScorer, NativeD7Q7Scorer {
+    NativeD2Q4PackedScorer, NativeD4Q4PackedScorer, NativeD7Q7Scorer, NativeE8Scorer {
 
     protected static final SimdVecLibrary DISTANCE_FUNCS = SimdVecLibrary.instance().orElseThrow(AssertionError::new);
 
