@@ -105,7 +105,7 @@ public final class ExpectedRecall {
     static double expectedRecallOfK(double[] rankDistances, double errorStd, int windowSize, int k) {
         double mk = rankDistances[k - 1];
         double integral = quadrature(
-            x -> probabilityRankLessThanN(rankDistances, errorStd, windowSize, x) * normalPdf(x, mk, errorStd),
+            x -> probabilityRankLessThanN(rankDistances, errorStd, windowSize, x, k - 1) * normalPdf(x, mk, errorStd),
             mk - 9.0 * errorStd,
             mk + 9.0 * errorStd,
             6
@@ -114,32 +114,42 @@ public final class ExpectedRecall {
     }
 
     /**
-     * Computes the probability that a rank, drawn from a distribution of ranks with added noise,
-     * is lower than the specified rank threshold given a set of rank distances and an error standard deviation.
+     * Computes the probability that the target vector, whose noisy distance is {@code x}, lands within the top
+     * {@code rankThreshold} candidates.
      * <p>
-     * Each rank distance is treated as the mean of a
-     * <a href="https://en.wikipedia.org/wiki/Normal_distribution">Gaussian</a> perturbation; the
-     * corresponding <a href="https://en.wikipedia.org/wiki/Cumulative_distribution_function">cumulative distribution function</a>
-     * values are aggregated, and a second normal CDF maps that aggregate to a rank probability.
+     * Let {@code S(x)} count the <em>other</em> vectors whose noisy distance falls below {@code x}. Each rank
+     * distance is treated as the mean of a
+     * <a href="https://en.wikipedia.org/wiki/Normal_distribution">Gaussian</a> perturbation, so each other vector
+     * contributes an independent Bernoulli term with probability given by its
+     * <a href="https://en.wikipedia.org/wiki/Cumulative_distribution_function">CDF</a> at {@code x}, and {@code S}
+     * is <a href="https://en.wikipedia.org/wiki/Poisson_binomial_distribution">Poisson-binomial</a>. The target
+     * survives when {@code S(x) <= n - 1}. {@code S} is approximated by a normal with the Poisson-binomial mean and
+     * variance, evaluated with the continuity correction at {@code n - 1/2}. The target's own rank is excluded from
+     * the count: it is not a competitor of itself.
      *
      * @param rankDistances an array of rank distances representing the distribution of possible ranks
      * @param errorStd the standard deviation of the error or noise added to the rank distances
-     * @param rankThreshold the rank threshold to compare against
-     * @param x the value at which to calculate the cumulative distribution function for individual ranks
-     * @return the cumulative probability that the rank is lower than the rank threshold
+     * @param rankThreshold the number of candidates retrieved for reranking ({@code n})
+     * @param x the noisy distance of the target vector
+     * @param targetRank the zero-based rank of the target vector, excluded from the count
+     * @return the probability that fewer than {@code rankThreshold} other vectors are closer than {@code x}
      */
-    static double probabilityRankLessThanN(double[] rankDistances, double errorStd, int rankThreshold, double x) {
+    static double probabilityRankLessThanN(double[] rankDistances, double errorStd, int rankThreshold, double x, int targetRank) {
         double mu = 0;
         double variance = 0;
         int limit = Math.min(RERANK_WINDOW_RANK_MULTIPLIER * rankThreshold, rankDistances.length);
         for (int i = 0; i < limit; i++) {
+            if (i == targetRank) {
+                continue;
+            }
             double fx = normalCdf(x, rankDistances[i], errorStd);
             mu += fx;
             // variance of a sum of independent Bernoulli terms.
             variance += fx * (1.0 - fx);
         }
         double stddev = Math.sqrt(Math.max(1e-5, variance)); // avoid divide-by-zero
-        return normalCdf(rankThreshold, mu, stddev);
+        // P(S <= n - 1) for integer-valued S, with the continuity correction
+        return normalCdf(rankThreshold - 0.5, mu, stddev);
     }
 
     /**

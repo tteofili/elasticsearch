@@ -66,11 +66,85 @@ public class ExpectedRecallTests extends ESTestCase {
         double[] rankDistances = { 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8 };
         double errorStd = 0.05;
         double x = 0.45;
-        double p3 = ExpectedRecall.probabilityRankLessThanN(rankDistances, errorStd, 3, x);
-        double p6 = ExpectedRecall.probabilityRankLessThanN(rankDistances, errorStd, 6, x);
+        double p3 = ExpectedRecall.probabilityRankLessThanN(rankDistances, errorStd, 3, x, 4);
+        double p6 = ExpectedRecall.probabilityRankLessThanN(rankDistances, errorStd, 6, x, 4);
         assertThat(p3, greaterThanOrEqualTo(0.0));
         assertThat(p6, greaterThanOrEqualTo(p3));
         assertThat(p6, lessThanOrEqualTo(1.0));
+    }
+
+    /**
+     * With well separated ranks and negligible noise, the target at zero-based rank {@code r} has exactly {@code r}
+     * other vectors closer than it, so it is retrieved in the top {@code n} if and only if {@code r <= n - 1}.
+     */
+    public void testTargetSurvivesExactlyWhenFewerThanNOthersAreCloser() {
+        double[] rankDistances = new double[40];
+        for (int i = 0; i < rankDistances.length; i++) {
+            rankDistances[i] = i + 1.0;
+        }
+        double errorStd = 1e-3;
+        int n = 5;
+        for (int r = 0; r < 10; r++) {
+            double p = ExpectedRecall.probabilityRankLessThanN(rankDistances, errorStd, n, rankDistances[r], r);
+            if (r <= n - 1) {
+                assertThat("rank " + r, p, closeTo(1.0, 1e-6));
+            } else {
+                assertThat("rank " + r, p, closeTo(0.0, 1e-6));
+            }
+        }
+    }
+
+    /**
+     * The target is not a competitor of itself: excluding it must give the same probability as removing its distance.
+     */
+    public void testTargetIsExcludedFromItsOwnCount() {
+        double[] rankDistances = { 0.10, 0.12, 0.15, 0.17, 0.20, 0.21, 0.25, 0.28, 0.30, 0.33 };
+        double[] withoutTarget = { 0.10, 0.12, 0.15, 0.20, 0.21, 0.25, 0.28, 0.30, 0.33 };
+        double errorStd = 0.04;
+        double x = 0.18;
+        double excluded = ExpectedRecall.probabilityRankLessThanN(rankDistances, errorStd, 4, x, 3);
+        double removed = ExpectedRecall.probabilityRankLessThanN(withoutTarget, errorStd, 4, x, -1);
+        assertThat(excluded, closeTo(removed, 1e-12));
+    }
+
+    /**
+     * The continuity-corrected normal approximation tracks the exact Poisson-binomial probability that at most
+     * {@code n - 1} other vectors are closer than the target.
+     */
+    public void testNormalApproximationMatchesExactPoissonBinomial() {
+        double[] rankDistances = rankDistances(VectorSimilarityFunction.EUCLIDEAN, CORPUS_SIZE, ALPHA, INV_DIM, 400);
+        double errorStd = 0.01;
+        int n = 20;
+        int target = 9;
+        double worst = 0;
+        for (int step = -20; step <= 20; step++) {
+            double x = rankDistances[target] + step * 0.25 * errorStd;
+            double approx = ExpectedRecall.probabilityRankLessThanN(rankDistances, errorStd, n, x, target);
+            double exact = exactProbabilityAtMost(rankDistances, errorStd, x, target, n - 1, 20 * n);
+            worst = Math.max(worst, Math.abs(approx - exact));
+        }
+        assertThat(worst, lessThan(0.02));
+    }
+
+    /** Exact {@code P(S <= m)} for the Poisson-binomial count of other ranks below {@code x}, by convolution. */
+    private static double exactProbabilityAtMost(double[] rankDistances, double errorStd, double x, int target, int m, int limit) {
+        double[] pmf = new double[m + 2];
+        pmf[0] = 1.0;
+        for (int i = 0; i < Math.min(limit, rankDistances.length); i++) {
+            if (i == target) {
+                continue;
+            }
+            double p = ExpectedRecall.normalCdf(x, rankDistances[i], errorStd);
+            for (int c = m + 1; c >= 1; c--) {
+                pmf[c] = pmf[c] * (1.0 - p) + pmf[c - 1] * p;
+            }
+            pmf[0] *= 1.0 - p;
+        }
+        double total = 0;
+        for (int c = 0; c <= m; c++) {
+            total += pmf[c];
+        }
+        return total;
     }
 
     public void testExpectedRecallOfKIsBoundedAndMonotoneInRerankDepth() {
