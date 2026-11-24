@@ -14,25 +14,16 @@ import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
-import org.apache.lucene.search.AcceptDocs;
 import org.apache.lucene.store.FilterIndexInput;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.util.Bits;
-import org.apache.lucene.util.LongValues;
-import org.apache.lucene.util.packed.DirectReader;
-import org.apache.lucene.util.packed.DirectWriter;
 import org.elasticsearch.common.CheckedIntFunction;
 import org.elasticsearch.index.codec.vectors.GenericFlatVectorReaders;
 import org.elasticsearch.index.codec.vectors.ash.AshPostingsVisitor;
 import org.elasticsearch.index.codec.vectors.ash.AshProjectionMatrix;
-import org.elasticsearch.index.codec.vectors.cluster.ClusteringVectorValues;
-import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIndexFormat;
-import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIterator;
-import org.elasticsearch.index.codec.vectors.diskbbq.FlatCentroidIndex;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfSegmentConfig;
-import org.elasticsearch.index.codec.vectors.diskbbq.PrefetchingCentroidIterator;
 import org.elasticsearch.lucene.store.MemorySegmentAccessInputAccess;
 import org.elasticsearch.search.vectors.ESAcceptDocs;
 
@@ -44,7 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * ASH-specific implementation of {@link IVFVectorsReader}. Scores posting lists using
  * {@link AshPostingsVisitor} with a precomputed projection matrix ({@link AshProjectionMatrix}).
  */
-public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVectorsReader.ASHFieldEntry> {
+public class ESNextDiskASHVectorsReader extends ESNextIvfVectorsReader<ESNextDiskASHVectorsReader.ASHFieldEntry> {
 
     private final ConcurrentHashMap<String, AshProjectionMatrix> ashMatrixCache;
 
@@ -89,70 +80,8 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
     }
 
     @Override
-    protected int getNumberOfVectors(ASHFieldEntry entry, KnnVectorValues values, IndexInput centroidSlice, ESAcceptDocs esAcceptDocs)
-        throws IOException {
-        int size = values.size();
-        assert esAcceptDocs == null
-            || entry.numSlices >= 0 && esAcceptDocs.sliceOrd() >= 0
-            || entry.numSlices == -1 && esAcceptDocs.sliceOrd() == -1
-            : "slice ordinal [" + esAcceptDocs.sliceOrd() + "] does not match segment slice layout [" + entry.numSlices + "]";
-        if (entry.numSlices > 0) {
-            long fp = centroidSlice.getFilePointer();
-            final int bitsRequired = DirectWriter.bitsRequired(entry.maxSliceSize);
-            final long sizeLookup = DirectWriter.bytesRequired(entry.numSlices, bitsRequired);
-            if (esAcceptDocs != null) {
-                int sliceOrd = esAcceptDocs.sliceOrd();
-                assert sliceOrd < entry.numSlices : "sliceOrd out of range for centroid slices";
-                final LongValues longValues = DirectReader.getInstance(centroidSlice.randomAccessSlice(fp, sizeLookup), bitsRequired);
-                size = (int) longValues.get(sliceOrd);
-            }
-            centroidSlice.seek(fp + sizeLookup);
-        }
-        return size;
-    }
-
-    CentroidIterator getPostingListPrefetchIterator(CentroidIterator centroidIterator, IndexInput postingListSlice) throws IOException {
-        return new PrefetchingCentroidIterator(centroidIterator, postingListSlice);
-    }
-
-    @Override
-    public CentroidIterator getCentroidIterator(
-        FieldInfo fieldInfo,
-        int numCentroids,
-        IndexInput centroids,
-        QueryTarget queryTarget,
-        IndexInput postingListSlice,
-        AcceptDocs acceptDocs,
-        float approximateCost,
-        KnnVectorValues values,
-        float visitRatio
-    ) throws IOException {
-        float[] targetQuery = switch (queryTarget) {
-            case QueryTarget.FloatQuery fq -> fq.vector();
-            case QueryTarget.ByteQuery bq -> {
-                float[] widened = new float[bq.vector().length];
-                for (int i = 0; i < bq.vector().length; i++) {
-                    widened[i] = bq.vector()[i];
-                }
-                yield widened;
-            }
-        };
-        ASHFieldEntry fieldEntry = fields.get(fieldInfo.number);
-        var iterator = switch (fieldEntry.centroidIndexFormat()) {
-            case FLAT -> new FlatCentroidIndex(
-                fieldInfo,
-                fieldEntry,
-                numCentroids,
-                centroids,
-                targetQuery,
-                acceptDocs,
-                approximateCost,
-                values,
-                visitRatio,
-                false // ASH only supports float centroids
-            ).getIterator();
-        };
-        return getPostingListPrefetchIterator(iterator, postingListSlice);
+    protected boolean byteCentroids(ASHFieldEntry entry) {
+        return false; // ASH only supports float centroids
     }
 
     @Override
@@ -256,16 +185,7 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
         ESAcceptDocs acceptDocs
     ) throws IOException {
         ASHFieldEntry entry = fields.get(fieldInfo.number);
-        float[] target = switch (queryTarget) {
-            case QueryTarget.FloatQuery fq -> fq.vector();
-            case QueryTarget.ByteQuery bq -> {
-                float[] widened = new float[bq.vector().length];
-                for (int i = 0; i < bq.vector().length; i++) {
-                    widened[i] = bq.vector()[i];
-                }
-                yield widened;
-            }
-        };
+        float[] target = queryTarget.asFloatVector();
 
         var ashMatrix = getAshProjectionMatrix(fieldInfo);
         int dimension = fieldInfo.getVectorDimension();
@@ -329,76 +249,6 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
         );
     }
 
-    @Override
-    @SuppressWarnings({ "rawtypes", "unchecked" })
-    public CentroidData<?> readCentroidData(String fieldName) throws IOException {
-        FieldInfo fieldInfo = fieldInfos.fieldInfo(fieldName);
-        if (fieldInfo == null) {
-            return null;
-        }
-        ASHFieldEntry entry = fields.get(fieldInfo.number);
-        if (entry == null || entry.numCentroids() == 0) {
-            return null;
-        }
-        int dimension = fieldInfo.getVectorDimension();
-        int numCentroids = entry.numCentroids();
-        final KnnVectorValues vectorValues = getFloatVectorValues(fieldInfo.name);
-        int numVectors = vectorValues != null ? vectorValues.size() : 0;
-        int[] clusterSizes = new int[numCentroids];
-
-        // ASH always uses float centroids
-        long rawCentroidsSize = (long) numCentroids * dimension * Float.BYTES;
-
-        IndexInput centroidsSlice = null;
-        boolean success = false;
-        try (IndexInput centroidSlice = entry.centroidSlice(ivfCentroids); IndexInput postingSlice = entry.postingListSlice(ivfClusters)) {
-            long[] postingOffsets = readPostingListOffsets(centroidSlice, numVectors, numCentroids, dimension, Float.BYTES);
-
-            for (int c = 0; c < numCentroids; c++) {
-                postingSlice.seek(postingOffsets[c] + Integer.BYTES);
-                clusterSizes[c] = postingSlice.readVInt();
-            }
-
-            long centroidsOffset = centroidSlice.length() - rawCentroidsSize;
-            centroidsSlice = centroidSlice.slice("centroids-raw", centroidsOffset, rawCentroidsSize);
-            ClusteringVectorValues centroids = KMeansFloatVectorValues.build(centroidsSlice, null, numCentroids, dimension);
-            CentroidData data = new CentroidData(centroids, clusterSizes, entry.globalCentroid(), centroidsSlice);
-            success = true;
-            return data;
-        } finally {
-            if (success == false && centroidsSlice != null) {
-                centroidsSlice.close();
-            }
-        }
-    }
-
-    private static long[] readPostingListOffsets(
-        IndexInput centroidSlice,
-        int numVectors,
-        int numCentroids,
-        int dimension,
-        int bytesPerComponent
-    ) throws IOException {
-        long[] offsets = new long[numCentroids];
-        int bitsRequired = DirectWriter.bitsRequired(numCentroids);
-        long sizeLookup = DirectWriter.bytesRequired(numVectors, bitsRequired);
-        centroidSlice.seek(sizeLookup);
-        int numParents = centroidSlice.readVInt();
-        long rawCentroidsSize = (long) numCentroids * dimension * bytesPerComponent;
-        long offsetTableEntrySize = numParents == 0 ? 2L * Long.BYTES : 2L * Long.BYTES + Integer.BYTES;
-        long offsetTableStart = centroidSlice.length() - rawCentroidsSize - offsetTableEntrySize * numCentroids;
-
-        centroidSlice.seek(offsetTableStart);
-        for (int i = 0; i < numCentroids; i++) {
-            offsets[i] = centroidSlice.readLong();
-            centroidSlice.readLong();
-            if (numParents > 0) {
-                centroidSlice.readInt();
-            }
-        }
-        return offsets;
-    }
-
     /**
      * Calls {@link #getPostingVisitor} directly for a named float-vector field, bypassing
      * {@link #getNumberOfVectors} and its assertion. Used in tests to exercise the
@@ -424,12 +274,7 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
      * ASH-specific field entry. Extends {@link FieldEntry} with the ASH bits-per-dimension
      * configuration used for document vector encoding.
      */
-    public static class ASHFieldEntry extends FieldEntry {
-        private final CentroidIndexFormat centroidIndexFormat;
-        final long preconditionerOffset;
-        final long preconditionerLength;
-        final int numSlices;
-        final int maxSliceSize;
+    public static class ASHFieldEntry extends IvfFieldEntry {
         private final int ashBitsPerDim;
 
         ASHFieldEntry(
@@ -464,35 +309,18 @@ public class ESNextDiskASHVectorsReader extends IVFVectorsReader<ESNextDiskASHVe
                 postingListLength,
                 globalCentroid,
                 globalCentroidDp,
-                bulkSize
+                centroidIndexFormat,
+                bulkSize,
+                preconditionerOffset,
+                preconditionerLength,
+                numSlices,
+                maxSliceSize
             );
-            this.centroidIndexFormat = centroidIndexFormat;
-            this.preconditionerOffset = preconditionerOffset;
-            this.preconditionerLength = preconditionerLength;
-            this.numSlices = numSlices;
-            this.maxSliceSize = maxSliceSize;
             this.ashBitsPerDim = ashBitsPerDim;
-        }
-
-        public CentroidIndexFormat centroidIndexFormat() {
-            return centroidIndexFormat;
-        }
-
-        public long preconditionerOffset() {
-            return preconditionerOffset;
-        }
-
-        public long preconditionerLength() {
-            return preconditionerLength;
         }
 
         public int ashBitsPerDim() {
             return ashBitsPerDim;
-        }
-
-        @Override
-        public int numSlices() {
-            return numSlices;
         }
     }
 }

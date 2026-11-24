@@ -58,10 +58,25 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
     public sealed interface QueryTarget {
         int dimension();
 
+        /**
+         * The query as floats, for quantizers that work on float residuals. A float query is returned as is, so the
+         * result must not be modified; a byte query is widened into a new array.
+         */
+        float[] asFloatVector();
+
         /** A byte vector query target. */
         record ByteQuery(byte[] vector) implements QueryTarget {
             public int dimension() {
                 return vector.length;
+            }
+
+            @Override
+            public float[] asFloatVector() {
+                float[] widened = new float[vector.length];
+                for (int i = 0; i < vector.length; i++) {
+                    widened[i] = vector[i];
+                }
+                return widened;
             }
         }
 
@@ -69,6 +84,11 @@ public abstract class IVFVectorsReader<E extends IVFVectorsReader.FieldEntry> ex
         record FloatQuery(float[] vector) implements QueryTarget {
             public int dimension() {
                 return vector.length;
+            }
+
+            @Override
+            public float[] asFloatVector() {
+                return vector;
             }
         }
     }

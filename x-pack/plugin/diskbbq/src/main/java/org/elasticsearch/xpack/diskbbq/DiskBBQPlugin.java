@@ -21,8 +21,8 @@ import org.elasticsearch.index.codec.vectors.diskbbq.IvfMergeConfigResolver;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantEncoding;
 import org.elasticsearch.index.codec.vectors.diskbbq.es94.ES940DiskBBQVectorsFormat;
 import org.elasticsearch.index.codec.vectors.diskbbq.es95.ES950DiskBBQVectorsFormat;
-import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskASHVectorsFormat;
 import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.QuantizerSchemes;
 import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
 import org.elasticsearch.index.mapper.vectors.VectorsFormatProvider;
 import org.elasticsearch.license.License;
@@ -91,42 +91,15 @@ public class DiskBBQPlugin extends Plugin implements InternalVectorFormatProvide
                         indexSettings.getSettings()
                     );
                     if (Build.current().isSnapshot() && experimentalFeaturesEnabled) {
-                        if (diskbbq.usesAshFormat()) {
-                            return new ESNextDiskASHVectorsFormat(
-                                diskbbq.ashConfigResolver(),
-                                clusterSize,
-                                ESNextDiskASHVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
+                        return QuantizerSchemes.forField(diskbbq)
+                            .newFormat(
+                                diskbbq,
                                 elementType,
-                                onDiskRescore,
                                 mergingExecutorService,
                                 maxMergingWorkers,
                                 quantizerExecutorService,
-                                flatIndexThreshold,
-                                sliceField,
-                                IvfFlushConfigSource.empty(),
-                                IvfMergeConfigResolver.useCodecDefault(),
-                                onDiskMerge
+                                sliceField
                             );
-                        }
-                        IvfMergeConfigResolver mergeConfigResolver = diskbbq.autoCalibrate()
-                            ? IvfAutoCalibration.mergeConfigResolver(clusterSize, diskbbq.autoCalibrationProfile())
-                            : IvfMergeConfigResolver.useCodecDefault();
-                        return new ESNextDiskBBQVectorsFormat(
-                            QuantEncoding.fromBits((byte) diskbbq.resolve(null).bits()),
-                            clusterSize,
-                            ESNextDiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
-                            elementType,
-                            onDiskRescore,
-                            mergingExecutorService,
-                            maxMergingWorkers,
-                            doPrecondition,
-                            ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
-                            flatIndexThreshold,
-                            sliceField,
-                            IvfFlushConfigSource.empty(),
-                            mergeConfigResolver,
-                            onDiskMerge
-                        );
                     } else if (indexVersionCreated.onOrAfter(IndexVersions.DISK_BBQ_ES950_AUTO_CALIBRATE)) {
                         IvfMergeConfigResolver mergeConfigResolver = diskbbq.autoCalibrate()
                             ? IvfAutoCalibration.mergeConfigResolver(clusterSize, diskbbq.autoCalibrationProfile())

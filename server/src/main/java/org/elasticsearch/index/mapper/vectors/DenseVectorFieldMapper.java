@@ -69,8 +69,7 @@ import org.elasticsearch.index.codec.vectors.diskbbq.IvfSegmentConfig;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantEncoding;
 import org.elasticsearch.index.codec.vectors.diskbbq.es94.ES940DiskBBQVectorsFormat;
 import org.elasticsearch.index.codec.vectors.diskbbq.es95.ES950DiskBBQVectorsFormat;
-import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskASHVectorsFormat;
-import org.elasticsearch.index.codec.vectors.diskbbq.next.ESNextDiskBBQVectorsFormat;
+import org.elasticsearch.index.codec.vectors.diskbbq.next.QuantizerSchemes;
 import org.elasticsearch.index.codec.vectors.es93.ES93BinaryQuantizedVectorsFormat;
 import org.elasticsearch.index.codec.vectors.es93.ES93FlatVectorFormat;
 import org.elasticsearch.index.codec.vectors.es93.ES93HnswBinaryQuantizedVectorsFormat;
@@ -3171,43 +3170,8 @@ public class DenseVectorFieldMapper extends FieldMapper {
                 if (quantizationType == QuantizationType.ASH && !Build.current().isSnapshot()) {
                     throw new IllegalArgumentException("quantization_type 'ash' is only available in snapshot builds");
                 }
-                if (usesAshFormat()) {
-                    return new ESNextDiskASHVectorsFormat(
-                        ashConfigResolver(),
-                        clusterSize,
-                        ESNextDiskASHVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
-                        elementType,
-                        onDiskRescore,
-                        mergingExecutorService,
-                        numMergeWorkers,
-                        quantizerExecutorService,
-                        flatIndexThreshold,
-                        sliceField,
-                        IvfFlushConfigSource.empty(),
-                        IvfMergeConfigResolver.useCodecDefault(),
-                        onDiskMerge
-                    );
-                } else {
-                    IvfMergeConfigResolver mergeConfigResolver = autoCalibrate()
-                        ? IvfAutoCalibration.mergeConfigResolver(clusterSize, autoCalibrationProfile())
-                        : IvfMergeConfigResolver.useCodecDefault();
-                    return new ESNextDiskBBQVectorsFormat(
-                        QuantEncoding.fromBits((byte) resolve(null).bits()),
-                        clusterSize,
-                        ESNextDiskBBQVectorsFormat.DEFAULT_CENTROIDS_PER_PARENT_CLUSTER,
-                        elementType,
-                        onDiskRescore,
-                        mergingExecutorService,
-                        numMergeWorkers,
-                        doPrecondition,
-                        ESNextDiskBBQVectorsFormat.DEFAULT_PRECONDITIONING_BLOCK_DIMENSION,
-                        flatIndexThreshold,
-                        sliceField,
-                        IvfFlushConfigSource.empty(),
-                        mergeConfigResolver,
-                        onDiskMerge
-                    );
-                }
+                return QuantizerSchemes.forField(this)
+                    .newFormat(this, elementType, mergingExecutorService, numMergeWorkers, quantizerExecutorService, sliceField);
             } else if (indexVersionCreated.onOrAfter(IndexVersions.DISK_BBQ_ES950_AUTO_CALIBRATE)) {
                 IvfMergeConfigResolver mergeConfigResolver = autoCalibrate()
                     ? IvfAutoCalibration.mergeConfigResolver(clusterSize, autoCalibrationProfile())

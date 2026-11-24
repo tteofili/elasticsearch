@@ -9,8 +9,6 @@
 
 package org.elasticsearch.index.codec.vectors.diskbbq.next;
 
-import org.apache.lucene.codecs.DocValuesConsumer;
-import org.apache.lucene.codecs.DocValuesProducer;
 import org.apache.lucene.codecs.KnnVectorsReader;
 import org.apache.lucene.codecs.hnsw.FlatVectorsWriter;
 import org.apache.lucene.codecs.perfield.PerFieldKnnVectorsFormat;
@@ -20,13 +18,11 @@ import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.MergeState;
-import org.apache.lucene.index.OrdinalMap;
 import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.TaskExecutor;
-import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.elasticsearch.core.SuppressForbidden;
 import org.elasticsearch.core.WelfordVariance;
@@ -39,17 +35,12 @@ import org.elasticsearch.index.codec.vectors.cluster.ClusteringVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.HierarchicalKMeans;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansFloatVectorValues;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansNeighbors;
-import org.elasticsearch.index.codec.vectors.cluster.KMeansResult;
 import org.elasticsearch.index.codec.vectors.cluster.KMeansWithOverspill;
 import org.elasticsearch.index.codec.vectors.diskbbq.AshConfigResolver;
-import org.elasticsearch.index.codec.vectors.diskbbq.CentroidAssignments;
-import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIndex;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidIndexFormat;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidInformation;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSlices;
 import org.elasticsearch.index.codec.vectors.diskbbq.CentroidSupplier;
-import org.elasticsearch.index.codec.vectors.diskbbq.FlatCentroidClusters;
-import org.elasticsearch.index.codec.vectors.diskbbq.FlatCentroidIndexWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfFlushConfigSource;
@@ -71,17 +62,10 @@ import java.util.List;
  * writing to {@link AshPostingsListWriter} and stores the learned projection matrix in the
  * preconditioner slot of the centroid file.
  */
-public class ESNextDiskASHVectorsWriter extends IVFVectorsWriter<FlatCentroidIndexWriter.CentroidGroups> {
+public class ESNextDiskASHVectorsWriter extends ESNextIvfVectorsWriter {
     private static final Logger logger = LogManager.getLogger(ESNextDiskASHVectorsWriter.class);
 
-    private final int vectorPerCluster;
-    private final int centroidsPerParentCluster;
-    private final TaskExecutor mergeExec;
-    private final int numMergeWorkers;
     private final TaskExecutor quantizerExec;
-    private final String sliceField;
-    private final IvfFlushConfigSource flushConfigSource;
-    private final IvfMergeConfigResolver mergeConfigResolver;
     private final AshConfigResolver ashConfigResolver;
 
     // Temporary storage for ASH projection matrix between buildAndWritePostingsLists and writePreconditioner
@@ -114,19 +98,18 @@ public class ESNextDiskASHVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
             ESNextDiskASHVectorsFormat.IVF_META_EXTENSION,
             ESNextDiskASHVectorsFormat.CENTROID_EXTENSION,
             ESNextDiskASHVectorsFormat.CLUSTER_EXTENSION,
-            true,
             flatVectorThreshold,
             onDiskMerge,
-            true
+            CentroidIndexFormat.FLAT,
+            vectorPerCluster,
+            centroidsPerParentCluster,
+            mergeExec,
+            numMergeWorkers,
+            sliceField,
+            flushConfigSource,
+            mergeConfigResolver
         );
-        this.vectorPerCluster = vectorPerCluster;
-        this.centroidsPerParentCluster = centroidsPerParentCluster;
-        this.mergeExec = mergeExec;
-        this.numMergeWorkers = numMergeWorkers;
         this.quantizerExec = quantizerExec;
-        this.sliceField = sliceField;
-        this.flushConfigSource = flushConfigSource != null ? flushConfigSource : IvfFlushConfigSource.empty();
-        this.mergeConfigResolver = mergeConfigResolver != null ? mergeConfigResolver : IvfMergeConfigResolver.useCodecDefault();
         this.ashConfigResolver = ashConfigResolver;
     }
 
@@ -354,148 +337,17 @@ public class ESNextDiskASHVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
     }
 
     @Override
-    protected void doWriteMeta(
-        IndexOutput metaOutput,
-        FieldInfo field,
-        int numCentroids,
-        long preconditionerOffset,
-        long preconditionerLength,
-        int numberOfSlices,
-        int maxSliceSize,
-        IvfSegmentConfig ivfSegmentConfig,
-        boolean byteCentroids
-    ) throws IOException {
+    protected void writeSchemeMetaHead(IndexOutput metaOutput, IvfSegmentConfig ivfSegmentConfig) throws IOException {
         metaOutput.writeInt(ES940OSQVectorsScorer.BULK_SIZE);
         metaOutput.writeInt(CentroidIndexFormat.FLAT.id());
-        metaOutput.writeLong(preconditionerLength);
-        if (preconditionerLength > 0) {
-            metaOutput.writeLong(preconditionerOffset);
-        }
-        if (sliceField == null) {
-            assert numberOfSlices == 0;
-            metaOutput.writeInt(-1);
-        } else {
-            metaOutput.writeInt(numberOfSlices);
-            if (numberOfSlices > 0) {
-                metaOutput.writeVInt(maxSliceSize);
-            }
-        }
+    }
+
+    @Override
+    protected void writeSchemeMetaTail(IndexOutput metaOutput, FieldInfo field, IvfSegmentConfig ivfSegmentConfig, boolean byteCentroids)
+        throws IOException {
         // ASH-specific: bits per dimension — use the writer's own config rather than the segment
         // config, because the segment config may be IvfSegmentConfig.NONE for unsupported byte fields.
         metaOutput.writeVInt(ashConfig(field).bitsPerDim());
-    }
-
-    @Override
-    protected FlatCentroidIndexWriter.CentroidGroups writeCentroidIndex(
-        CentroidSupplier centroidSupplier,
-        int[] centroidAssignments,
-        IndexOutput centroidOutput
-    ) throws IOException {
-        return FlatCentroidIndexWriter.writeCentroidIndex(centroidSupplier, centroidAssignments, centroidOutput);
-    }
-
-    @Override
-    protected void writeCentroidData(
-        FieldInfo fieldInfo,
-        CentroidSupplier centroidSupplier,
-        float[] globalCentroid,
-        CentroidOffsetAndLength centroidOffsetAndLength,
-        FlatCentroidIndexWriter.CentroidGroups centroidGroups,
-        IndexOutput centroidOutput
-    ) throws IOException {
-        FlatCentroidIndexWriter.writeCentroidData(
-            fieldInfo,
-            centroidSupplier,
-            globalCentroid,
-            centroidOffsetAndLength,
-            centroidGroups,
-            centroidOutput
-        );
-    }
-
-    @Override
-    public CentroidSupplier createCentroidSupplier(IndexInput centroidsInput, CentroidAssignments centroidAssignments, FieldInfo fieldInfo)
-        throws IOException {
-        int numCentroids = centroidAssignments.numCentroids();
-        float[] globalCentroid = centroidAssignments.globalCentroid();
-        CentroidSlices centroidSlices = centroidAssignments.centroidSlices();
-
-        CentroidSupplier centroidSupplier = new OffHeapCentroidSupplier(
-            centroidsInput,
-            numCentroids,
-            fieldInfo,
-            KMeansResult.singleCluster(globalCentroid, numCentroids),
-            centroidSlices
-        );
-        if (centroidSupplier.size() > centroidsPerParentCluster * centroidsPerParentCluster) {
-            ClusteringFloatVectorValues floatVectorValues = centroidSupplier.asKmeansFloatVectorValues();
-            if (centroidSlices == null) {
-                KMeansResult<float[]> centroidClusters = buildSecondLevelClusters(fieldInfo, floatVectorValues, true);
-                return new OffHeapCentroidSupplier(centroidsInput, numCentroids, fieldInfo, centroidClusters, null);
-            } else {
-                List<KMeansResult<float[]>> centroidClusters = new ArrayList<>(centroidSlices.sliceOffsets().length);
-                int start = 0;
-                for (int i = 0; i < centroidSlices.sliceOffsets().length; i++) {
-                    final int offset = start;
-                    start = centroidSlices.sliceOffsets()[i];
-                    int count = start - offset;
-                    ClusteringFloatVectorValues slice = new ClusteringFloatVectorValuesSlice(floatVectorValues, j -> offset + j, count);
-                    KMeansResult<float[]> result = buildSecondLevelClusters(fieldInfo, slice, true);
-                    centroidClusters.add(result);
-                    if (i == 0) {
-                        centroidSlices.sliceOffsets()[i] = result.centroids().length;
-                    } else {
-                        centroidSlices.sliceOffsets()[i] = centroidSlices.sliceOffsets()[i - 1] + result.centroids().length;
-                    }
-                }
-                KMeansResult<float[]> result = KMeansResult.merge(centroidClusters, CentroidOps.FLOAT);
-                assert CentroidSlices.assertSliceOffsets(centroidSlices.sliceOffsets(), result.centroids().length);
-                return new OffHeapCentroidSupplier(centroidsInput, numCentroids, fieldInfo, result, centroidSlices);
-            }
-        }
-        return centroidSupplier;
-    }
-
-    @Override
-    public CentroidSupplier createCentroidSupplier(FieldInfo info, float[][] centroids, float[] globalCentroid) throws IOException {
-        CentroidSupplier centroidSupplier = CentroidSupplier.fromArray(
-            centroids,
-            new FlatCentroidClusters(KMeansResult.singleCluster(globalCentroid, centroids.length)),
-            info.getVectorDimension()
-        );
-        if (centroidSupplier.size() > centroidsPerParentCluster * centroidsPerParentCluster) {
-            KMeansResult<float[]> centroidClusters = buildSecondLevelClusters(info, centroidSupplier.asKmeansFloatVectorValues(), false);
-            return CentroidSupplier.fromArray(centroids, new FlatCentroidClusters(centroidClusters), info.getVectorDimension());
-        }
-        return centroidSupplier;
-    }
-
-    private KMeansResult<float[]> buildSecondLevelClusters(
-        FieldInfo fieldInfo,
-        ClusteringFloatVectorValues floatVectorValues,
-        boolean isMerge
-    ) throws IOException {
-        HierarchicalKMeans<float[]> hierarchicalKMeans;
-        if (isMerge && mergeExec != null) {
-            hierarchicalKMeans = HierarchicalKMeans.ofConcurrent(
-                CentroidOps.FLOAT,
-                fieldInfo.getVectorDimension(),
-                mergeExec,
-                numMergeWorkers,
-                HierarchicalKMeans.MAX_ITERATIONS_DEFAULT,
-                HierarchicalKMeans.SAMPLES_PER_CLUSTER_DEFAULT,
-                HierarchicalKMeans.MAXK
-            );
-        } else {
-            hierarchicalKMeans = HierarchicalKMeans.ofSerial(
-                CentroidOps.FLOAT,
-                fieldInfo.getVectorDimension(),
-                HierarchicalKMeans.MAX_ITERATIONS_DEFAULT,
-                HierarchicalKMeans.SAMPLES_PER_CLUSTER_DEFAULT,
-                HierarchicalKMeans.MAXK
-            );
-        }
-        return hierarchicalKMeans.cluster(floatVectorValues, centroidsPerParentCluster).result();
     }
 
     @Override
@@ -730,105 +582,4 @@ public class ESNextDiskASHVectorsWriter extends IVFVectorsWriter<FlatCentroidInd
         );
     }
 
-    // Off-heap centroid supplier — duplicated from BBQ writer for now.
-    static class OffHeapCentroidSupplier implements CentroidSupplier {
-        private final IndexInput centroidsInput;
-        private final int numCentroids;
-        private final int dimension;
-        private final float[] scratch;
-        private final KMeansResult<float[]> clusters;
-        private final CentroidSlices centroidSlices;
-        private int currOrd = -1;
-
-        OffHeapCentroidSupplier(
-            IndexInput centroidsInput,
-            int numCentroids,
-            FieldInfo info,
-            KMeansResult<float[]> clusters,
-            CentroidSlices centroidSlices
-        ) {
-            this.centroidsInput = centroidsInput;
-            this.numCentroids = numCentroids;
-            this.dimension = info.getVectorDimension();
-            this.scratch = new float[dimension];
-            this.clusters = clusters;
-            this.centroidSlices = centroidSlices;
-        }
-
-        @Override
-        public int size() {
-            return numCentroids;
-        }
-
-        @Override
-        public float[] centroid(int centroidOrdinal) throws IOException {
-            if (centroidOrdinal != currOrd) {
-                centroidsInput.seek((long) centroidOrdinal * dimension * Float.BYTES);
-                centroidsInput.readFloats(scratch, 0, dimension);
-                currOrd = centroidOrdinal;
-            }
-            return scratch;
-        }
-
-        @Override
-        public byte[] byteCentroid(int centroidOrdinal) throws IOException {
-            return null;
-        }
-
-        @Override
-        public CentroidIndex centroidIndex() {
-            return new FlatCentroidClusters(clusters);
-        }
-
-        @Override
-        public CentroidSlices slices() throws IOException {
-            return centroidSlices;
-        }
-
-        @Override
-        public KMeansFloatVectorValues asKmeansFloatVectorValues() throws IOException {
-            return KMeansFloatVectorValues.build(centroidsInput, null, numCentroids, dimension);
-        }
-    }
-
-    // Helper class to access merged sorted doc values for sliced indices
-    private static class DocValueConsumerHelper extends DocValuesConsumer {
-
-        static final DocValueConsumerHelper INSTANCE = new DocValueConsumerHelper();
-
-        public SortedDocValues getMergeSortedField(FieldInfo fieldInfo, final MergeState mergeState) throws IOException {
-            final OrdinalMap map = createOrdinalMapForSortedDV(fieldInfo, mergeState);
-            return getMergedSortedSetDocValues(fieldInfo, mergeState, map);
-        }
-
-        @Override
-        public void addNumericField(FieldInfo field, DocValuesProducer valuesProducer) {
-            throw new AssertionError("Method should not be called");
-        }
-
-        @Override
-        public void addBinaryField(FieldInfo field, DocValuesProducer valuesProducer) {
-            throw new AssertionError("Method should not be called");
-        }
-
-        @Override
-        public void addSortedField(FieldInfo field, DocValuesProducer valuesProducer) {
-            throw new AssertionError("Method should not be called");
-        }
-
-        @Override
-        public void addSortedNumericField(FieldInfo field, DocValuesProducer valuesProducer) {
-            throw new AssertionError("Method should not be called");
-        }
-
-        @Override
-        public void addSortedSetField(FieldInfo field, DocValuesProducer valuesProducer) {
-            throw new AssertionError("Method should not be called");
-        }
-
-        @Override
-        public void close() {
-            throw new AssertionError("Method should not be called");
-        }
-    }
 }

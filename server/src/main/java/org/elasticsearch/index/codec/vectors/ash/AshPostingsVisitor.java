@@ -19,11 +19,10 @@ import org.apache.lucene.util.VectorUtil;
 import org.elasticsearch.common.CheckedIntFunction;
 import org.elasticsearch.index.codec.vectors.diskbbq.DocIdsWriter;
 import org.elasticsearch.index.codec.vectors.diskbbq.IVFVectorsReader;
+import org.elasticsearch.index.codec.vectors.diskbbq.PostingBlocks;
 import org.elasticsearch.index.codec.vectors.diskbbq.PostingMetadata;
 import org.elasticsearch.index.codec.vectors.diskbbq.SlicedBlockRange;
-import org.elasticsearch.search.vectors.BulkKnnCollector;
 import org.elasticsearch.simdvec.AshScorer;
-import org.elasticsearch.simdvec.BulkMask;
 import org.elasticsearch.simdvec.ESVectorUtil;
 import org.elasticsearch.simdvec.ScoringQuery;
 
@@ -493,54 +492,16 @@ public class AshPostingsVisitor<T> implements IVFVectorsReader.PostingVisitor {
 
     // package-private so SlicedAshPostingsVisitor can override
     void readDocIds(int count) throws IOException {
-        idsWriter.readInts(indexInput, count, docEncoding, docIdsScratch);
-        for (int j = 0; j < count; j++) {
-            docBase += docIdsScratch[j];
-            docIdsScratch[j] = docBase;
-        }
+        docBase = PostingBlocks.readDocIds(indexInput, idsWriter, docEncoding, docIdsScratch, count, docBase);
     }
 
     // package-private so SlicedAshPostingsVisitor can override
     int filterAcceptedDocsMask(int bulkSize) {
-        assert bulkSize <= Integer.SIZE
-            : "bulk size "
-                + bulkSize
-                + " exceeds the mask width; split the block into Integer.SIZE-sized parts and call scoreBulkMasked once per part";
-        if (acceptDocs == null) {
-            return BulkMask.all(bulkSize);
-        }
-        int mask = 0;
-        for (int ii = 0; ii < bulkSize; ii++) {
-            if (docIdsScratch[ii] == -1 || acceptDocs.get(docIdsScratch[ii]) == false) {
-                docIdsScratch[ii] = -1;
-            } else {
-                mask = BulkMask.select(mask, ii);
-            }
-        }
-        return mask;
+        return PostingBlocks.acceptedMask(docIdsScratch, acceptDocs, bulkSize);
     }
 
     private void collectBulk(KnnCollector knnCollector, int bulkSize, int mask, int docsToScore, float maxScore) {
-        if (knnCollector instanceof BulkKnnCollector bulkCollector) {
-            if (docsToScore == bulkSize) {
-                bulkCollector.bulkCollect(docIdsScratch, scores, bulkSize, maxScore);
-                return;
-            }
-            int ii = 0;
-            for (int m = mask; m != 0; m = BulkMask.deselectFirst(m), ii++) {
-                int offset = BulkMask.first(m);
-                docIdsScratch[ii] = docIdsScratch[offset];
-                scores[ii] = scores[offset];
-            }
-            bulkCollector.bulkCollect(docIdsScratch, scores, docsToScore, maxScore);
-            return;
-        }
-        for (int ii = 0; ii < bulkSize; ii++) {
-            final int doc = docIdsScratch[ii];
-            if (doc != -1) {
-                knnCollector.collect(doc, scores[ii]);
-            }
-        }
+        PostingBlocks.collectBulk(knnCollector, docIdsScratch, scores, bulkSize, mask, docsToScore, maxScore);
     }
 
     /**
@@ -596,29 +557,14 @@ public class AshPostingsVisitor<T> implements IVFVectorsReader.PostingVisitor {
         void readDocIds(int count) {
             // No doc IDs on disk -- the sliced flush writer omits them.
             // Translate ordinals to doc IDs and filter by the slice range.
-            for (int j = 0; j < count; j++) {
-                int doc = vectorValues.ordToDoc(docBase++);
-                docIdsScratch[j] = (doc >= startDocId && doc < endDocId) ? doc : -1;
-            }
+            docBase = PostingBlocks.readSlicedDocIds(vectorValues, startDocId, endDocId, docIdsScratch, count, docBase);
         }
 
         @Override
         int filterAcceptedDocsMask(int bulkSize) {
-            assert bulkSize <= Integer.SIZE
-                : "bulk size "
-                    + bulkSize
-                    + " exceeds the mask width; split the block into Integer.SIZE-sized parts and call scoreBulkMasked once per part";
             // Combined slice range filtering (already applied in readDocIds via -1 sentinel)
             // plus acceptDocs filtering.
-            int mask = 0;
-            for (int i = 0; i < bulkSize; i++) {
-                if (docIdsScratch[i] == -1 || (acceptDocs != null && acceptDocs.get(docIdsScratch[i]) == false)) {
-                    docIdsScratch[i] = -1;
-                } else {
-                    mask = BulkMask.select(mask, i);
-                }
-            }
-            return mask;
+            return PostingBlocks.slicedAcceptedMask(docIdsScratch, acceptDocs, bulkSize);
         }
     }
 }
