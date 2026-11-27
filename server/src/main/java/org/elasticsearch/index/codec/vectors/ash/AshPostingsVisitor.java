@@ -87,21 +87,13 @@ public class AshPostingsVisitor<T> implements IVFVectorsReader.PostingVisitor {
     private static QuantizedQuery quantizeQuery(float[] queryTransformed, int nDims, int queryBitsPerDim, int bitsPerDim) {
         // TODO: combine with ESVectorUtil.ashPack & panamize somehow
         int planeBytes = (nDims + 7) >>> 3;
-        int numQueryLevels = 1 << queryBitsPerDim;
-
-        float qMin = Float.MAX_VALUE, qMax = -Float.MAX_VALUE;
-        for (int j = 0; j < nDims; j++) {
-            qMin = Math.min(qMin, queryTransformed[j]);
-            qMax = Math.max(qMax, queryTransformed[j]);
-        }
-        float range = qMax - qMin;
-        float qScale = range > 0 ? (numQueryLevels - 1) / range : 1.0f;
-        float invQScale = range > 0 ? range / (numQueryLevels - 1) : 0f;
 
         int[] rounded = new int[nDims];
+        AshQueryEncoder.Grid grid = AshQueryEncoder.quantizeToLevels(queryTransformed, nDims, queryBitsPerDim, rounded);
+        float qMin = grid.min();
+        float invQScale = grid.inverse();
         int unsignedSum = 0;
         for (int j = 0; j < nDims; j++) {
-            rounded[j] = Math.clamp(Math.round((queryTransformed[j] - qMin) * qScale), 0, numQueryLevels - 1);
             unsignedSum += rounded[j];
         }
 

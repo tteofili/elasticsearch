@@ -11,16 +11,22 @@ package org.elasticsearch.index.codec.vectors.diskbbq.next;
 
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.index.codec.vectors.ash.AshDistortionRateQuantizer;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfAutoCalibration;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfFlushConfigSource;
 import org.elasticsearch.index.codec.vectors.diskbbq.IvfMergeConfigResolver;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantEncoding;
 import org.elasticsearch.index.codec.vectors.diskbbq.QuantizerScheme;
+import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.ClusteredSample;
+import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.DistortionRateQuantizer;
+import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.OsqDistortionRateQuantizer;
 import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
 import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper.BBQIVFIndexOptions;
 import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper.ElementType;
 
+import java.io.IOException;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -72,6 +78,20 @@ public final class QuantizerSchemes {
                 options.isOnDiskMerge()
             );
         }
+
+        @Override
+        public DistortionRateQuantizer distortionRateQuantizer(
+            BBQIVFIndexOptions options,
+            int dimension,
+            @Nullable ClusteredSample sample,
+            long seed
+        ) {
+            return OsqDistortionRateQuantizer.forIndex(
+                dimension,
+                QuantEncoding.fromBits((byte) options.resolve(dimension).bits()),
+                options.doPrecondition()
+            );
+        }
     };
 
     /** Asymmetric hashing, written by {@link ESNextDiskASHVectorsFormat}. */
@@ -110,6 +130,17 @@ public final class QuantizerSchemes {
                 IvfMergeConfigResolver.useCodecDefault(),
                 options.isOnDiskMerge()
             );
+        }
+
+        @Override
+        public DistortionRateQuantizer distortionRateQuantizer(
+            BBQIVFIndexOptions options,
+            int dimension,
+            @Nullable ClusteredSample sample,
+            long seed
+        ) throws IOException {
+            Objects.requireNonNull(sample, "ASH learns its projection from a sample of the corpus");
+            return AshDistortionRateQuantizer.train(options.ashConfigResolver().resolve(dimension), sample, seed);
         }
     };
 

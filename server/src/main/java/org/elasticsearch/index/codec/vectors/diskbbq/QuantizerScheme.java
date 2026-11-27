@@ -11,8 +11,11 @@ package org.elasticsearch.index.codec.vectors.diskbbq;
 
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.elasticsearch.core.Nullable;
+import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.ClusteredSample;
+import org.elasticsearch.index.codec.vectors.diskbbq.calibrate.DistortionRateQuantizer;
 import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
 
+import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -48,4 +51,20 @@ public interface QuantizerScheme {
         @Nullable ExecutorService quantizerExecutorService,
         @Nullable String sliceField
     );
+
+    /**
+     * The quantizer of a field with these options, seen through the distortion-rate law, so that its codebook, its
+     * rotation and the recall it gives can be characterized without encoding a corpus.
+     *
+     * @param dimension the dimension of the field
+     * @param sample a clustered sample of the corpus, which quantizers that learn from the data need (ASH learns its
+     *               projection from it) and the others ignore, so it may be {@code null} for those
+     * @param seed seeds whatever randomness the quantizer is learned with, for the quantizers that have any
+     */
+    DistortionRateQuantizer distortionRateQuantizer(
+        DenseVectorFieldMapper.BBQIVFIndexOptions options,
+        int dimension,
+        @Nullable ClusteredSample sample,
+        long seed
+    ) throws IOException;
 }

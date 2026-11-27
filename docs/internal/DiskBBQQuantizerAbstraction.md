@@ -145,3 +145,97 @@ Decided:
 
 Open:
 * Cost model (`diskbbq-cost-model` worktree): lanes and code bytes per vector come from `CostProfile`.
+
+## 7. Generic encoders and decoders
+
+Goal: code that is written once for every scheme (laying out and writing blocks, characterizing a quantizer, a reference
+scorer, calibration) sees an *encoder* and a *decoder*, and never OSQ, ASH or the scheme to come.
+
+### 7.1 Feasibility: shown, for the encode and decode halves
+
+Both schemes already reduce to the same two halves, and a prototype exists that runs through them:
+
+* **Encode.** A block of vectors that share a posting-list centroid becomes, per vector, a code (one level per latent
+  coordinate for OSQ and ASH) and a handful of numbers. OSQ gets it from `OptimizedScalarQuantizer.scalarQuantize` (one
+  vector at a time), ASH from `AsymmetricHashingQuantizer.BlockEncoder` (a block projected with one matrix multiply, float
+  or int8 as the segment writer does).
+* **Decode.** The reconstruction is affine, `lower + scale * level`, in both: OSQ with `lower = lowerInterval` and
+  `scale = (upper - lower) / (2^b - 1)`, ASH with `scale` and `lower = -scale * (2^b - 1) / 2` (its codes are centered).
+  A codebook that is not a grid (E8) supplies its own decoder.
+
+Prototype, in the worktree (`diskbbq/quantize`, `ash/AshDocEncoder`, `diskbbq/calibrate/EncoderDistortionRateQuantizer`):
+
+| piece | role |
+|---|---|
+| `DocEncoder` | block-shaped: `reset(centroid)`, `add(vector)`, `encode()`, `read(i, levels, lanes)`, `latent(i, out)` |
+| `DocLanes` | what is stored beside a code, in the same terms for every scheme: `scale`, `lower`, `sum`, `offset` |
+| `DocDecoder` / `AffineDocDecoder` | `(levels, lanes) -> latent reconstruction` |
+| `OsqDocEncoder`, `AshDocEncoder` | adapters over the quantizers segment writers already use |
+| `EncoderDistortionRateQuantizer` | a `DistortionRateQuantizer` whose `reconstruct` is *encode, decode, compare*, for any encoder |
+
+Evidence: before the swap, the generic reconstruction was compared with the two hand-written ones on 600 residuals each
+(OSQ at 1, 2 and 4 bits, lambda 0.1 and 1.0, with and without rotation; ASH at 1, 2 and 4 bits; including zero-norm
+residuals): agreement to 1e-4. Both `OsqDistortionRateQuantizer` and `AshDistortionRateQuantizer` now extend the generic
+class and lost their private copies, so what is characterized is what an encoder writes and cannot drift from it. The
+recall estimator still agrees with measured recall as before (0.83 / 0.33 points of mean absolute error at eta 1 / 3, rotated
+configurations), the format gate is unchanged (36/36 digests, 608 files identical) and `DocEncoderTests` runs the same
+contract checks (levels in range, `sum` lane, decoding close to the direction, blocks reusable) against both schemes through
+the interface alone, 30 iterations.
+
+### 7.2 The layers
+
+```
+LatentProjection      D -> d            OSQ: identity (+ the Preconditioner outside the codec); ASH: learned W; E8: identity
+DocEncoder            block of vectors  -> code symbols + DocLanes           (scheme specific; writers use it)
+DocDecoder            code + lanes      -> latent reconstruction             (affine for OSQ/ASH; codebook lookup for E8)
+QueryEncoder          query             -> PreparedQuery.forPostingList(c)   (OSQ: quantize q - c; ASH: project + quantize once)
+ScoreKernel           PreparedQuery x block of codes -> scores               (native/Panama; stays scheme specific)
+DistortionRateQuantizer   = LatentProjection + DocEncoder + DocDecoder + QueryEncoder, for the law (characterization)
+```
+
+What is generic and what stays with the scheme:
+
+| Concern | Generic | Scheme specific |
+|---|---|---|
+| characterize a quantizer, estimate recall, isotropy check | yes (`EncoderDistortionRateQuantizer`, `RecallEstimator`) | encoder, decoder, projection |
+| reference scorer (test oracle for kernels) | yes: score = `<q_latent, decode(code)> + <q, mu>` | none |
+| block iteration, doc-id and mask handling | yes (`PostingBlocks`, already shared) | none |
+| packing levels into bytes, on-disk block layout | the *framework* of a layout writer | the layout (`DiskBBQBulkWriter` bit-planes for OSQ, `ashPack` for ASH) |
+| per-vector corrections on disk | none | native lanes: OSQ `(lower, upper, additional, sum)`, ASH `(scale, offset, sum, vecCentroidDot, vecCentroidSqDist)` |
+| bulk scoring | the interface | the SIMD/native kernel |
+
+Three things that look generic and are not, and are therefore deliberately *outside* the encoder interface:
+
+1. **On-disk lanes are not `DocLanes`.** `DocLanes.scale` is derived (`(upper - lower) / (2^b - 1)` for OSQ), so rebuilding
+   OSQ's stored `upper` from it can differ by an ulp, and the bytes would change. Writers keep writing each scheme's native
+   corrections, from the scheme's own encoder; `DocLanes` is the canonical view for generic readers of an encoder.
+2. **Packing and layout depend on the format, not on the scheme.** The encoder returns levels; a layout writer packs them. ASH
+   packs from centered float codes today; levels map to them exactly (`code = level - (2^b - 1)/2`), to be proven by a test
+   before the packers are shared.
+3. **Kernels are the performance boundary** and stay as they are.
+
+### 7.3 Plan
+
+Gate on every step, as in section 5: (a) `compare.sh` (bytes identical), (b) identical top-k and scores, (c) no regression in
+indexing, merge and search time (interleaved A/B, one benchmark at a time), (d) golden-score tests unchanged.
+
+| # | Step | Status and what was learned |
+|---|---|---|
+| 0 | `DocEncoder`/`DocDecoder`/`DocLanes`, OSQ and ASH adapters, generic `reconstruct`, scheme contract tests | **Done.** Gate (a), (d); recall estimator numbers unchanged |
+| 1 | Writers quantize through one place | **Done for OSQ.** `OsqVectorQuantizer` (`diskbbq/quantize`) is the single-vector, copy-free form of `OsqDocEncoder`: quantize against the list centroid and fix up the additional correction against the parent centroid, float and byte. It replaces the four copies in `ESNextDiskBBQVectorsWriter` (merge temp file loop, its overspill loop, `OnHeapQuantizedVectors`, `OnHeapQuantizedByteVectors`). Bytes identical (36/36 digests, 608 files). Timing of the exact code that changed, old inline sequence vs the extracted method, alternated on the same vectors (dim 768, 20k vectors, 41 reps, Euclidean and dot product, 1 and 4 bits, with and without a parent centroid): ratio new/old 0.976 to 1.0006, no regression. **Deliberately not done for ASH:** its list writer already uses the production `BlockEncoder` and needs its float codes for packing; going through the generic interface would only add a conversion per vector. `AshDocEncoder` serves the generic consumers |
+| 2 | Packing and native lanes behind the encoder | **Done, and simpler than planned.** `ashPack` already rounds codes to levels and then packs the levels, so levels-to-bytes costs nothing for either scheme: `DocEncoder.pack` and `nativeLanes` return what the writers write, tested byte for byte against the OSQ writer's sequence (1, 2, 4 and 7 bits, padded dimensions, both similarities) and the ASH list writer's (`BlockEncoder` + `ashPack`, all five lanes). New public `ESVectorUtil.ashPackLevels`, with a test that pins `ashPack == ashPackLevels(levels)` |
+| 3 | Query side behind `QueryEncoder`/`PreparedQuery` | **Done.** `OsqQueryEncoder` is the reader's `QueryQuantizer` extracted unchanged (LRU of 16, lazy `reset`/`quantizeQueryIfNecessary`, one-iteration quantizer); the reader constructs it. `AshQueryEncoder` shares the min-max grid arithmetic with `AshPostingsVisitor.quantizeQuery`. `queryError` of every `EncoderDistortionRateQuantizer` is now derived from `exactLatent`/`servedLatent` of the real query encoder instead of two hand-written copies (which used a different number of OSQ iterations than serving does). Search results identical (gate covers top-k and score bits) |
+| 4 | Reference scorer | **Done, but not the one planned.** The decoder alone cannot reproduce a kernel: a score also needs each vector's own correction and per-list query scalars with scheme-defined meaning. So the canonical form of section 3 became code: `ScoreLanes` (from `DocEncoder.scoreLanes`), `QueryScalars` and `rawDot` (from `PreparedQuery`), and one `CanonicalScorer`. It reproduces the real `ES940OSQVectorsScorer.applyCorrectionsIndividually` (1, 2, 4 bits, dot product and Euclidean) and the verbatim ASH visitor formulas (2, 4 bits, both similarities, float and integer query) on codes made by the generic encoders; 30 iterations, no failures. The scalar oracle for kernels now exists; wiring each native/Panama kernel test to it is the follow-up |
+| 5 | Port E8 as the third scheme | **Not possible in this worktree**: the E8 PoC lives in another worktree. `codeLength()` and a non-affine decoder are in the interface for it; this step is where that is proven |
+| 6 | Optional, format-changing: canonical lanes and one layout for every scheme; ASH onto the fused fold | Not started; outside the byte-identity gate |
+
+Risks and open points:
+
+* Step 1 touches the hot loop of indexing. The extracted method was timed against the code it replaced (no regression, see
+  the table), which covers the changed code and not a whole index or merge: the strict bar still asks for the interleaved
+  A/B of indexing and merge time on real datasets before this is merged, which needs the disk and the exclusive machine.
+* ASH's int8 projection (`bits <= MAX_INT8_PROJECTION_BITS`) means the latent the encoder keeps carries int8 rounding; the
+  characterization sees what the writer sees, which is intended, but a scheme comparison at equal bits mixes that in.
+* `codeLength()` and the decoder are enough for E8 on paper; step 5 is where that is proven rather than argued.
+* Two float lanes of an encoder compared across runs can differ by an ulp (Vector API reductions sum in another order once
+  C2-compiled), so tests that compare an encoder with a reference quantization compare codes exactly and floats to a few ulps.

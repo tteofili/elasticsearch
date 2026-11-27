@@ -45,6 +45,26 @@ public class ESVectorUtilTests extends BaseVectorizationTests {
     // only a few methods have a native version - use this when required
     static final ESVectorizationProvider nativeProvider = BaseVectorizationTests.nativeProvider();
 
+    public void testAshPackOfCodesIsAshPackLevelsOfTheirLevels() {
+        for (int bitsPerDim : new int[] { 1, 2, 3, 4, 8 }) {
+            int nDims = randomIntBetween(1, 300);
+            int numLevels = 1 << bitsPerDim;
+            float center = (numLevels - 1) / 2.0f;
+            int[] levels = new int[nDims];
+            float[] codes = new float[nDims];
+            for (int i = 0; i < nDims; i++) {
+                levels[i] = randomIntBetween(0, numLevels - 1);
+                // the centered codes that ASH quantizes to, which are the levels shifted to be symmetric around zero
+                codes[i] = levels[i] - center;
+            }
+            assertArrayEquals(
+                "bitsPerDim=" + bitsPerDim + " nDims=" + nDims,
+                ESVectorUtil.ashPackLevels(levels, bitsPerDim),
+                ESVectorUtil.ashPack(codes, bitsPerDim)
+            );
+        }
+    }
+
     public void testMaxSimDotProductFloatDefaultEqualsPanama() {
         int dims = randomIntBetween(1, 512);
         int numDocVectors = randomIntBetween(1, 256);

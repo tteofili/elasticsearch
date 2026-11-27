@@ -1370,7 +1370,6 @@ public class ESVectorUtil {
      */
     public static byte[] ashPack(float[] codes, int bitsPerDim) {
         int nDims = codes.length;
-        int planeBytes = (nDims + 7) >>> 3;
         int numLevels = 1 << bitsPerDim;
         float offset = (numLevels - 1) / 2.0f;
 
@@ -1378,18 +1377,31 @@ public class ESVectorUtil {
         for (int i = 0; i < nDims; i++) {
             rounded[i] = Math.clamp(Math.round(codes[i] + offset), 0, numLevels - 1);
         }
+        return ashPackLevels(rounded, bitsPerDim);
+    }
+
+    /**
+     * Packs the levels of a vector, one in {@code [0, 2^bitsPerDim)} for each coordinate, in the bit-plane layout of
+     * {@link #ashPack}, which is what {@code ashPack} does once it has rounded its codes to levels.
+     *
+     * @param levels the level of each coordinate
+     * @return packed bytes in bit-plane layout
+     */
+    public static byte[] ashPackLevels(int[] levels, int bitsPerDim) {
+        int nDims = levels.length;
+        int planeBytes = (nDims + 7) >>> 3;
 
         byte[] packed = new byte[bitsPerDim * planeBytes];
         switch (bitsPerDim) {
-            case 1 -> pack1BitValues(rounded, packed);
-            case 2 -> stride2BitValues(rounded, packed);
-            case 4 -> stride4BitValues(rounded, packed);
+            case 1 -> pack1BitValues(levels, packed);
+            case 2 -> stride2BitValues(levels, packed);
+            case 4 -> stride4BitValues(levels, packed);
             case 3, 8 -> {
                 for (int j = 0; j < nDims; j++) {
                     int byteIdx = j >>> 3;
                     int bitIdx = 7 - (j & 7);
                     for (int p = 0; p < bitsPerDim; p++) {
-                        if ((rounded[j] & (1 << p)) != 0) {
+                        if ((levels[j] & (1 << p)) != 0) {
                             packed[p * planeBytes + byteIdx] |= (byte) (1 << bitIdx);
                         }
                     }
